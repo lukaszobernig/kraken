@@ -20,6 +20,7 @@ def Effects.All (post : MachineState → Prop) : Effects → Prop
   | .require_read_access _ _ cont => (cont ()).All post
   | .require_write_access _ _ cont => (cont ()).All post
   | .require_exec_access _ cont => (cont ()).All post
+  | .unaligned_sp _ => False
 
 inductive Eventually {State : Type} (trans : State → Post → Prop) (post : Post) : Post
   | done (initial: State):
