@@ -97,4 +97,16 @@ example (bs₁ bs₂ : List UInt8) (addr₁ addr₂ : BitVec 64) (R : Mem 64 →
     (Eq ((bs₂, addr₂).fst.At addr₂) ⋆ R) m := by
   ecancel
 
+example (bs : List UInt8) (a : BitVec 64) (R : Mem 64 → Prop) (m : Mem 64)
+    (h_nonempty : 1 ≤ bs.length) (h_bound : bs.length ≤ 2 ^ 64)
+    (h : (Eq (bs.At a) ⋆ R) m) :
+    (Eq ((bs.drop 1).At (a + 1#64)) ⋆ Eq ((bs.take 1).At a) ⋆ R) m := by
+  ecancel
+
+example (bs : List UInt8) (a : BitVec 64) (R : Mem 64 → Prop) (m : Mem 64)
+    (h_nonempty : 1 ≤ bs.length) (h_bound : bs.length ≤ 2 ^ 64)
+    (h : (Eq ((bs.drop 1).At (a + 1#64)) ⋆ Eq ((bs.take 1).At a) ⋆ R) m) :
+    (Eq (bs.At a) ⋆ R) m := by
+  ecancel
+
 end Kraken.SeparationTests

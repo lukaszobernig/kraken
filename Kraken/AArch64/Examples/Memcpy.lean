@@ -96,8 +96,6 @@ theorem memcpy_correct [layout : Layout] [Layout.Valid memcpy] (s₀ : MachineDa
       apply Eventually.done
       exact Or.inl ⟨by kaddr memcpy, h_x0, h_x30, h_sp, h_cs, by ecancel⟩
     · kprologue memcpy at "loop" to "done" with s
-      rw [Mem.At_take_drop_sep dst_bs 1 X3.toBitVec (by omega) (by grind),
-          Mem.At_take_drop_sep src_bs 1 X1.toBitVec (by omega) (by grind)] at h_mem_v
       sym => kstep; tactic =>
       apply Eventually.done
       refine Or.inr ⟨v - 1, (X3.toBitVec + 1#64, X1.toBitVec + 1#64, dst_bs.drop 1, src_bs.drop 1,
@@ -106,10 +104,7 @@ theorem memcpy_correct [layout : Layout] [Layout.Valid memcpy] (s₀ : MachineDa
          by simp [h_dst_v], by simp [h_src_v], by ecancel⟩,
         by omega, ?_⟩
       rintro t_s ⟨hQ_pc, hQ_x0, hQ_x30, hQ_sp, hQ_cs, hQ_mem⟩
-      refine ⟨hQ_pc, hQ_x0, hQ_x30, hQ_sp, hQ_cs, ?_⟩
-      rw [Mem.At_take_drop_sep src_bs 1 X3.toBitVec (by omega) (by grind),
-          Mem.At_take_drop_sep src_bs 1 X1.toBitVec (by omega) (by grind)]
-      ecancel
+      exact ⟨hQ_pc, hQ_x0, hQ_x30, hQ_sp, hQ_cs, by ecancel⟩
   · rintro ⟨st, pc⟩ ⟨rfl, h_x0, h_x30, h_sp, h_cs, h_mem_q⟩
     kprologue memcpy at "done" with st
     sym => kstep; tactic =>
