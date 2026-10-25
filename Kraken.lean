@@ -9,10 +9,9 @@ Compatible with Lean 4.22.0+.
 For experimental features (SymM tactics), see kraken-experimental/.
 -/
 
+public import Kraken.SeparationMem
 public import Kraken.Tactics
 import Kraken.X64.Examples.Examples
 public import Kraken.X64.OmniSemantics
 public import Kraken.X64.Parser
 public import Kraken.X64.Semantics
-public import Kraken.X64.Sep
-public import Kraken.X64.WP

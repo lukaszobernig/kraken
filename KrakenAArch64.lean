@@ -10,5 +10,5 @@ import Kraken.AArch64.Examples.Examples
 public import Kraken.AArch64.OmniSemantics
 public import Kraken.AArch64.Parser
 public import Kraken.AArch64.Semantics
-public import Kraken.AArch64.Sep
+public import Kraken.SeparationMem
 public import Kraken.Tactics
