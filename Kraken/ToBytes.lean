@@ -358,22 +358,22 @@ theorem BitVec.toBytes_ofBytes_eq (w n : Nat) (h_wn : w = 8 * n)
     Int.toBytes n (BitVec.ofInt w (Int.ofBytes bs)).toInt = bs := by
   rw [BitVec.toBytes_ofBytes w n h_wn bs (by omega), List.take_of_length_le (by omega)]
 
-@[simp]
+@[simp, grind =]
 theorem BitVec.toBytes_ofBytes_8 (bs : List UInt8) (h : 1 ≤ bs.length) :
     Int.toBytes 1 (BitVec.ofInt 8 (Int.ofBytes bs)).toInt = bs.take 1 :=
   BitVec.toBytes_ofBytes 8 1 rfl bs h
 
-@[simp]
+@[simp, grind =]
 theorem BitVec.toBytes_ofBytes_16 (bs : List UInt8) (h : 2 ≤ bs.length) :
     Int.toBytes 2 (BitVec.ofInt 16 (Int.ofBytes bs)).toInt = bs.take 2 :=
   BitVec.toBytes_ofBytes 16 2 rfl bs h
 
-@[simp]
+@[simp, grind =]
 theorem BitVec.toBytes_ofBytes_32 (bs : List UInt8) (h : 4 ≤ bs.length) :
     Int.toBytes 4 (BitVec.ofInt 32 (Int.ofBytes bs)).toInt = bs.take 4 :=
   BitVec.toBytes_ofBytes 32 4 rfl bs h
 
-@[simp]
+@[simp, grind =]
 theorem BitVec.toBytes_ofBytes_64 (bs : List UInt8) (h : 8 ≤ bs.length) :
     Int.toBytes 8 (BitVec.ofInt 64 (Int.ofBytes bs)).toInt = bs.take 8 :=
   BitVec.toBytes_ofBytes 64 8 rfl bs h

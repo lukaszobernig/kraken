@@ -27,6 +27,11 @@ theorem Int64.add_sub_cancel' (a b : Int64) : a + (b - a) = b := by
 attribute [grind =]
   BitVec.ofInt_natCast
   Int.natCast_shiftLeft
+  List.length_take
+  List.length_drop
+  List.take_of_length_le
+  List.take_replicate
+  List.drop_replicate
 
 attribute [ksimp]
   Int64.ofBitVec_toBitVec
@@ -80,8 +85,22 @@ open Lean Meta Elab Tactic Kraken
 
 /-- Discharge program address and label offset equalities for program(s) `ps`. -/
 elab "kaddr" ps:ident+ : tactic => withMainContext do
-  evalTactic (← `(tactic| (try rfl)))
-  if (← getGoals).isEmpty then return
+  let solved ← withReducible do
+    try (← getMainGoal).refl; pure true catch _ => pure false
+  if solved then return
+  evalTactic (← `(tactic| (try simp only [Kraken.Executable.addrOf_zero, Kraken.Executable.startAddr_apply, Kraken.Layout.start_shift])))
+  if (← getUnsolvedGoals).isEmpty then return
+  let goal ← getMainGoal
+  let cleanGoal ← goal.withContext do
+    let mut toClear : Array FVarId := #[]
+    for localDecl? in (← getLCtx).decls do
+      if let some localDecl := localDecl? then
+        if localDecl.hasValue ||
+           localDecl.type.getAppFn.isConstOf ``Std.ExtHashMap.sep ||
+           localDecl.type.isAppOf ``Std.ExtHashMap then
+          toClear := toClear.push localDecl.fvarId
+    goal.tryClearMany toClear
+  replaceMainGoal [cleanGoal]
   let target ← instantiateMVars (← getMainTarget)
   let extraDeclsRef ← IO.mkRef (#[] : Array Ident)
   target.forEach fun e => do
@@ -98,7 +117,7 @@ elab "kaddr" ps:ident+ : tactic => withMainContext do
                 Kraken.Executable.sizeBefore, Kraken.Executable.withAddresses,
                 Executable.labels, Kraken.Executable.labels, Kraken.Executable.label,
                 Labels.label, ArchDirective.label?,
-                List.mapIdx, List.mapIdx.go]);
+                List.mapIdx_cons, List.mapIdx_nil, Int64.ofNat_add, Int64.add_assoc]);
      (try grind))))
 
 private partial def extractDirectiveListElems (e : Expr) : MetaM (Array Expr) := do
@@ -195,7 +214,9 @@ elab_rules : tactic
                arg 2
                rw [Kraken.Executable.program_apply]
                (try delta $p)
-               simp [List.mapIdx, List.mapIdx.go])))
+               simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
+                          List.drop_succ_cons, List.drop_zero, List.drop_nil,
+                          List.take_succ_cons, List.take_zero, List.take_nil])))
         | none, some n =>
           evalTactic (← `(tactic|
             (refine step1_cps_slice 0 $n _ (by kaddr $p) ?_
@@ -203,7 +224,9 @@ elab_rules : tactic
                arg 2
                rw [Kraken.Executable.program_apply]
                (try delta $p)
-               simp [List.mapIdx, List.mapIdx.go])))
+               simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
+                          List.drop_succ_cons, List.drop_zero, List.drop_nil,
+                          List.take_succ_cons, List.take_zero, List.take_nil])))
         | some k, none =>
           evalTactic (← `(tactic|
             (refine step1_cps_at $k _ (by kaddr $p) ?_
@@ -211,17 +234,24 @@ elab_rules : tactic
                arg 2
                rw [Kraken.Executable.program_apply]
                (try delta $p)
-               simp [List.mapIdx, List.mapIdx.go])))
+               simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
+                          List.drop_succ_cons, List.drop_zero, List.drop_nil])))
         | none, none =>
           let isEventually := (← whnfR (← getMainTarget)).getAppFn.constName? == some ``Eventually
           if isEventually then
             evalTactic (← `(tactic|
               (apply step1_cps
+               (try
+                 conv =>
+                   arg 1
+                   ext
+                   arg 2
+                   simp)
                conv =>
                  arg 2
                  (try delta $p)
                  rw [Executable.directivesFromStart]
-                 simp [List.mapIdx, List.mapIdx.go])))
+                 simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil])))
           else
             evalTactic (← `(tactic|
               ((try unfold Kraken.Executable.Exec)
@@ -230,7 +260,8 @@ elab_rules : tactic
                  (try rw [Kraken.Executable.program_apply])
                  (try delta $p)
                  (try rw [Executable.directivesFromStart])
-                 simp [Kraken.Layout.apply, List.mapIdx, List.mapIdx.go])))
+                 simp only [Kraken.Layout.apply, Kraken.Executable.startAddr_apply,
+                            List.mapIdx_cons, List.mapIdx_nil])))
       | some s =>
         let env ← getEnv
         let state ← Term.elabTerm s none
@@ -300,7 +331,9 @@ elab_rules : tactic
                arg 2
                rw [Kraken.Executable.program_apply]
                (try delta $p)
-               simp [List.mapIdx, List.mapIdx.go])))
+               simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
+                          List.drop_succ_cons, List.drop_zero, List.drop_nil,
+                          List.take_succ_cons, List.take_zero, List.take_nil])))
         | none, some n =>
           evalTactic (← `(tactic|
             (refine step1_cps_slice 0 $n _ (s := $s) (by kaddr $p) ?_
@@ -312,7 +345,9 @@ elab_rules : tactic
                arg 2
                rw [Kraken.Executable.program_apply]
                (try delta $p)
-               simp [List.mapIdx, List.mapIdx.go])))
+               simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
+                          List.drop_succ_cons, List.drop_zero, List.drop_nil,
+                          List.take_succ_cons, List.take_zero, List.take_nil])))
         | some k, none =>
           evalTactic (← `(tactic|
             (refine step1_cps_at $k _ (s := $s) (by kaddr $p) ?_
@@ -324,7 +359,8 @@ elab_rules : tactic
                arg 2
                rw [Kraken.Executable.program_apply]
                (try delta $p)
-               simp [List.mapIdx, List.mapIdx.go])))
+               simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
+                          List.drop_succ_cons, List.drop_zero, List.drop_nil])))
         | none, none =>
           let isEventually := (← whnfR (← getMainTarget)).getAppFn.constName? == some ``Eventually
           if isEventually then
@@ -334,9 +370,17 @@ elab_rules : tactic
                change (Kraken.Effects.All _ (@Directives.interp _ _ _ (Kraken.Executable.labels _) _ ss _ _))
                obtain $statePat:rcasesPat := $s
                (try dsimp only at *)
-               (try delta $p)
-               rw [Executable.directivesFromStart]
-               simp [List.mapIdx, List.mapIdx.go])))
+               (try
+                 conv =>
+                   arg 1
+                   ext
+                   arg 2
+                   simp)
+               conv =>
+                 arg 2
+                 (try delta $p)
+                 rw [Executable.directivesFromStart]
+                 simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil])))
           else
             evalTactic (← `(tactic|
               ((try unfold Kraken.Executable.Exec)
@@ -349,7 +393,8 @@ elab_rules : tactic
                  (try rw [Kraken.Executable.program_apply])
                  (try delta $p)
                  (try rw [Executable.directivesFromStart])
-                 simp [Kraken.Layout.apply, List.mapIdx, List.mapIdx.go])))
+                 simp only [Kraken.Layout.apply, Kraken.Executable.startAddr_apply,
+                            List.mapIdx_cons, List.mapIdx_nil])))
 
 --------------------------------------------------------------------------------
 
@@ -489,6 +534,7 @@ declare_term_config_elab elabKStepConfig KStepConfig
 syntax (name := symKStep) "kstep" optConfig (ppSpace num)? : grind
 
 def kdsimpMatch: DSimproc := fun e => do
+  if e.hasLooseBVars then return .rfl
   if e.isAppOfArity ``ite 5 then
     let c := e.getArg! 1
     if !c.hasFVar && !c.hasLooseBVars then
@@ -518,6 +564,7 @@ def kbeta: DSimproc := fun e => do
     return .rfl
 
 def kdsimpProj : DSimproc := fun e => do
+  if e.hasLooseBVars then return .rfl
   let f := e.getAppFn
   let .const declName _ := f | return .rfl
   let some projInfo ← getProjectionFnInfo? declName | return .rfl
@@ -526,7 +573,7 @@ def kdsimpProj : DSimproc := fun e => do
     | none   => return .rfl
     | some e =>
       match (← reduceProj? e.getAppFn) with
-      | some f => return .step (← shareCommon (mkAppN f e.getAppArgs))
+      | some f => return .step (← share (mkAppN f e.getAppArgs))
       | none   => return .rfl
   if projInfo.fromClass then
     unless e.getAppNumArgs > projInfo.numParams do
@@ -621,6 +668,8 @@ partial def evalSymKStep : Grind.GrindTactic :=
   let declsForDSimp := (kstepExtension.getState env).toList
   let maxInstrCount ← maxSteps?.mapM (IO.mkRef ·)
   let kdsimpDecls := kdeltaBetaOnly declsForDSimp maxInstrCount
+  let dsimpCore := evalGround >> kdsimpDecls >> kdsimpMatch >> kdsimpProj >> kbeta
+  let dsimpPre := if ← isTracingEnabledFor `Kraken.kstep then klog >> dsimpCore else dsimpCore
 
   -- https://lean-lang.org/doc/api/Lean/Meta/Sym/Simp/SimpM.html
   -- note the "contextual ite handling" --> are we doing this?
@@ -636,6 +685,10 @@ partial def evalSymKStep : Grind.GrindTactic :=
 
   -- TODO: remove once we have lift_lets
   let introsIf (goal: Grind.Goal): Grind.GrindTacticM Grind.Goal := do
+    let goalT ← goal.mvarId.getType
+    let_expr gimmickId inner := goalT | return goal
+    let inner := inner.consumeMData
+    unless inner.isLet || inner.isForall do return goal
     let goal ← removeGimmick goal
     let goal ← match ← Grind.liftGrindM (goal.intros #[]) with
       | Grind.IntrosResult.failed => pure goal
@@ -649,8 +702,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
       let mvarId ← goal.mvarId.replaceTargetDefEq (← Grind.liftGrindM $
         Sym.dsimp
           (config := { maxSteps := 1000000 })
-          (methods := {
-            pre := klog >> evalGround >> kdsimpDecls >> kdsimpMatch >> kdsimpProj >> kbeta })
+          (methods := { pre := dsimpPre })
           (← goal.mvarId.getType))
       introsIf ({ goal with mvarId })
 
@@ -714,25 +766,25 @@ partial def evalSymKStep : Grind.GrindTactic :=
     let (keepGoingSpec, goal) ←
       match specMatches with
       | #[ thmName ] =>
-        logInfo m!"Found a spec lemma: {thmName}"
+        trace[Kraken.kstep] "Found a spec lemma: {thmName}"
         let (goal, subGoals) ← rwTarget goal false (mkConst thmName)
-        logInfo m!"{subGoals.length} subgoals generated"
+        trace[Kraken.kstep] "{subGoals.length} subgoals generated"
 
         -- Found a spec lemma, which will generate subgoals; subgoals (if not solved
         -- already!) are solved via ecancel, ksimp, exact, refl, or grind.
         let solveIfNotAlready: Grind.Goal → Grind.GrindTacticM Bool := fun subGoal => do
           -- Already solved this subgoal; skip
           if ← subGoal.mvarId.isAssigned then
-            let t ← subGoal.mvarId.getType
-            logInfo m!"Already solved: {t}"
             return false
 
           let t ← instantiateMVars (← subGoal.mvarId.getType)
+          unless ← subGoal.mvarId.withContext (isProp t) do
+            return false
 
           -- Try ecancel on separation-logic goals
           if t.getAppFn.isConstOf ``Std.ExtHashMap.sep then
             if ← Kraken.Tactic.ecancelGoal subGoal.mvarId then
-              logInfo m!"Solved by ecancel: {t}"
+              trace[Kraken.kstep] "Solved by ecancel: {t}"
               return true
 
           -- Try simp with @[ksimp]
@@ -743,14 +795,14 @@ partial def evalSymKStep : Grind.GrindTactic :=
             | .goal mvarId => pure { subGoal with mvarId }
             | .closed => pure subGoal
           if ← subGoal.mvarId.isAssigned then
-            logInfo m!"Solved by ksimp: {t}"
+            trace[Kraken.kstep] "Solved by ksimp: {t}"
             return true
 
           -- Solvable with exact; we made progress
           if ← withReducible subGoal.mvarId.assumptionCore then
             let t ← subGoal.mvarId.getType
             let .some e ← getExprMVarAssignment? subGoal.mvarId | throwError "oh noes"
-            logInfo m!"Solved by exact: {t} by {e}"
+            trace[Kraken.kstep] "Solved by exact: {t} by {e}"
             return true
 
           let clearSepAndLets (mvarId : MVarId) : MetaM MVarId := mvarId.withContext do
@@ -768,7 +820,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             -- Solvable with refl, maybe.
             try
               subGoal.mvarId.refl
-              logInfo m!"Solved by refl: {t}"
+              trace[Kraken.kstep] "Solved by refl: {t}"
               return true
             catch _ => pure ()
 
@@ -781,10 +833,10 @@ partial def evalSymKStep : Grind.GrindTactic :=
               let g ← Grind.liftGrindM g.internalizeAll
               match ← Grind.liftGrindM g.grind with
               | .closed =>
-                  logInfo m!"Solved by grind: {t}"
+                  trace[Kraken.kstep] "Solved by grind: {t}"
                   return true
               | .failed _ =>
-                  logInfo m!"NOT solved by grind: {t}"
+                  trace[Kraken.kstep] "NOT solved by grind: {t}"
                   saved.restore
                   return false
             catch _ =>
@@ -798,7 +850,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
         let starGoal ← subGoals.findM? (fun (g : Grind.Goal) => do
           let t ← instantiateMVars (← g.mvarId.getType)
           if t.getAppFn.isConstOf ``Std.ExtHashMap.sep then
-            logInfo m!"Found sep goal: {t}"
+            trace[Kraken.kstep] "Found sep goal: {t}"
             return true
           else
             return false
@@ -817,15 +869,15 @@ partial def evalSymKStep : Grind.GrindTactic :=
               let addrGoalType ← instantiateMVars (← addrGoal.mvarId.getType)
               let addr := addrGoalType.appFn!.appArg!
               let addrMVar := addrGoalType.appArg!
-              let candidates ← Kraken.Tactic.candidateAddrsForSepGoal g.mvarId
-              let tryAssignAndCancel (cand : Expr) (hEq : Expr) : Grind.GrindTacticM Bool := do
+              let candidates ← Kraken.Tactic.findSepAtCandidates g.mvarId
+              let tryAssignAndCancel (cand : Kraken.Tactic.SepAtCandidate) (hEq : Expr) : Grind.GrindTacticM Bool := do
                 withConfig (fun c => { c with assignSyntheticOpaque := true }) do
-                  unless ← isDefEq addrMVar cand do return false
+                  unless ← isDefEq addrMVar cand.addr do return false
                   addrGoal.mvarId.assign hEq
-                  Kraken.Tactic.ecancelGoal g.mvarId
-              let simplifyAddrEq (cand : Expr) : Grind.GrindTacticM (Expr × Grind.Goal) :=
+                  Kraken.Tactic.solveSepAtCandidate g.mvarId cand
+              let simplifyAddrEq (candAddr : Expr) : Grind.GrindTacticM (Expr × Grind.Goal) :=
                 addrGoal.mvarId.withContext do
-                  let eqType ← mkEq addr cand
+                  let eqType ← mkEq addr candAddr
                   let eqMVar ← mkFreshExprSyntheticOpaqueMVar eqType
                   let eqType' ← expandLets eqType
                   let eqType' ← Grind.liftSymM (Sym.preprocessExpr eqType')
@@ -848,7 +900,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
                 unless solvedSep do
                   let saved ← Grind.saveState
                   try
-                    if ← addrGoal.mvarId.withContext (withReducible (isDefEq addr cand)) then
+                    if ← addrGoal.mvarId.withContext (withReducible (isDefEq addr cand.addr)) then
                       let hEq ← addrGoal.mvarId.withContext (mkEqRefl addr)
                       if ← tryAssignAndCancel cand hEq then
                         solvedSep := true
@@ -864,7 +916,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
                   unless solvedSep do
                     let saved ← Grind.saveState
                     try
-                      let (eqMVar, eqGoal) ← simplifyAddrEq cand
+                      let (eqMVar, eqGoal) ← simplifyAddrEq cand.addr
                       if !(← eqGoal.mvarId.isAssigned) then
                         eqGoal.mvarId.withContext do
                           let eqT ← instantiateMVars (← eqGoal.mvarId.getType)
@@ -889,7 +941,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
                   unless solvedSep do
                     let saved ← Grind.saveState
                     try
-                      let (eqMVar, eqGoal) ← simplifyAddrEq cand
+                      let (eqMVar, eqGoal) ← simplifyAddrEq cand.addr
                       unless ← eqGoal.mvarId.isAssigned do
                         let cleanMVarId ← eqGoal.mvarId.withContext do
                           let mut toClear : Array FVarId := #[]
@@ -918,8 +970,10 @@ partial def evalSymKStep : Grind.GrindTactic :=
           if not solved then
             return (goal, subGoals)
 
-        -- Then, we repeatedly visit subgoals until we make no progress.
-        while ← (
+        -- Then, we repeatedly visit subgoals until all are solved or we make no progress.
+        while ← (do
+          if ← subGoals.allM (·.mvarId.isAssigned) then
+            return false
           subGoals.foldlM (fun progress subGoal => do
             let r ← solveIfNotAlready subGoal
             pure (r || progress)
@@ -934,7 +988,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             return some g
         unsolvedGoals.forM fun mvarId => do
           let t ← mvarId.mvarId.getType
-          logInfo m!"Unsolved goal: {t}"
+          trace[Kraken.kstep] "Unsolved goal: {t}"
         if unsolvedGoals.length > 0 then
           return (goal, unsolvedGoals)
 
@@ -1009,7 +1063,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
       else
         pure (false, goal)
 
-    logInfo m!"kstep: keepGoing = {keepGoingSimp}"
+    trace[Kraken.kstep] "kstep: keepGoing = {keepGoingSimp}"
 
     if keepGoingSimp || keepGoingSpec || keepGoingIte then
       go goal
@@ -1021,7 +1075,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
   -- Remove the gimmick debug marker.
   let goal ← removeGimmick goal
 
-  logInfo m!"END KSTEP: {subGoals.length} sub-goals left"
+  trace[Kraken.kstep] "END KSTEP: {subGoals.length} sub-goals left"
 
   if let .some r := maxInstrCount then
     let remaining ← r.get
