@@ -121,8 +121,11 @@ private partial def matchClosed (lhs rhs : Expr) (fuel : Nat := 2) : MetaM Bool 
     if ← matchClosed lhs rhs (fuel - 1) then return true
   return false
 
-private def matchAtom (lhs rhs : Expr) : MetaM Bool :=
-  matchClosed lhs rhs
+private def matchAtom (lhs rhs : Expr) : MetaM Bool := do
+  if lhs.hasExprMVar || rhs.hasExprMVar then
+    commitWhen (matchClosed lhs rhs)
+  else
+    matchClosed lhs rhs
 
 private def extractAtBytesAndAddr? (clause : Expr) : MetaM (Option (Expr × Expr)) := do
   let clause ← instantiateMVars clause
@@ -450,8 +453,9 @@ syntax (name := ecancel) "ecancel" : tactic
 def evalEcancel : Tactic :=
   fun _stx : Syntax => withMainContext do
   let goal ← getMainGoal
-  let target ← goal.getType
+  let target ← instantiateMVars (← goal.getType)
   let solved ← ecancelGoal goal
   unless solved do
     throwError "ecancel: could not automatically solve goal {target}"
+  replaceMainGoal []
 end Kraken.Tactic
