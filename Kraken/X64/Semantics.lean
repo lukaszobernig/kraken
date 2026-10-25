@@ -7,6 +7,8 @@ import Kraken.Attribute
 public import Kraken.Layout
 public import Kraken.Mem
 meta import Kraken.Mem
+public import Kraken.Semantics
+meta import Kraken.Semantics
 public import Kraken.X64.Syntax
 meta import Kraken.X64.Syntax
 public import Lean.ToExpr
@@ -14,25 +16,26 @@ meta import Lean.Elab.Deriving.ToExpr
 
 @[expose] public section
 
--- injective coercions only
-attribute [-instance] BitVec.instNatCast
-attribute [-instance] BitVec.instIntCast
-instance : Coe Bool Nat where coe := Bool.toNat
+attribute [kstep] BitVec.extractLsb'
 
-namespace BitVec
-def unsigned {w} (x : BitVec w) : Int := x.toNat
-def signed {w} (x : BitVec w) : Int := x.toInt
-@[kstep] def take {w} (x : BitVec w) (n : Nat) : BitVec n := x.extractLsb' 0 n
-@[kstep] def drop {w} (x : BitVec w) (n : Nat) : BitVec (w - n) := x.extractLsb' n (w-n)
-end BitVec
-attribute [kstep]
-  BitVec.extractLsb'
-  BitVec.ofInt_add
-  BitVec.ofInt_toInt
-  BitVec.signed
-  BitVec.truncate
 def BitVec.replaceLow {w n} (old : BitVec w) (new : BitVec n) : BitVec w :=
   (BitVec.append (old.drop n) new).setWidth _
+
+theorem BitVec.setWidth_replaceLow {w n : Nat} (old : BitVec w) (v : BitVec n) (h : n ≤ w := by decide) :
+    BitVec.setWidth n (old.replaceLow v) = v := by
+  ext i hi
+  simp [BitVec.replaceLow, BitVec.drop, BitVec.getLsbD_append]
+  grind
+
+@[simp, ksimp]
+theorem BitVec.setWidth_8_replaceLow_8 (old : BitVec 64) (v : BitVec 8) :
+    BitVec.setWidth 8 (old.replaceLow v) = v :=
+  BitVec.setWidth_replaceLow old v
+
+@[simp, ksimp]
+theorem BitVec.setWidth_16_replaceLow_16 (old : BitVec 64) (v : BitVec 16) :
+    BitVec.setWidth 16 (old.replaceLow v) = v :=
+  BitVec.setWidth_replaceLow old v
 
 namespace Reg
 @[kstep] def base {w} (r : Reg w) : Reg64 := match r with
@@ -98,6 +101,19 @@ structure Reg64s where
   | .low r w => s.set64 r ((s.get64 r).replaceLow v)
   | .ah | .bh | .ch | .dh => let old := s.get64 r.base;
     s.set64 r.base (old.replaceLow (BitVec.append v (s.get (.low r.base .W8))))
+
+/-- System V AMD64 ABI callee-saved general-purpose registers (`rbx`, `rbp`, `r12`–`r15`). -/
+def Reg64s.CalleeSavedEq (r r₀ : Reg64s) : Prop :=
+  r.rbx = r₀.rbx ∧
+  r.rbp = r₀.rbp ∧
+  r.r12 = r₀.r12 ∧
+  r.r13 = r₀.r13 ∧
+  r.r14 = r₀.r14 ∧
+  r.r15 = r₀.r15
+
+@[simp, grind .]
+theorem Reg64s.CalleeSavedEq_refl (r : Reg64s) : r.CalleeSavedEq r :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 def ZmmValue : Type := BitVec 512
   deriving Repr, BEq, DecidableEq, Hashable, Hashable, Lean.ToExpr
@@ -232,8 +248,6 @@ structure StatusFlags where
   of : Bool
   deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
-abbrev DataMem := Mem 64
-instance : Repr DataMem where reprPrec _ _ := "<opaque memory>"
 structure MachineData where -- does not include code or program position
   regs : Reg64s := {}
   zmms : RegZmms := {}
@@ -241,69 +255,25 @@ structure MachineData where -- does not include code or program position
   dmem : DataMem := ∅
   deriving Repr, BEq, DecidableEq
 
--- We only allow nondeterministic choices for a fixed set of types.
-class inductive NondetSupportingType : Type -> Type
-  | bitvec (w : Width) : NondetSupportingType w.type
-  | avx_bitvec (aw : AvxWidth) : NondetSupportingType aw.type
-  | bool : NondetSupportingType Bool
-  | statusFlags : NondetSupportingType StatusFlags
+@[reducible]
+instance : HasDataMem MachineData where
+  dmem s := s.dmem
+  withDmem s dmem := { s with dmem }
 
-def NondetSupportingType.from_hash {α} [t : NondetSupportingType α] (h : UInt64) : α :=
-  match t with
-  | .bool => h % 2 != 0
-  | .statusFlags => let h := h.toBitVec; (.mk h[0] h[1] h[2] h[3] h[4] h[5])
-  | .bitvec w => h.toBitVec.setWidth w.bits
-  | .avx_bitvec w => h.toBitVec.setWidth w.bits
+instance (w : AvxWidth) : NondetSupportingType w.type where
+  from_hash h := h.toBitVec.setWidth w.bits
 
-instance (w : Width) : NondetSupportingType w.type := .bitvec w
-instance (w : AvxWidth) : NondetSupportingType w.type := .avx_bitvec w
-instance : NondetSupportingType Bool := .bool
-instance : NondetSupportingType StatusFlags := .statusFlags
+instance : NondetSupportingType StatusFlags where
+  from_hash h := let h := h.toBitVec; (.mk h[0] h[1] h[2] h[3] h[4] h[5])
 
-structure MachineState where
-  data : MachineData
-  pc : Int64
-
-inductive Effects
-  | done (a : MachineState)
-  | unimplemented (msg : String)
-  | gp_unaligned (addr : BitVec 64) (w : Nat)
-  -- loads and stores *outside* the data memory, eg. MMIO, might still affect the data memory:
-  -- for instance, MMIO reads/writes at certain device register addresses might change what
-  -- data memory the process logically owns vs what memory is owned by devices
-  | nonmem_load (dmem : DataMem) (addr : BitVec 64) (w : Width) (ret : w.type → DataMem → Effects)
-  | nonmem_store (dmem : DataMem) (addr : BitVec 64) {w : Width} (v : w.type) (ret: DataMem → Effects)
-  | undefined {α : Type} [NondetSupportingType α] (ret : α → Effects)
-  | require_read_access (addr : BitVec 64) (w : Width) (ok : Unit → Effects)
-  | require_write_access (addr : BitVec 64) (w : Width) (ok : Unit → Effects)
-  | require_exec_access (p: Std.Rco Int64) (ok : Unit → Effects)
-export Effects (unimplemented nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access)
+abbrev MachineState := Kraken.MachineState MachineData
+abbrev Effects := Kraken.Effects MachineData
 
 -- the unused `Std.Rco Int64` argument and the unmodified `MachineData` return
 -- value are present for uniformity with RegOrMem.interp
 @[kstep] def Reg.interp {w} (r : Reg w) (s : MachineData) (_ : Std.Rco Int64)
   (ret : w.type → MachineData → Effects) : Effects :=
   ret (s.regs.get r) s
-
--- Since MMIO can cause devices to do arbitrary actions, a load might actually
--- *modify* memory. For instance:
--- A TEST instruction might load a flag from an MMIO address and bitwise-and it with
--- an immediate, and if the result is non-zero, it might mean that some device has
--- finished processing a buffer and therefore now passes ownership of that buffer
--- to the CPU.
--- Note that `ret` takes a whole `MachineData` instead of only `DataMem`, which
--- provides a bit more flexibility than we need: MachineData.load might change
--- dmem, but will not change the registers or status flags.
--- But this superfluous flexibility helps us simplify the state-threading:
--- Instead of writing `fun v dmem => ... { s with dmem } ...` everywhere, we
--- can just write `fun v s => ...` and the new `s` will shadow the old `s`.
-def MachineData.load
-  (s : MachineData) (addr : BitVec 64) (w : Width)
-  (ret : w.type → MachineData → Effects): Effects :=
-  require_read_access addr w (fun _unit =>
-    match Mem.loadInt s.dmem addr w.bytes with
-    | .some i => ret (.ofInt _ i) s
-    | .none => nonmem_load s.dmem addr w (fun v dmem => ret v { s with dmem }))
 
 -- Alternatively, we could define this in terms of BitVecs without %:
 -- (addr &&& BitVec.ofNat 64 (bytes - 1)) == 0#64
@@ -318,32 +288,22 @@ def MachineData.loadAvx
   (s : MachineData) (addr : BitVec 64) (w : AvxWidth)
   (ret : w.type → MachineData → Effects) (checkAlign : Bool := false) : Effects :=
   if checkAlign && !(isAligned w.bytes addr) then
-    .gp_unaligned addr w.bytes
+    .unaligned addr w.bytes
   else
     require_read_access addr .W64 (fun _unit =>
   match Mem.loadInt s.dmem addr w.bytes with
       | .some i => ret (.ofInt _ i) s
       | .none => unimplemented "AVX nonmem load not supported")
 
-def MachineData.store (s : MachineData) (addr : BitVec 64) {w : Width} (v : w.type) (ret: MachineData → Effects) : Effects :=
-  require_write_access addr w (fun _unit =>
-    match Mem.loadInt s.dmem addr w.bytes with
-    | .some _ =>
-        ret { s with dmem := Mem.storeInt s.dmem addr w.bytes v.toInt }
-    | .none => nonmem_store s.dmem addr v (fun dmem' => ret { s with dmem := dmem' }))
-
 def MachineData.storeAvx (s : MachineData) (addr : BitVec 64) {w : AvxWidth} (v : w.type) (ret: MachineData → Effects) (checkAlign : Bool := false) : Effects :=
   if checkAlign && !(isAligned w.bytes addr) then
-    .gp_unaligned addr w.bytes
+    .unaligned addr w.bytes
   else
     require_write_access addr .W64 (fun _unit =>
   match Mem.loadInt s.dmem addr w.bytes with
       | .some _ =>
           ret { s with dmem := Mem.storeInt s.dmem addr w.bytes v.toInt }
       | .none => unimplemented "AVX nonmem store not supported")
-
-class Labels where label : Label → Int64
-export Labels (label)
 
 @[kstep] def ConstExpr.interp [Labels] : ConstExpr → Std.Rco _root_.Int64 → _root_.Int64
   | .label l, _ => Labels.label l
@@ -368,7 +328,7 @@ export Labels (label)
   (ret : w.type → MachineData → Effects) :=
 match o with
   | .reg r => ret (s.regs.get r) s
-  | .mem a => s.load ((a.interp s.regs p).zeroExtend _) w ret
+  | .mem a => MachineData.load s ((a.interp s.regs p).zeroExtend _) w ret
 
 def AvxRegOrMem.interp {w} [Labels] [AddressSize]
   (o : AvxRegOrMem w) (s : MachineData) (p : Std.Rco Int64)
@@ -391,7 +351,7 @@ def MachineData.setAvxLegacyReg (s : MachineData) {w : AvxWidth} (r : AvxReg w) 
 def MachineData.set {w} [Labels] [AddressSize] (s : MachineData) (d : Dst w) (v : w.type) (p : Std.Rco Int64) (ret : MachineData → Effects) : Effects :=
   match d with
   | .reg r => ret (s.setReg r v)
-  | .mem a => s.store ((a.interp s.regs p).zeroExtend _) v ret
+  | .mem a => MachineData.store s ((a.interp s.regs p).zeroExtend _) v ret
 
 def MachineData.setAvx {aw} [Labels] [AddressSize] (s : MachineData) (d : AvxDst aw) (v : aw.type) (p : Std.Rco Int64) (ret : MachineData → Effects) (checkAlign : Bool := false) : Effects :=
 match d with
@@ -434,13 +394,13 @@ def CondCode.interp (cc : CondCode) (s : StatusFlags) : Bool := match cc with
 @[kstep] def ShiftCountExpr.interpMasked [Labels] (c : ShiftCountExpr) (s : MachineData) (p : Std.Rco Int64) (w : Width) : Nat :=
   (c.interp s p).toNat &&& match w with | .W64 => 0x3f | _ => 0x1f -- "masked to 5 bits (or 6 bits with a 64-bit operand)"
 
-def RelRegOrMem.interp [Labels] [AddressSize]
+@[kstep] def RelRegOrMem.interp [Labels] [AddressSize]
   (o : RelRegOrMem) (s : MachineData) (p : Std.Rco Int64)
   (ret : BitVec 64 → MachineData → Effects) :=
   match o with
   | .rel c => ret (p.upper + c.interp p).toBitVec s
   | .reg r => ret (s.regs.get r) s
-  | .mem a => s.load ((a.interp s.regs p).zeroExtend _) .W64 ret
+  | .mem a => MachineData.load s ((a.interp s.regs p).zeroExtend _) .W64 ret
 
 structure StatusFlags.from_result.Remaining where
   cf : Bool
@@ -477,10 +437,10 @@ set_option maxHeartbeats 1000000
   | .push src =>
     src.interp s p (fun v s =>
     let rsp := s.regs.get64 .rsp - w.bytesv
-    { s with regs := s.regs.set64 .rsp rsp }.store rsp v next)
+    MachineData.store { s with regs := s.regs.set64 .rsp rsp } rsp v next)
   | .pop dst =>
     let rsp := s.regs.get64 .rsp
-    s.load rsp w (fun val s =>
+    MachineData.load s rsp w (fun val s =>
     let s := { s with regs := s.regs.set64 .rsp (rsp + w.bytesv) }
     s.set dst val p next)
   | .setcc cc dst =>
@@ -744,10 +704,10 @@ set_option maxHeartbeats 1000000
   | .call tgt =>
     tgt.interp s p (fun a s =>
     let rsp := s.regs.get64 .rsp - Width.W64.bytesv
-    { s with regs := s.regs.set64 .rsp rsp }.store rsp (w:=.W64) p.upper.toBitVec (jmp (.ofBitVec a)))
+    MachineData.store { s with regs := s.regs.set64 .rsp rsp } rsp (w:=.W64) p.upper.toBitVec (jmp (.ofBitVec a)))
   | .ret =>
     let rsp := s.regs.get64 .rsp
-    s.load rsp .W64 (fun ra s =>
+    MachineData.load s rsp .W64 (fun ra s =>
     jmp (.ofBitVec ra) { s with regs := s.regs.set64 .rsp (rsp + 8) })
   | nop _ | nopalign _ _ => next s
 
@@ -791,49 +751,29 @@ def Instr.interp [Labels]
   | .instr i => i.interp s p next jmp
   | .byteArray _ => .unimplemented s!"Unimplemented: execution reached data block at {p.1}"
 
-def Directives.interp [Labels]
-  (ds : List (Kraken.Sized Directive)) (s : MachineData) (pc : Int64)
-  (ret : Int64 → MachineData → Effects) : Effects :=
-  match ds with
-  | [] => ret pc s
-  | {directive, size := sz} :: ds =>
-    directive.interp s (.mk pc (pc+.ofNat sz)) (jmp:=ret) (next := (fun s =>
-    interp ds s (pc+.ofNat sz) ret))
+@[reducible]
+instance : ArchDirective Directive MachineData where
+  label?
+    | .label l => some l
+    | _ => none
+  interp := Directive.interp
+  undefSeed s := hash s.regs
 
 abbrev Layout := Kraken.Layout Instr
 
-@[reducible]
-def Executable.labels (e : Executable) : Labels :=
-  { label l := (e.withAddresses.findSome?
-      (fun {directive, addr, ..} => if directive = .label l then .some addr else .none)).getD (-1) }
+@[simp, ksimp]
+theorem Executable.labels_start [layout : Layout] (l : Label) (rest : List Directive) :
+    @Labels.label (Kraken.Executable.labels (layout (.label l :: rest))) l = layout.start := by
+  dsimp [Labels.label, Kraken.Executable.labels, Kraken.Layout.apply, ArchDirective.label?]
+  rw [List.mapIdx_cons, Kraken.Executable.withAddresses.eq_def]
+  simp
 
-def Executable.directivesFromLabel (e : Executable) (l : Label) : List (Kraken.Sized Directive) :=
-  e.program.dropWhile (·.directive != .label l)
-
-def Executable.step (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
-  let := Executable.labels e
-  Directives.interp (e.directivesAtAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
-
-def Executable.straightline (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
-  let := Executable.labels e
-  Directives.interp (e.directivesFromAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
-
--- -- Concrete evaluators for expedient testing
-
-partial def Executable.eval (e : Executable) (s : MachineState) (until_ : MachineState → Bool) : Except String (MachineState) :=
-  if until_ s then .ok s else handleEffects (Executable.straightline e s .done)
-where
-  handleEffects es :=
-    match es with
-    | .done s => eval e s until_
-    | .unimplemented msg => .error msg
-    | .gp_unaligned addr w => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
-    | .require_read_access _ _ ok => handleEffects (ok ())
-    | .require_write_access _ _ ok => handleEffects (ok ())
-    | .require_exec_access _ ok => handleEffects (ok ())
-    | .nonmem_load _ addr _ _ => .error s!"Load at unmapped address {repr addr}"
-    | .nonmem_store _ addr _ _ => .error s!"Store at unmapped address {repr addr}"
-    | @Effects.undefined _ t cont => handleEffects (cont (t.from_hash (hash s.1.regs)))
+@[simp, ksimp]
+theorem Executable.labels_start' [layout : Layout] (l : Label) (rest : List Directive) :
+    ((layout.apply (.label l :: rest)).withAddresses.findSome?
+      (fun x => if (match x.directive with | .label l' => some l' | _ => none) = some l then some x.addr else none)).getD (-1) =
+    layout.start :=
+  Executable.labels_start l rest
 
 def Directive.fakeSize (hashOfProgram : UInt64) (d : Directive) : Nat :=
   match d with
@@ -848,8 +788,6 @@ def Program.fakeLayout (prog : Program) : Executable :=
   let layout : Layout := { start := h.toInt64<<<16, size i := prog[i]!.fakeSize h }
   layout prog
 
-abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
-
 /-- info: Except.ok 42 -/
 #guard_msgs in
 #eval
@@ -858,6 +796,6 @@ abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
     .instr (.regular .W64 .W64 (.lea (.low .rax .W64) (.mk .none .none (.int64 41)))),
     .instr (.regular .W64 .W64 (.inc (.reg (.low .rax .W64)))),
     .instr (.regular .W64 .W64 .ret) ]
-  let start := (Executable.labels exe).label "main"
+  let start := exe.labels.label "main"
   let data : MachineData := { dmem := Mem.storeInt {} 0x100 8 0x1337, regs := {rsp := 0x100} }
-  (Executable.eval exe {data, pc := start} (fun st => st.pc = 0x1337)).bind (fun s => .ok s.1.regs.rax)
+  (exe.eval {data, pc := start} (fun st => st.pc = 0x1337)).bind (fun s => .ok s.1.regs.rax)

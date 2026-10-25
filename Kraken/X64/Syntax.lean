@@ -7,31 +7,6 @@ meta import Lean.Elab.Deriving.ToExpr
 
 @[expose] public section
 
-inductive Width | W8 | W16 | W32 | W64 deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-
-instance : ToString Width where
-  toString | .W8 => "w8" | .W16 => "w16" | .W32 => "w32" | .W64 => "w64"
-
-namespace Width
-@[kstep, simp, reducible] def bits : Width → Nat | W8 => 8 | W16 => 16 | W32 => 32 | W64 => 64
-@[kstep, simp, reducible] def bytes : Width → Nat | W8 => 1 | W16 => 2 | W32 => 4 | W64 => 8
-@[kstep] abbrev bytesv (w : Width) {n} : BitVec n := BitVec.ofNat n w.bytes
-@[kstep] abbrev type (w : Width) : Type := BitVec w.bits
-instance {w : Width} : Coe Bool w.type where coe := fun b : Bool => BitVec.ofNat _ b.toNat
-end Width
-
-unif_hint (w : Width) where
-  w =?= Width.W8 |- Width.type w =?= BitVec 8
-
-unif_hint (w : Width) where
-  w =?= Width.W16 |- Width.type w =?= BitVec 16
-
-unif_hint (w : Width) where
-  w =?= Width.W32 |- Width.type w =?= BitVec 32
-
-unif_hint (w : Width) where
-  w =?= Width.W64 |- Width.type w =?= BitVec 64
-
 inductive AvxWidth | W128 | W256 | W512 deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
 instance : ToString AvxWidth where
@@ -82,8 +57,6 @@ inductive AvxReg : AvxWidth → Type
   | ymm (_ : RegMm) : AvxReg AvxWidth.W256
   | zmm (_ : RegMm) : AvxReg AvxWidth.W512
   deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-
-abbrev Label := String
 
 inductive ConstExpr
   | label (_ : Label)
