@@ -401,3 +401,59 @@ theorem swap_and_add_correct [layout : Layout] [Layout.Valid swap_and_add] (s₀
   rintro ⟨s₂, _⟩ ⟨h_rax₂, h_dmem₂⟩
   apply Eventually.done
   exact ⟨by grind, h_dmem₂ ▸ h_mem₁⟩
+
+-- Constant-time specification for `swap_mem_block` using `ExecSpec (trace := some tr)`
+theorem swap_mem_block_ct_spec [layout : Layout] [Labels] (x_ptr y_ptr : BitVec 64) :
+    ∃ tr, ∀ (s₀ : MachineData) (x y : UInt64) (R : DataMem → Prop),
+      (layout swap_mem_block).ExecSpec s₀
+        (trace := some tr)
+        (pre :=
+          s₀.regs.rdi = x_ptr ∧ s₀.regs.rsi = y_ptr ∧
+          (s₀.dmem =⋆ x @ x_ptr ⋆ y @ y_ptr ⋆ R))
+        (post := fun st =>
+          st.pc = (layout swap_mem_block).addrOf swap_mem_block.length ∧
+          st.data.regs.rax = x.toBitVec ∧
+          st.data.regs.rcx = y.toBitVec ∧
+          st.data.regs.rdi = x_ptr ∧
+          st.data.regs.rsi = y_ptr ∧
+          (st.data.dmem =⋆ y @ x_ptr ⋆ x @ y_ptr ⋆ R)) := by
+  kintro s₀ x y R
+  kprologue swap_mem_block with s₀
+  kstep
+  kdone
+  refine ⟨by kaddr swap_mem_block, by grind, by grind, by assumption, by assumption, by ecancel⟩
+
+-- Constant-time specification for the `finish:` block within `swap_and_add`
+theorem swap_and_add_finish_ct_spec [layout : Layout] [Layout.Valid swap_and_add] :
+    ∃ tr, ∀ (s : MachineData),
+      (layout swap_and_add).Spec s
+        (pc := (layout swap_and_add).label "finish")
+        (trace := some tr)
+        (post := fun st =>
+          st.data.regs.rax = s.regs.rax + s.regs.rcx ∧
+          st.data.dmem = s.dmem) := by
+  kintro s
+  kprologue swap_and_add at "finish" with s
+  kstep
+  kdone
+  exact ⟨by grind, rfl⟩
+
+-- Composing `swap_mem_block_ct_spec` (`step1_subprog_traced`) with `swap_and_add_finish_ct_spec` (`Spec.bind_at_traced`)
+theorem swap_and_add_ct_correct [layout : Layout] [Layout.Valid swap_and_add] (x_ptr y_ptr : BitVec 64) :
+    ∃ tr, ∀ (s₀ : MachineData) (x y : UInt64) (R : DataMem → Prop),
+      (layout swap_and_add).Spec s₀
+        (trace := some tr)
+        (pre :=
+          s₀.regs.rdi = x_ptr ∧ s₀.regs.rsi = y_ptr ∧
+          (s₀.dmem =⋆ x @ x_ptr ⋆ y @ y_ptr ⋆ R))
+        (post := fun st =>
+          st.data.regs.rax = x.toBitVec + y.toBitVec ∧
+          (st.data.dmem =⋆ y @ x_ptr ⋆ x @ y_ptr ⋆ R)) := by
+  kintro s₀ x y R ⟨h_rdi, h_rsi, h_mem⟩
+  refine step1_subprog_traced 0 ((swap_mem_block_ct_spec x_ptr y_ptr).choose_spec s₀ x y R)
+    ⟨h_rdi, h_rsi, h_mem⟩ (by rfl) (by kaddr swap_and_add) ?_
+  rintro s₁ ⟨h_rax, h_rcx, -, -, h_mem₁⟩
+  refine (swap_and_add_finish_ct_spec.choose_spec s₁).bind_at_traced (by kaddr swap_and_add) ?_
+  rintro ⟨s₂, _⟩ ⟨h_rax₂, h_dmem₂⟩
+  kdone
+  exact ⟨by grind, h_dmem₂ ▸ h_mem₁⟩
