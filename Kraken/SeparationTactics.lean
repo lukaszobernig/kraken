@@ -127,17 +127,21 @@ private def matchAtom (lhs rhs : Expr) : MetaM Bool :=
 private def extractAtBytesAndAddr? (clause : Expr) : MetaM (Option (Expr × Expr)) := do
   let clause ← instantiateMVars clause
   unless clause.isAppOfArity ``Eq 2 do return none
-  let rhs := clause.appArg!
+  let rhs ← reduceProjectionApp clause.appArg!
   if rhs.isAppOfArity ``List.At 3 then
-    return some (rhs.appFn!.appArg!, rhs.appArg!)
+    return some (← reduceProjectionApp rhs.appFn!.appArg!, ← reduceProjectionApp rhs.appArg!)
   if rhs.isAppOfArity ``UInt64.At 3 then
-    return some (← mkAppM ``UInt64.toBytes #[rhs.appFn!.appArg!], rhs.appArg!)
+    let v ← reduceProjectionApp rhs.appFn!.appArg!
+    return some (← mkAppM ``UInt64.toBytes #[v], ← reduceProjectionApp rhs.appArg!)
   if rhs.isAppOfArity ``UInt32.At 3 then
-    return some (← mkAppM ``UInt32.toBytes #[rhs.appFn!.appArg!], rhs.appArg!)
+    let v ← reduceProjectionApp rhs.appFn!.appArg!
+    return some (← mkAppM ``UInt32.toBytes #[v], ← reduceProjectionApp rhs.appArg!)
   if rhs.isAppOfArity ``UInt16.At 3 then
-    return some (← mkAppM ``UInt16.toBytes #[rhs.appFn!.appArg!], rhs.appArg!)
+    let v ← reduceProjectionApp rhs.appFn!.appArg!
+    return some (← mkAppM ``UInt16.toBytes #[v], ← reduceProjectionApp rhs.appArg!)
   if rhs.isAppOfArity ``UInt8.At 3 then
-    return some (← mkAppM ``UInt8.toBytes #[rhs.appFn!.appArg!], rhs.appArg!)
+    let v ← reduceProjectionApp rhs.appFn!.appArg!
+    return some (← mkAppM ``UInt8.toBytes #[v], ← reduceProjectionApp rhs.appArg!)
   return none
 
 private def provePropEq (lhs rhs : Expr) : MetaM (Option Expr) :=
@@ -172,7 +176,19 @@ private def matchPropAt (lhs rhs : Expr) : MetaM (Option Expr) := do
       let eqExpr ← mkAppM ``Eq #[atExpr]
       mkLambdaFVars #[a] eqExpr
     return some (← mkCongrArg fn hAddr)
-  return none
+  let some hAddr ← provePropEq addr₁ addr₂ | return none
+  let some hBs ← provePropEq bs₁ bs₂ | return none
+  let fnBs ← withLocalDeclD `bs (← inferType bs₁) fun bs => do
+    let atExpr ← mkAppM ``List.At #[bs, addr₁]
+    let eqExpr ← mkAppM ``Eq #[atExpr]
+    mkLambdaFVars #[bs] eqExpr
+  let h1 ← mkCongrArg fnBs hBs
+  let fnAddr ← withLocalDeclD `a (← inferType addr₁) fun a => do
+    let atExpr ← mkAppM ``List.At #[bs₂, a]
+    let eqExpr ← mkAppM ``Eq #[atExpr]
+    mkLambdaFVars #[a] eqExpr
+  let h2 ← mkCongrArg fnAddr hAddr
+  return some (← mkEqTrans h1 h2)
 
 private def isNakedMVar : Expr → Bool
   | .mvar _ => true
