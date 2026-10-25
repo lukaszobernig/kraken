@@ -12,6 +12,7 @@ For experimental features (SymM tactics), see kraken-experimental/.
 public import Kraken.SeparationMem
 public import Kraken.Tactics
 import Kraken.X64.Examples.Examples
+import Kraken.X64.Examples.Memcmp
 import Kraken.X64.Examples.Memcpy
 import Kraken.X64.Examples.Memmove
 public import Kraken.X64.OmniSemantics
