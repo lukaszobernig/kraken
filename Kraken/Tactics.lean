@@ -182,14 +182,25 @@ private partial def mkAndSplitPat (e : Expr) : TacticM (TSyntax `rcasesPat) := d
 
 elab_rules : tactic
   | `(tactic| kprologue $p:ident $[at $kRaw?]? $[take $nRaw?]? $[to $toRaw?]? $[with $s?]?) => withMainContext do
-      let target0 ← instantiateMVars (← getMainTarget)
-      if target0.isAppOf ``Kraken.Executable.Spec || target0.isAppOf ``Kraken.Executable.ExecSpec then
+      let targetInit := (← instantiateMVars (← getMainTarget)).consumeMData
+      if targetInit.getAppFn'.constName? == some ``CtEventually then
+        evalTactic (← `(tactic| unfold CtEventually))
+      let targetEx := (← instantiateMVars (← getMainTarget)).consumeMData
+      if targetEx.getAppFn'.constName? == some ``Exists then
+        evalTactic (← `(tactic| (refine ⟨?_, ?_⟩; rotate_left)))
+      let target0 := (← instantiateMVars (← getMainTarget)).consumeMData
+      if target0.getAppFn'.constName? == some ``Kraken.Executable.Spec ||
+         target0.getAppFn'.constName? == some ``Kraken.Executable.ExecSpec then
         evalTactic (← `(tactic| dsimp only [Kraken.Executable.Spec, Kraken.Executable.ExecSpec]))
-        let target1 ← instantiateMVars (← getMainTarget)
+        let target1 := (← instantiateMVars (← getMainTarget)).consumeMData
         if let .forallE _ reqType _ _ := target1 then
           let pat ← mkAndSplitPat reqType
           evalTactic (← `(tactic| rintro $pat:rcasesPat))
       evalTactic (← `(tactic| (try dsimp only [Kraken.Executable.startAddr_apply])))
+      let isTraced := (← instantiateMVars (← getMainTarget)).getAppFn'.constName? == some ``TracedEventually
+      let sliceThm := mkIdent (if isTraced then ``step1_cps_slice_traced else ``step1_cps_slice)
+      let atThm := mkIdent (if isTraced then ``step1_cps_at_traced else ``step1_cps_at)
+      let cpsThm := mkIdent (if isTraced then ``step1_cps_traced else ``step1_cps)
       let (k?, startIdx?) ← match kRaw? with
         | some kRaw =>
           let (kTerm, idx?) ← resolveDirectivePos p kRaw
@@ -211,7 +222,7 @@ elab_rules : tactic
         match k?, n? with
         | some k, some n =>
           evalTactic (← `(tactic|
-            (refine step1_cps_slice $k $n _ (by kaddr $p) ?_
+            (refine $sliceThm $k $n _ (by kaddr $p) ?_
              conv =>
                arg 2
                rw [Kraken.Executable.program_apply]
@@ -221,7 +232,7 @@ elab_rules : tactic
                           List.take_succ_cons, List.take_zero, List.take_nil])))
         | none, some n =>
           evalTactic (← `(tactic|
-            (refine step1_cps_slice 0 $n _ (by kaddr $p) ?_
+            (refine $sliceThm 0 $n _ (by kaddr $p) ?_
              conv =>
                arg 2
                rw [Kraken.Executable.program_apply]
@@ -231,7 +242,7 @@ elab_rules : tactic
                           List.take_succ_cons, List.take_zero, List.take_nil])))
         | some k, none =>
           evalTactic (← `(tactic|
-            (refine step1_cps_at $k _ (by kaddr $p) ?_
+            (refine $atThm $k _ (by kaddr $p) ?_
              conv =>
                arg 2
                rw [Kraken.Executable.program_apply]
@@ -239,13 +250,14 @@ elab_rules : tactic
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
                           List.drop_succ_cons, List.drop_zero, List.drop_nil])))
         | none, none =>
-          let isEventually := (← whnfR (← getMainTarget)).getAppFn.constName? == some ``Eventually
+          let isEventually := isTraced || (← whnfR (← getMainTarget)).getAppFn.constName? == some ``Eventually
           if isEventually then
             evalTactic (← `(tactic|
-              (apply step1_cps
+              (apply $cpsThm
                (try
                  conv =>
                    arg 1
+                   ext
                    ext
                    arg 2
                    simp)
@@ -324,7 +336,7 @@ elab_rules : tactic
         match k?, n? with
         | some k, some n =>
           evalTactic (← `(tactic|
-            (refine step1_cps_slice $k $n _ (s := $s) (by kaddr $p) ?_
+            (refine $sliceThm (prog := $p) $k $n _ (s := $s) (by kaddr $p) ?_
              let ss := $s
              change (Kraken.Effects.All _ (@Directives.interp _ _ _ (Kraken.Executable.labels _) _ ss _ _))
              obtain $statePat:rcasesPat := $s
@@ -338,7 +350,7 @@ elab_rules : tactic
                           List.take_succ_cons, List.take_zero, List.take_nil])))
         | none, some n =>
           evalTactic (← `(tactic|
-            (refine step1_cps_slice 0 $n _ (s := $s) (by kaddr $p) ?_
+            (refine $sliceThm (prog := $p) 0 $n _ (s := $s) (by kaddr $p) ?_
              let ss := $s
              change (Kraken.Effects.All _ (@Directives.interp _ _ _ (Kraken.Executable.labels _) _ ss _ _))
              obtain $statePat:rcasesPat := $s
@@ -352,7 +364,7 @@ elab_rules : tactic
                           List.take_succ_cons, List.take_zero, List.take_nil])))
         | some k, none =>
           evalTactic (← `(tactic|
-            (refine step1_cps_at $k _ (s := $s) (by kaddr $p) ?_
+            (refine $atThm (prog := $p) $k _ (s := $s) (by kaddr $p) ?_
              let ss := $s
              change (Kraken.Effects.All _ (@Directives.interp _ _ _ (Kraken.Executable.labels _) _ ss _ _))
              obtain $statePat:rcasesPat := $s
@@ -364,10 +376,10 @@ elab_rules : tactic
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
                           List.drop_succ_cons, List.drop_zero, List.drop_nil])))
         | none, none =>
-          let isEventually := (← whnfR (← getMainTarget)).getAppFn.constName? == some ``Eventually
+          let isEventually := isTraced || (← whnfR (← getMainTarget)).getAppFn.constName? == some ``Eventually
           if isEventually then
             evalTactic (← `(tactic|
-              (apply step1_cps
+              (apply $cpsThm
                let ss := $s
                change (Kraken.Effects.All _ (@Directives.interp _ _ _ (Kraken.Executable.labels _) _ ss _ _))
                obtain $statePat:rcasesPat := $s
@@ -375,6 +387,7 @@ elab_rules : tactic
                (try
                  conv =>
                    arg 1
+                   ext
                    ext
                    arg 2
                    simp)
@@ -397,6 +410,57 @@ elab_rules : tactic
                  (try rw [Executable.directivesFromStart])
                  simp only [Kraken.Layout.apply, Kraken.Executable.startAddr_apply,
                             List.mapIdx_cons, List.mapIdx_nil])))
+
+/-- Pack curried secret universal quantifiers after `s₀` into a single tuple so that
+    `tailrec_loop_cps_traced` can be applied directly to a `Spec (trace := some tr)` goal. -/
+elab "kpack_secrets" : tactic => do
+  evalTactic (← `(tactic|
+    (simp only [Kraken.Executable.Spec, forall_prod_curry]
+     rw [exists_forall_unpack_first]
+     dsimp only)))
+
+/-- Peel a leading `CtEventually` or `∃ tr, ...` trace witness (deferring unification to `kdone`)
+    and introduce universal / precondition binders with `rintro`. -/
+elab "kintro" pats:(colGt rcasesPat)* : tactic =>
+  withMainContext do
+    let target := (← instantiateMVars (← getMainTarget)).consumeMData
+    if target.getAppFn'.constName? == some ``CtEventually then
+      evalTactic (← `(tactic| unfold CtEventually))
+    let target := (← instantiateMVars (← getMainTarget)).consumeMData
+    if target.getAppFn'.constName? == some ``Exists then
+      evalTactic (← `(tactic| (refine ⟨?_, ?_⟩; rotate_left)))
+    unless pats.isEmpty do
+      evalTactic (← `(tactic| rintro $[$pats:rcasesPat]*))
+    evalTactic (← `(tactic| (try dsimp only at *)))
+
+/-- Finish a stepped `TracedEventually` or `Eventually` goal, unifying any synthetic-opaque
+    trace witness metavariable with the accumulated concrete leakage trace. -/
+elab "kdone" : tactic =>
+  withMainContext do
+    let target := (← instantiateMVars (← getMainTarget)).consumeMData
+    if target.isAppOfArity ``Eventually 4 then
+      let postArg := (target.getArg! 2).consumeMData
+      let stateArg := (target.getArg! 3).consumeMData
+      if postArg.isAppOfArity ``TracedGoal 3 && stateArg.isAppOfArity ``Prod.mk 4 then
+        let trExpected := (← instantiateMVars (postArg.getArg! 2)).consumeMData
+        let trActual := (← instantiateMVars (stateArg.getArg! 3)).consumeMData
+        let savedDepth := (← getMCtx).depth
+        let ok ← withAssignableSyntheticOpaque do
+          if trExpected.isMVar then
+            let decl ← trExpected.mvarId!.getDecl
+            modifyMCtx fun mctx => { mctx with depth := decl.depth }
+          try
+            isDefEq trExpected trActual
+          finally
+            modifyMCtx fun mctx => { mctx with depth := savedDepth }
+        unless ok do
+          throwError "kdone: leakage trace depends on secret state and cannot unify with public trace:\n  expected: {trExpected}\n  actual:   {trActual}"
+        pruneSolvedGoals
+        evalTactic (← `(tactic| apply TracedEventually.done))
+      else
+        evalTactic (← `(tactic| apply Eventually.done))
+    else
+      evalTactic (← `(tactic| apply Eventually.done))
 
 --------------------------------------------------------------------------------
 
@@ -1093,3 +1157,16 @@ def evalSymRotateRight : Grind.GrindTactic := fun stx => do
   let n := if stx[1].isNone then 1 else stx[1][0].toNat
   let goals ← Grind.getGoals
   Grind.setGoals (goals.rotateRight n)
+
+syntax (name := tacticKStep) "kstep" optConfig (ppSpace num)? : tactic
+
+@[tactic tacticKStep]
+def evalTacticKStep : Tactic := fun stx => withMainContext do
+  let `(tactic| kstep $cfg:optConfig $[$n:num]?) := stx | throwUnsupportedSyntax
+  let step ← `(grind| kstep $cfg:optConfig $[$n:num]?)
+  let goal ← getMainGoal
+  let params ← Grind.mkDefaultParams { clean := false }
+  let (_, state) ← Grind.GrindTacticM.runAtGoal goal params (sym := true) do
+    unless (← Grind.getUnsolvedGoals).isEmpty do
+      Grind.evalGrindTactic step
+  replaceMainGoal (state.goals.map (·.mvarId))
