@@ -12,6 +12,53 @@ meta import Lean.Elab.Deriving.ToExpr
 
 @[expose] public section
 
+attribute [kstep] Int64.toInt Int.toNat
+
+@[simp, ksimp]
+theorem BitVec.zeroExtend_64_zeroExtend_32_8 (v : BitVec 8) :
+    (v.zeroExtend 32).zeroExtend 64 = v.zeroExtend 64 := by
+  ext i hi; simp [BitVec.zeroExtend]
+
+@[simp, ksimp]
+theorem BitVec.zeroExtend_64_zeroExtend_32_16 (v : BitVec 16) :
+    (v.zeroExtend 32).zeroExtend 64 = v.zeroExtend 64 := by
+  ext i hi; simp [BitVec.zeroExtend]
+
+@[simp, ksimp]
+theorem BitVec.extractLsb'_8_extractLsb'_32 {w : Nat} (v : BitVec w) :
+    (v.extractLsb' 0 32).extractLsb' 0 8 = v.extractLsb' 0 8 := by
+  ext i hi; simp
+
+@[simp, ksimp]
+theorem BitVec.extractLsb'_16_extractLsb'_32 {w : Nat} (v : BitVec w) :
+    (v.extractLsb' 0 32).extractLsb' 0 16 = v.extractLsb' 0 16 := by
+  ext i hi; simp
+
+@[simp, ksimp]
+theorem BitVec.extractLsb'_8_zeroExtend_64 (v : BitVec 8) :
+    (v.zeroExtend 64).extractLsb' 0 8 = v := by
+  ext i hi; simp [BitVec.zeroExtend]; grind
+
+@[simp, ksimp]
+theorem BitVec.extractLsb'_16_zeroExtend_64 (v : BitVec 16) :
+    (v.zeroExtend 64).extractLsb' 0 16 = v := by
+  ext i hi; simp [BitVec.zeroExtend]; grind
+
+@[simp, ksimp]
+theorem BitVec.extractLsb'_32_zeroExtend_64 (v : BitVec 32) :
+    (v.zeroExtend 64).extractLsb' 0 32 = v := by
+  ext i hi; simp [BitVec.zeroExtend]; grind
+
+attribute [ksimp, grind =]
+  BitVec.shiftLeft_zero
+  BitVec.zero_or
+  BitVec.or_zero
+  Int64.ofInt_bitVecToInt
+  Int64.ofInt_toInt
+  Int64.toInt_ofNat'
+  Int64.toInt_zero
+  Int64.toInt_one
+
 namespace RegOrSp
 @[kstep] def base {w} (r : RegOrSp w) : XRegOrSp := match r with
   | .low r _ => r
@@ -76,24 +123,23 @@ structure Reg64s where
   | .XZR => 0 ) -- Reads from XZR return constant 0.
 
 @[kstep] def Reg64s.setXReg (regs : Reg64s) (r : XReg) (v : RegWidth.W64.type) : Reg64s :=
-  let v := UInt64.ofBitVec v
   match r with
-  |  .X0 => { regs with  X0 := v } |  .X1 => { regs with  X1 := v }
-  |  .X2 => { regs with  X2 := v } |  .X3 => { regs with  X3 := v }
-  |  .X4 => { regs with  X4 := v } |  .X5 => { regs with  X5 := v }
-  |  .X6 => { regs with  X6 := v } |  .X7 => { regs with  X7 := v }
-  |  .X8 => { regs with  X8 := v } |  .X9 => { regs with  X9 := v }
-  | .X10 => { regs with X10 := v } | .X11 => { regs with X11 := v }
-  | .X12 => { regs with X12 := v } | .X13 => { regs with X13 := v }
-  | .X14 => { regs with X14 := v } | .X15 => { regs with X15 := v }
-  | .X16 => { regs with X16 := v } | .X17 => { regs with X17 := v }
-  | .X18 => { regs with X18 := v } | .X19 => { regs with X19 := v }
-  | .X20 => { regs with X20 := v } | .X21 => { regs with X21 := v }
-  | .X22 => { regs with X22 := v } | .X23 => { regs with X23 := v }
-  | .X24 => { regs with X24 := v } | .X25 => { regs with X25 := v }
-  | .X26 => { regs with X26 := v } | .X27 => { regs with X27 := v }
-  | .X28 => { regs with X28 := v } | .X29 => { regs with X29 := v }
-  | .X30 => { regs with X30 := v }
+  |  .X0 => { regs with  X0 := UInt64.ofBitVec v } |  .X1 => { regs with  X1 := UInt64.ofBitVec v }
+  |  .X2 => { regs with  X2 := UInt64.ofBitVec v } |  .X3 => { regs with  X3 := UInt64.ofBitVec v }
+  |  .X4 => { regs with  X4 := UInt64.ofBitVec v } |  .X5 => { regs with  X5 := UInt64.ofBitVec v }
+  |  .X6 => { regs with  X6 := UInt64.ofBitVec v } |  .X7 => { regs with  X7 := UInt64.ofBitVec v }
+  |  .X8 => { regs with  X8 := UInt64.ofBitVec v } |  .X9 => { regs with  X9 := UInt64.ofBitVec v }
+  | .X10 => { regs with X10 := UInt64.ofBitVec v } | .X11 => { regs with X11 := UInt64.ofBitVec v }
+  | .X12 => { regs with X12 := UInt64.ofBitVec v } | .X13 => { regs with X13 := UInt64.ofBitVec v }
+  | .X14 => { regs with X14 := UInt64.ofBitVec v } | .X15 => { regs with X15 := UInt64.ofBitVec v }
+  | .X16 => { regs with X16 := UInt64.ofBitVec v } | .X17 => { regs with X17 := UInt64.ofBitVec v }
+  | .X18 => { regs with X18 := UInt64.ofBitVec v } | .X19 => { regs with X19 := UInt64.ofBitVec v }
+  | .X20 => { regs with X20 := UInt64.ofBitVec v } | .X21 => { regs with X21 := UInt64.ofBitVec v }
+  | .X22 => { regs with X22 := UInt64.ofBitVec v } | .X23 => { regs with X23 := UInt64.ofBitVec v }
+  | .X24 => { regs with X24 := UInt64.ofBitVec v } | .X25 => { regs with X25 := UInt64.ofBitVec v }
+  | .X26 => { regs with X26 := UInt64.ofBitVec v } | .X27 => { regs with X27 := UInt64.ofBitVec v }
+  | .X28 => { regs with X28 := UInt64.ofBitVec v } | .X29 => { regs with X29 := UInt64.ofBitVec v }
+  | .X30 => { regs with X30 := UInt64.ofBitVec v }
 
 @[kstep] def Reg64s.setRegOrSp64 (regs : Reg64s) (r : XRegOrSp) (v : RegWidth.W64.type) : Reg64s :=
   match r with
@@ -105,11 +151,13 @@ structure Reg64s where
   | .reg r => regs.setXReg r v
   | .XZR => regs -- Writes to XZR are dropped.
 
-@[kstep] def Reg64s.getRegOrSp (s : Reg64s) {w} (r : RegOrSp w) : w.type :=
-  (s.getRegOrSp64 r.base).take w.bits
+@[kstep] def Reg64s.getRegOrSp (s : Reg64s) {w} (r : RegOrSp w) : w.type := match r with
+  | .low r .W64 => s.getRegOrSp64 r
+  | .low r .W32 => (s.getRegOrSp64 r).take 32
 
-@[kstep] def Reg64s.getRegOrZr (s : Reg64s) {w} (r : RegOrZr w) : w.type :=
-  (s.getRegOrZr64 r.base).take w.bits
+@[kstep] def Reg64s.getRegOrZr (s : Reg64s) {w} (r : RegOrZr w) : w.type := match r with
+  | .low r .W64 => s.getRegOrZr64 r
+  | .low r .W32 => (s.getRegOrZr64 r).take 32
 
 @[kstep] def Reg64s.setRegOrSp (s : Reg64s) {w} (r : RegOrSp w) (v : w.type) : Reg64s := match r with
   | .low r .W64 => s.setRegOrSp64 r v
@@ -118,6 +166,24 @@ structure Reg64s where
 @[kstep] def Reg64s.setRegOrZr (s : Reg64s) {w} (r : RegOrZr w) (v : w.type) : Reg64s := match r with
   | .low r .W64 => s.setRegOrZr64 r v
   | .low r .W32 => s.setRegOrZr64 r (v.zeroExtend _)
+
+/-- AAPCS64 callee-saved general-purpose registers (`X19`–`X29`). -/
+def Reg64s.CalleeSavedEq (r r₀ : Reg64s) : Prop :=
+  r.X19 = r₀.X19 ∧
+  r.X20 = r₀.X20 ∧
+  r.X21 = r₀.X21 ∧
+  r.X22 = r₀.X22 ∧
+  r.X23 = r₀.X23 ∧
+  r.X24 = r₀.X24 ∧
+  r.X25 = r₀.X25 ∧
+  r.X26 = r₀.X26 ∧
+  r.X27 = r₀.X27 ∧
+  r.X28 = r₀.X28 ∧
+  r.X29 = r₀.X29
+
+@[simp, grind .]
+theorem Reg64s.CalleeSavedEq_refl (r : Reg64s) : r.CalleeSavedEq r :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 structure StatusFlags where
   n : Bool
@@ -172,7 +238,7 @@ def RegOrZr.interp {w} (r : RegOrZr w) (s : MachineData) (_ : Std.Rco Int64)
     let lo := val &&& 0xFFF#64
     Int64.ofNat lo.toNat
 
-def ConstExpr.evalBranchTarget [Labels] (target : ConstExpr) (p : Std.Rco Int64) : Int64 :=
+@[kstep] def ConstExpr.evalBranchTarget [Labels] (target : ConstExpr) (p : Std.Rco Int64) : Int64 :=
   match target with
   | .int64 imm => p.lower + imm
   | _ => target.interp p

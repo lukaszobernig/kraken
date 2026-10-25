@@ -7,6 +7,8 @@ module
 -/
 
 import Kraken.AArch64.Examples.Examples
+import Kraken.AArch64.Examples.Memcpy
+import Kraken.AArch64.Examples.Memmove
 public import Kraken.AArch64.OmniSemantics
 public import Kraken.AArch64.Parser
 public import Kraken.AArch64.Semantics

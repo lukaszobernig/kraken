@@ -51,8 +51,7 @@ theorem arith_shift_correct [layout : Layout] [Layout.Valid arith_shift] (d : Ma
   kprologue arith_shift with d
   sym => kstep; tactic =>
   apply Eventually.done
-  simp (config := { zetaDelta := true }) only [show BitVec.ofInt 64 (Int64.toInt 42) = 42#64 from rfl,
-    show (Int64.toInt 0).toNat = 0 from rfl]
+  simp (config := { zetaDelta := true }) only [BitVec.shiftLeft_zero]
   bv_decide
 
 -- Example 4: Stepping through control flow (branch not taken)
@@ -69,8 +68,7 @@ theorem p4_correct [layout : Layout] [Layout.Valid controlflow] (d : MachineData
   kprologue controlflow with d
   sym => kstep; tactic =>
   apply Eventually.done
-  simp (config := { zetaDelta := true }) only [show BitVec.ofInt 64 (Int64.toInt 42) = 42#64 from rfl]
-  bv_decide
+  rfl
 
 -- Example 5: Storing and loading registers to/from memory
 open Std
