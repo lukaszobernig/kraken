@@ -8,35 +8,6 @@ meta import Lean.Elab.Deriving.ToExpr
 @[expose] public section
 
 /--
-Memory access width.
--/
-inductive MemWidth | W8 | W16 | W32 | W64
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-
-instance : ToString MemWidth where
-  toString | .W8 => "w8" | .W16 => "w16" | .W32 => "w32" | .W64 => "w64"
-
-namespace MemWidth
-@[kstep, simp, reducible] def bits : MemWidth → Nat | W8 => 8 | W16 => 16 | W32 => 32 | W64 => 64
-@[kstep, simp, reducible] def bytes : MemWidth → Nat | W8 => 1 | W16 => 2 | W32 => 4 | W64 => 8
-@[kstep] abbrev bytesv (w : MemWidth) {n} : BitVec n := BitVec.ofNat n w.bytes
-@[kstep] abbrev type (w : MemWidth) : Type := BitVec w.bits
-instance {w : MemWidth} : Coe Bool w.type where coe := fun b : Bool => BitVec.ofNat _ b.toNat
-end MemWidth
-
-unif_hint (w : MemWidth) where
-  w =?= MemWidth.W8 |- MemWidth.type w =?= BitVec 8
-
-unif_hint (w : MemWidth) where
-  w =?= MemWidth.W16 |- MemWidth.type w =?= BitVec 16
-
-unif_hint (w : MemWidth) where
-  w =?= MemWidth.W32 |- MemWidth.type w =?= BitVec 32
-
-unif_hint (w : MemWidth) where
-  w =?= MemWidth.W64 |- MemWidth.type w =?= BitVec 64
-
-/--
 Architectural operand and register width for AArch64 instructions.
 - `W32`: 32-bit register (`W0`-`W30`, `WSP`, `WZR`) or 32-bit operation.
 - `W64`: 64-bit register (`X0`-`X30`, `SP`, `XZR`) or 64-bit operation.
@@ -47,14 +18,14 @@ instance : ToString RegWidth where
   toString | .W32 => "w32" | .W64 => "w64"
 
 namespace RegWidth
-instance : Coe RegWidth MemWidth where coe := fun w : RegWidth =>
+instance : Coe RegWidth Width where coe := fun w : RegWidth =>
   match w with
   | .W32 => .W32
   | .W64 => .W64
-@[kstep, simp, reducible] def bits (w : RegWidth) : Nat := (w : MemWidth).bits
-@[kstep, simp, reducible] def bytes (w : RegWidth) : Nat := (w : MemWidth).bytes
-@[kstep] abbrev bytesv (w : RegWidth) {n} : BitVec n := (w : MemWidth).bytesv
-@[kstep] abbrev type (w : RegWidth) : Type := (w : MemWidth).type
+@[kstep, simp, reducible] def bits (w : RegWidth) : Nat := (w : Width).bits
+@[kstep, simp, reducible] def bytes (w : RegWidth) : Nat := (w : Width).bytes
+@[kstep] abbrev bytesv (w : RegWidth) {n} : BitVec n := (w : Width).bytesv
+@[kstep] abbrev type (w : RegWidth) : Type := (w : Width).type
 instance {w : RegWidth} : Coe Bool w.type where coe := fun b : Bool => BitVec.ofNat _ b.toNat
 end RegWidth
 
@@ -106,8 +77,6 @@ attribute [coe] XRegOrSp.reg
 attribute [coe] XRegOrXzr.reg
 attribute [coe] RegOrSp.low
 attribute [coe] RegOrZr.low
-
-abbrev Label := String
 
 inductive ConstExpr
   | label (_ : Label)

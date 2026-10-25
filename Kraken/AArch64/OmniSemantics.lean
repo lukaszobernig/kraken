@@ -17,8 +17,8 @@ public import Kraken.OmniSemantics
   | .nonmem_load .. => False
   | .nonmem_store .. => False
   | @Effects.undefined α _ cont => ∀ v: α, (cont v).All post
-  | .require_read_access _ _ cont => (cont ()).All post
-  | .require_write_access _ _ cont => (cont ()).All post
+  | .require_read_access _ cont => (cont ()).All post
+  | .require_write_access _ cont => (cont ()).All post
   | .require_exec_access _ cont => (cont ()).All post
 
 def step1 [Layout] (e: Executable) (s: MachineState) (post: @Post MachineState) : Prop :=

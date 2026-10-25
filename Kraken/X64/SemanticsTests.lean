@@ -37,10 +37,10 @@ private def s : MachineData := { dmem := (List.replicate 64 0).At 0x1000 }
 #guard accessChecks (s.loadAvx 0x1001 .W128 fun _ s => .done ⟨s, 0⟩) ==
   some ([(0x1001, 0x1011)], [])
 #guard match s.loadAvx 0x1001 .W128 (fun _ s => .done ⟨s, 0⟩) (checkAlign := true) with
-  | .gp_unaligned addr bytes => addr == 0x1001 && bytes == 16
+  | .unaligned addr bytes => addr == 0x1001 && bytes == 16
   | _ => false
 #guard match s.storeAvx (w := .W128) 0x1001 0 (fun s => .done ⟨s, 0⟩) (checkAlign := true) with
-  | .gp_unaligned addr bytes => addr == 0x1001 && bytes == 16
+  | .unaligned addr bytes => addr == 0x1001 && bytes == 16
   | _ => false
 
 private def wrapping : MachineData :=
