@@ -91,4 +91,10 @@ example (v : UInt64) (addr : BitVec 64) (R : Mem 64 → Prop) (m : Mem 64)
     ∃ R', (Eq (v.At (addr + 8#64)) ⋆ R') m := by
   exact ⟨_, h⟩
 
+example (bs₁ bs₂ : List UInt8) (addr₁ addr₂ : BitVec 64) (R : Mem 64 → Prop) (m : Mem 64)
+    (hbs : bs₁ = bs₂) (haddr : addr₁ = addr₂)
+    (h : (Eq (bs₁.At addr₁) ⋆ R) m) :
+    (Eq ((bs₂, addr₂).fst.At addr₂) ⋆ R) m := by
+  ecancel
+
 end Kraken.SeparationTests
