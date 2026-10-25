@@ -1,9 +1,12 @@
 module
 
+import Kraken.Attribute
 public import Kraken.Mem
 import all Kraken.Mem
+public import Kraken.OmniSemantics
 public import Kraken.Separation
 import all Kraken.Separation
+public meta import Lean.Elab.SyntheticMVars
 
 public section
 
@@ -14,6 +17,21 @@ public section
 open Std
 open Std.ExtHashMap
 open List
+
+syntax:62 (name := memAtStx) term:63 " @ " term:63 : term
+
+@[term_elab memAtStx]
+meta def elabMemAt : Lean.Elab.Term.TermElab := fun stx expectedType? => do
+  let v : Lean.TSyntax `term := ⟨stx[0]⟩
+  let a : Lean.TSyntax `term := ⟨stx[2]⟩
+  let aExpr ← Lean.Elab.Term.elabTermAndSynthesize a none
+  let aType ← Lean.Meta.whnf (← Lean.Meta.inferType aExpr)
+  let addrStx ←
+    if aType.isConstOf ``UInt64 then
+      `($(← Lean.Elab.Term.exprToSyntax aExpr).toBitVec)
+    else
+      Lean.Elab.Term.exprToSyntax aExpr
+  Lean.Elab.Term.elabTerm (← `(Eq (($v).At $addrStx))) expectedType?
 
 private theorem Std.ExtHashMap.get_union_l_disjoint {key value : Type} [BEq key] [EquivBEq key] [Hashable key] [LawfulHashable key] [LawfulBEq key]
     (m1 m2 : ExtHashMap key value) (k : key) (v : value) (h_disj : m1.inter m2 = ∅) (h : m1.get? k = some v) :
@@ -83,7 +101,7 @@ theorem loadBytes_sep {w : Nat} (bs : List UInt8) (a : BitVec w) (n : Nat) (R : 
   rw [Mem.loadBytes]
   rw [show (List.range n).map (fun i => ((bs.At a).union m2).get? (a + BitVec.ofNat w i)) =
            (List.range n).map (fun i => if h : i < n then some (bs.get ⟨i, Hl ▸ h⟩) else none) by
-    apply List.map_congr_left; intro i hi; rw [List.mem_range] at hi; rw [dif_pos hi]; exact h_get i hi]
+    apply List.map_congr_left; intro i hi; rw [List.mem_range] at hi; simp only [hi, ↓reduceDIte]; exact h_get i hi]
   cases Hl
   rw [List.range_get_eq_map_some]
   rw [List.allSome_map_some]
@@ -129,4 +147,96 @@ theorem At_append_sep {w : Nat} (bs1 bs2 : List UInt8) (a : BitVec w)
     rw [← h_union]
     rw [← List.At_append _ _ _ h_len]
 
+theorem At_take_drop_sep {w : Nat} (bs : List UInt8) (n : Nat) (a : BitVec w)
+    (h_n : n ≤ bs.length) (h_len : bs.length ≤ 2 ^ w) :
+    Eq (bs.At a) = Eq ((bs.take n).At a) ⋆ Eq ((bs.drop n).At (a + BitVec.ofNat w n)) := by
+  have h_app : bs.take n ++ bs.drop n = bs := List.take_append_drop n bs
+  have h_len' : (bs.take n).length + (bs.drop n).length ≤ 2 ^ w := by
+    have := congrArg List.length h_app
+    rw [List.length_append] at this
+    omega
+  have h_take_len : (bs.take n).length = n := List.length_take_of_le h_n
+  conv => lhs; rw [← h_app]
+  rw [At_append_sep (bs.take n) (bs.drop n) a h_len', h_take_len]
+
+@[simp]
+theorem At_nil_sep {w : Nat} (a : BitVec w) :
+    Eq (([] : List UInt8).At a) = emp := by
+  funext m
+  simp [List.At, emp, eq_comm]
+
+theorem At_slice_sep {w : Nat} (bs : List UInt8) (off k : Nat) (a : BitVec w)
+    (h_slice : off + k ≤ bs.length) (h_len : bs.length ≤ 2 ^ w) :
+    Eq (bs.At a) =
+      Eq ((bs.take off).At a) ⋆
+      (Eq (((bs.drop off).take k).At (a + BitVec.ofNat w off)) ⋆
+       Eq ((bs.drop (off + k)).At (a + BitVec.ofNat w (off + k)))) := by
+  rw [At_take_drop_sep bs off a (by omega) h_len]
+  rw [At_take_drop_sep (bs.drop off) k (a + BitVec.ofNat w off) (by simp; omega) (by simp; omega)]
+  have h_drop : (bs.drop off).drop k = bs.drop (off + k) := by
+    rw [List.drop_drop, Nat.add_comm]
+  have h_add : a + BitVec.ofNat w off + BitVec.ofNat w k = a + BitVec.ofNat w (off + k) := by
+    rw [BitVec.add_assoc, ← BitVec.ofNat_add]
+  rw [h_drop, h_add]
+
 end Mem
+
+theorem store_sep {MD : Type} [HasDataMem MD]
+    (s : MD) (addr : BitVec 64) (w : Width) (v : w.type)
+    (ret : MD → Kraken.Effects MD)
+    (bs : List UInt8) (R : DataMem → Prop)
+    (h_mem : HasDataMem.dmem s =⋆ Eq (bs.At addr) ⋆ R)
+    (h_len : bs.length = w.bytes) :
+    have mem' := Mem.storeInt (HasDataMem.dmem s) addr w.bytes v.toInt
+    MachineData.store s addr v ret =
+      require_write_access addr w (fun _ =>
+        ret (HasDataMem.withDmem s mem')) := by
+  have h_load : Mem.loadInt (HasDataMem.dmem s) addr w.bytes = some (Int.ofBytes bs) :=
+    Mem.loadInt_sep bs addr w.bytes R (HasDataMem.dmem s) h_mem h_len (by cases w <;> decide)
+  simp only [MachineData.store, h_load]
+
+theorem load_sep {MD : Type} [HasDataMem MD]
+    (s : MD) (addr : BitVec 64) (w : Width)
+    (ret : w.type → MD → Kraken.Effects MD)
+    (bs : List UInt8) (R : DataMem → Prop)
+    (h_mem : HasDataMem.dmem s =⋆ Eq (bs.At addr) ⋆ R)
+    (h_len : bs.length = w.bytes) :
+    MachineData.load s addr w ret =
+      require_read_access addr w (fun _ => ret (.ofInt w.bits (Int.ofBytes bs)) s) := by
+  simp only [MachineData.load,
+    Mem.loadInt_sep bs addr w.bytes R (HasDataMem.dmem s) h_mem h_len (by cases w <;> decide)]
+
+@[kspec]
+theorem Kraken.Effects.All_store_sep {MD : Type} [HasDataMem MD]
+    (post : Kraken.MachineState MD → Prop) (s : MD) (addr addr' : BitVec 64)
+    (w : Width) (v : w.type) (ret : MD → Kraken.Effects MD)
+    (bs : List UInt8) (R : DataMem → Prop)
+    (h_mem : HasDataMem.dmem s =⋆ Eq (bs.At addr') ⋆ R)
+    (h_addr : addr = addr')
+    (h_len : bs.length = w.bytes) :
+    (MachineData.store s addr v ret).All post =
+      let mem' := Mem.storeInt (HasDataMem.dmem s) addr' w.bytes v.toInt
+      ((mem' =⋆ Eq ((Int.toBytes w.bytes v.toInt).At addr') ⋆ R) →
+        (ret (HasDataMem.withDmem s mem')).All post) := by
+  subst h_addr
+  have h_load : Mem.loadInt (HasDataMem.dmem s) addr w.bytes = some (Int.ofBytes bs) :=
+    Mem.loadInt_sep bs addr w.bytes R (HasDataMem.dmem s) h_mem h_len (by cases w <;> decide)
+  have h_store : Mem.storeInt (HasDataMem.dmem s) addr w.bytes v.toInt =⋆ Eq ((Int.toBytes w.bytes v.toInt).At addr) ⋆ R :=
+    Mem.storeInt_sep addr w.bytes bs R (HasDataMem.dmem s) ⟨h_mem, h_len⟩ v.toInt
+  exact propext ⟨fun h _ => by simpa [MachineData.store, h_load, Kraken.Effects.All] using h,
+    fun h => by simpa [MachineData.store, h_load, Kraken.Effects.All] using h h_store⟩
+
+@[kspec]
+theorem Kraken.Effects.All_load_sep {MD : Type} [HasDataMem MD]
+    (post : Kraken.MachineState MD → Prop) (s : MD) (addr addr' : BitVec 64)
+    (w : Width) (ret : w.type → MD → Kraken.Effects MD)
+    (bs : List UInt8) (R : DataMem → Prop)
+    (h_mem : HasDataMem.dmem s =⋆ Eq (bs.At addr') ⋆ R)
+    (h_addr : addr = addr')
+    (h_len : bs.length = w.bytes) :
+    (MachineData.load s addr w ret).All post =
+      (ret (.ofInt w.bits (Int.ofBytes bs)) s).All post := by
+  subst h_addr
+  have h_load : Mem.loadInt (HasDataMem.dmem s) addr w.bytes = some (Int.ofBytes bs) :=
+    Mem.loadInt_sep bs addr w.bytes R (HasDataMem.dmem s) h_mem h_len (by cases w <;> decide)
+  simp only [MachineData.load, h_load, Kraken.Effects.All]
