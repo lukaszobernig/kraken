@@ -9,6 +9,7 @@ Common infrastructure for Kraken's differential instruction fuzzers:
 
 public import Kraken.Layout
 public import Kraken.Mem
+public import Kraken.Semantics
 public import Lean.Data.Json
 public meta import Lean.Elab.Term
 
@@ -17,6 +18,16 @@ public section
 open Lean
 
 namespace Kraken.Fuzzer
+
+/-- Runs `Effects` to completion, resolving every `undefined` choice with `h`. Also returns
+whether any `undefined` choice was made. -/
+partial def evalEffects {MachineData : Type} (h : UInt64) (sawUndef : Bool) :
+    Kraken.Effects MachineData → Option (MachineData × Bool)
+  | .done st => some (st.data, sawUndef)
+  | .require_read_access _ _ ok | .require_write_access _ _ ok | .require_exec_access _ ok =>
+      evalEffects h sawUndef (ok ())
+  | @Kraken.Effects.undefined _ _ t cont => evalEffects h true (cont (t.from_hash h))
+  | _ => none
 
 def _start : String := "_start"
 def _end : String := "_end"

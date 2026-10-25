@@ -1,10 +1,45 @@
 module
 
+import Kraken.Attribute
+public import Lean.ToExpr
+meta import Lean.Elab.Deriving.ToExpr
+
 @[expose] public section
 
 /-
-Common Kraken executable layout.
+Common Kraken widths, labels, and executable layout.
 -/
+
+inductive Width | W8 | W16 | W32 | W64
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+instance : ToString Width where
+  toString | .W8 => "w8" | .W16 => "w16" | .W32 => "w32" | .W64 => "w64"
+
+namespace Width
+@[kstep, simp, reducible] def bits : Width → Nat | W8 => 8 | W16 => 16 | W32 => 32 | W64 => 64
+@[kstep, simp, reducible] def bytes : Width → Nat | W8 => 1 | W16 => 2 | W32 => 4 | W64 => 8
+@[kstep] abbrev bytesv (w : Width) {n} : BitVec n := BitVec.ofNat n w.bytes
+@[kstep] abbrev type (w : Width) : Type := BitVec w.bits
+instance {w : Width} : Coe Bool w.type where coe := fun b : Bool => BitVec.ofNat _ b.toNat
+end Width
+
+unif_hint (w : Width) where
+  w =?= Width.W8 |- Width.type w =?= BitVec 8
+
+unif_hint (w : Width) where
+  w =?= Width.W16 |- Width.type w =?= BitVec 16
+
+unif_hint (w : Width) where
+  w =?= Width.W32 |- Width.type w =?= BitVec 32
+
+unif_hint (w : Width) where
+  w =?= Width.W64 |- Width.type w =?= BitVec 64
+
+abbrev Label := String
+
+class Labels where label : Label → Int64
+export Labels (label)
 
 namespace Kraken
 
@@ -39,6 +74,17 @@ def Executable.withAddresses {Directive : Type} (e : Executable Directive) : Lis
     {instr with addr := startAddr} :: Executable.withAddresses {startAddr := startAddr + .ofNat instr.size, program}
 termination_by e.2
 
+@[simp] theorem Executable.withAddresses_nil {Directive : Type} (startAddr : Int64) :
+    Executable.withAddresses (Directive := Directive) {startAddr, program := []} = [] := by
+  unfold Executable.withAddresses; rfl
+
+@[simp] theorem Executable.withAddresses_cons {Directive : Type} (startAddr : Int64)
+    (instr : Sized Directive) (program : List (Sized Directive)) :
+    Executable.withAddresses {startAddr, program := instr :: program} =
+      {instr with addr := startAddr} ::
+        Executable.withAddresses {startAddr := startAddr + .ofNat instr.size, program} := by
+  conv => lhs; unfold Executable.withAddresses
+
 def Executable.directivesAtAddress {Directive : Type} (e : Executable Directive) (a : Int64) : List (Sized Directive) :=
   let starts_at_a := e.withAddresses.dropWhile (·.addr ≠ a)
   (starts_at_a.takeWhile (·.addr = a)).map (·.toSized)
@@ -60,6 +106,13 @@ theorem Executable.directivesFromStart {Directive : Type} [layout : Layout Direc
     (layout prog).directivesFromAddress layout.start =
       prog.mapIdx (fun i directive => {directive, size := layout.size i}) := by
   grind [Executable.withAddresses_dropWhile_start, Executable.withAddresses_map_snd, Executable.directivesFromAddress, Layout.apply]
+
+@[simp] theorem Executable.startAddr_apply {Directive : Type} [layout : Layout Directive] (prog : List Directive) :
+    (layout prog).startAddr = layout.start := rfl
+
+theorem Executable.program_apply {Directive : Type} [layout : Layout Directive] (prog : List Directive) :
+    (layout prog).program =
+      prog.mapIdx (fun i directive => {directive, size := layout.size i}) := rfl
 
 theorem directivesAtFromPrefix {Directive : Type} (e: Executable Directive) (a: Int64):
   ∃ rest, e.directivesFromAddress a = e.directivesAtAddress a ++ rest := by
@@ -158,5 +211,133 @@ theorem Executable.withAddresses_dropWhile_addrOf {Directive : Type} (e : Execut
     rw [Executable.getElem?_withAddresses_eq] at hc
     obtain ⟨dz, -, rfl⟩ := Option.map_eq_some_iff.mp hc
     simpa using hj
+
+theorem Executable.directivesFromAddress_addrOf {Directive : Type} (e : Executable Directive) (j n : Nat)
+    (hj : e.addrOf j = e.addrOf n)
+    (hfresh : ∀ k, k < j → e.addrOf k ≠ e.addrOf n) :
+    e.directivesFromAddress (e.addrOf n) = e.program.drop j := by
+  dsimp [Executable.directivesFromAddress]
+  rw [Executable.withAddresses_dropWhile_addrOf e j n hj hfresh, List.map_drop, Executable.withAddresses_map_snd]
+
+theorem Executable.directivesFromAddress_eq_nil_of {Directive : Type} (e : Executable Directive) (pc : Int64)
+    (h : ∀ k, k < e.program.length → e.addrOf k ≠ pc) :
+    e.directivesFromAddress pc = [] := by
+  dsimp [Executable.directivesFromAddress]
+  rw [dropWhile_eq_drop_of (j := e.withAddresses.length)]
+  · simp
+  · intro k hk c hc
+    rw [Executable.getElem?_withAddresses_eq] at hc
+    obtain ⟨dz, hdz, rfl⟩ := Option.map_eq_some_iff.mp hc
+    have hlt : k < e.program.length := by
+      by_cases h' : k < e.program.length
+      · exact h'
+      · rw [List.getElem?_eq_none (by omega)] at hdz; cases hdz
+    simpa using h k hlt
+  · intro c hc
+    rw [List.getElem?_eq_none (Nat.le_refl _)] at hc
+    cases hc
+
+private theorem takeWhile_eq_take_of {α : Type _} {p : α → Bool} {l : List α} {n : Nat}
+    (hprior : ∀ k, k < n → ∀ c, l[k]? = some c → p c = true)
+    (hhead : ∀ c, l[n]? = some c → p c = false) :
+    l.takeWhile p = l.take n := by
+  rw [List.takeWhile_eq_take_findIdx_not]
+  by_cases hn : n < l.length
+  · rw [(List.findIdx_eq hn).mpr ⟨by simp [hhead _ (List.getElem?_eq_getElem hn)],
+      fun k hk => by simp [hprior k hk _ (List.getElem?_eq_getElem (by omega))]⟩]
+  · rw [(List.take_of_length_le (Nat.le_of_not_lt hn) : l.take n = l), List.take_of_length_le]
+    refine Nat.le_of_eq (List.findIdx_eq_length.mpr fun x hx => ?_).symm
+    obtain ⟨i, hi, rfl⟩ := List.getElem_of_mem hx
+    simp [hprior i (by omega) _ (List.getElem?_eq_getElem hi)]
+
+private theorem exists_least_le {P : Nat → Prop} {n : Nat} (h : P n) :
+    ∃ j, j ≤ n ∧ P j ∧ ∀ k, k < j → ¬P k := by
+  induction n using Nat.strongRecOn with
+  | ind n ih => grind
+
+theorem Layout.apply_getElem? {Directive : Type} [layout : Layout Directive] (p : List Directive) (i : Nat) :
+    (layout p).program[i]? = (p[i]?).map (fun d => {directive := d, size := layout.size i}) := by
+  simp [Layout.apply, List.getElem?_mapIdx]
+
+/-- Shift a `Layout` to start at index `k` of `prog`. -/
+@[reducible] def Layout.shift {Directive : Type} (l : Layout Directive) (prog : List Directive) (k : Nat) : Layout Directive where
+  start := (l prog).addrOf k
+  size i := l.size (k + i)
+
+@[simp] theorem Layout.start_shift {Directive : Type} (l : Layout Directive) (prog : List Directive) (k : Nat) :
+    (l.shift prog k).start = (l prog).addrOf k := rfl
+
+@[simp] theorem Layout.size_shift {Directive : Type} (l : Layout Directive) (prog : List Directive) (k i : Nat) :
+    (l.shift prog k).size i = l.size (k + i) := rfl
+
+theorem Layout.program_shift {Directive : Type} (l : Layout Directive) (prog : List Directive) (k n : Nat) :
+    ((l.shift prog k) ((prog.drop k).take n)).program = ((l prog).program.drop k).take n := by
+  ext i c
+  by_cases hi : i < n <;>
+    simp [Layout.apply, List.getElem?_take, List.getElem?_drop, hi]
+
+theorem Layout.program_shift_of_slice {Directive : Type} (l : Layout Directive)
+    {prog sub : List Directive} {k : Nat} (hsub : (prog.drop k).take sub.length = sub) :
+    ((l.shift prog k) sub).program = ((l prog).program.drop k).take sub.length := by
+  conv => lhs; rw [← hsub]
+  exact Layout.program_shift l prog k sub.length
+
+theorem Layout.addrOf_shift_of_slice {Directive : Type} (l : Layout Directive)
+    {prog sub : List Directive} {k i : Nat}
+    (hsub : (prog.drop k).take sub.length = sub) (hi : i ≤ sub.length) :
+    ((l.shift prog k) sub).addrOf i = (l prog).addrOf (k + i) := by
+  have h_add := (l prog).sizeBefore_add k i
+  have h_sb : ((l.shift prog k) sub).sizeBefore i =
+      ((((l prog).program.drop k).take i).map (·.size)).sum := by
+    simp [Executable.sizeBefore, Layout.program_shift_of_slice l hsub, List.take_take, Nat.min_eq_left hi]
+  grind [Executable.addrOf, Layout.apply]
+
+theorem Executable.addrOf_apply_succ {Directive : Type} [layout : Layout Directive] {prog : List Directive}
+    {k : Nat} {d : Directive} (hd : prog[k]? = some d) :
+    (layout prog).addrOf (k + 1) = (layout prog).addrOf k + .ofNat (layout.size k) :=
+  Executable.addrOf_succ _ (c := {directive := d, size := layout.size k})
+    (by rw [Layout.apply_getElem?, hd]; rfl)
+
+theorem Executable.directivesAtAddress_addrOf {Directive : Type} (e : Executable Directive)
+    (h_offset : ∀ j k, e.addrOf j = e.addrOf k → e.sizeBefore j = e.sizeBefore k)
+    {k : Nat} {c : Sized Directive} (hc : e.program[k]? = some c) (hz : 0 < c.size) :
+    ∃ pre, e.directivesAtAddress (e.addrOf k) = pre ++ [c] ∧
+      ∀ c ∈ pre, c.size = 0 := by
+  obtain ⟨j, hjk, hj, hmin⟩ :=
+    exists_least_le (P := fun i => e.addrOf i = e.addrOf k) rfl
+  have hsize := h_offset j k hj
+  have hpre : ∀ c ∈ (e.program.drop j).take (k - j), c.size = 0 := by
+    have := e.sizeBefore_add j (k - j)
+    rw [Nat.add_sub_cancel' hjk] at this
+    have hsum : (((e.program.drop j).take (k - j)).map (·.size)).sum = 0 := by omega
+    exact fun c hc => List.sum_eq_zero_iff_forall_eq_nat.mp hsum _ (List.mem_map_of_mem hc)
+  have haddr : ∀ m, j ≤ m → m ≤ k → e.addrOf m = e.addrOf k := fun m hjm hmk => by
+    grind [Executable.addrOf, e.sizeBefore_mono hjm, e.sizeBefore_mono hmk]
+  have hnext : e.addrOf (k + 1) ≠ e.addrOf k := fun h => by
+    grind [h_offset (k + 1) k h]
+  refine ⟨(e.program.drop j).take (k - j), ?_, hpre⟩
+  show ((e.withAddresses.dropWhile
+    (·.addr ≠ e.addrOf k)).takeWhile (·.addr = e.addrOf k)).map (·.toSized) = _
+  rw [Executable.withAddresses_dropWhile_addrOf _ j k hj hmin,
+    takeWhile_eq_take_of (n := k - j + 1)]
+  · rw [List.map_take, List.map_drop, Executable.withAddresses_map_snd, List.take_add_one,
+      List.getElem?_drop, Nat.add_sub_cancel' hjk, hc]
+    rfl
+  · intro m hm c hc
+    have := haddr (j + m) (by omega) (by omega)
+    grind [Executable.getElem?_withAddresses_eq]
+  · intro c hc
+    grind [Executable.getElem?_withAddresses_eq]
+
+theorem Executable.directivesFromAddress_cases {Directive : Type} (e : Executable Directive) (pc : Int64) :
+    e.directivesFromAddress pc = [] ∨
+    ∃ j < e.program.length, e.addrOf j = pc ∧ e.directivesFromAddress pc = e.program.drop j := by
+  by_cases h : ∃ n < e.program.length, e.addrOf n = pc
+  · obtain ⟨n, hn, hpc⟩ := h
+    obtain ⟨j, hjn, hj, hmin⟩ := exists_least_le (P := fun i => e.addrOf i = pc) hpc
+    refine Or.inr ⟨j, Nat.lt_of_le_of_lt hjn hn, hj, ?_⟩
+    rw [← hj]
+    exact Executable.directivesFromAddress_addrOf e j j rfl (fun k hk => by simpa [hj] using hmin k hk)
+  · refine Or.inl (Executable.directivesFromAddress_eq_nil_of e pc fun k hk hpc => h ⟨k, hk, hpc⟩)
 
 end Kraken

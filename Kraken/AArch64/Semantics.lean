@@ -5,26 +5,12 @@ meta import Kraken.AArch64.Syntax
 import Kraken.Attribute
 public import Kraken.Mem
 meta import Kraken.Mem
+public import Kraken.Semantics
+meta import Kraken.Semantics
 public import Lean.ToExpr
 meta import Lean.Elab.Deriving.ToExpr
 
 @[expose] public section
-
--- injective coercions only
-attribute [-instance] BitVec.instNatCast
-attribute [-instance] BitVec.instIntCast
-instance : Coe Bool Nat where coe := Bool.toNat
-
-@[kstep] def BitVec.unsigned {w} (x : BitVec w) : Int := x.toNat
-@[kstep] def BitVec.signed {w} (x : BitVec w) : Int := x.toInt
-@[kstep] def BitVec.take {w} (x : BitVec w) (n : Nat) : BitVec n := x.extractLsb' 0 n
-@[kstep] def BitVec.drop {w} (x : BitVec w) (n : Nat) : BitVec (w - n) := x.extractLsb' n (w-n)
-
-attribute [kstep]
-  BitVec.ofInt_add
-  BitVec.ofInt_toInt
-  BitVec.signed
-  BitVec.truncate
 
 namespace RegOrSp
 @[kstep] def base {w} (r : RegOrSp w) : XRegOrSp := match r with
@@ -140,48 +126,25 @@ structure StatusFlags where
   v : Bool
   deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
-abbrev DataMem := Mem 64
-instance : Repr DataMem where reprPrec _ _ := "<opaque memory>"
 structure MachineData where -- does not include code or program position
   regs : Reg64s := {}
   status : StatusFlags := .mk false false false false
   dmem : DataMem := ∅
   deriving Repr, BEq, DecidableEq
 
--- We only allow nondeterministic choices for a fixed set of types.
-class inductive NondetSupportingType : Type -> Type
-  | bitvec (w : RegWidth) : NondetSupportingType w.type
-  | bool : NondetSupportingType Bool
-  | statusFlags : NondetSupportingType StatusFlags
+@[reducible]
+instance : HasDataMem MachineData where
+  dmem s := s.dmem
+  withDmem s dmem := { s with dmem }
 
-def NondetSupportingType.from_hash {α} [t : NondetSupportingType α] (h : UInt64) : α :=
-  match t with
-  | .bool => h % 2 != 0
-  | .statusFlags => let h := h.toBitVec; (.mk h[0] h[1] h[2] h[3])
-  | .bitvec w => h.toBitVec.setWidth w.bits
+instance (w : RegWidth) : NondetSupportingType w.type where
+  from_hash h := h.toBitVec.setWidth w.bits
 
-instance (w : RegWidth) : NondetSupportingType w.type := .bitvec w
-instance : NondetSupportingType Bool := .bool
-instance : NondetSupportingType StatusFlags := .statusFlags
+instance : NondetSupportingType StatusFlags where
+  from_hash h := let h := h.toBitVec; (.mk h[0] h[1] h[2] h[3])
 
-structure MachineState where
-  data : MachineData
-  pc : Int64
-
-inductive Effects
-  | done (a : MachineState)
-  | unimplemented (msg : String)
-  -- loads and stores *outside* the data memory, eg. MMIO, might still affect the data memory:
-  -- for instance, MMIO reads/writes at certain device register addresses might change what
-  -- data memory the process logically owns vs what memory is owned by devices
-  | nonmem_load (dmem : DataMem) (addr : BitVec 64) (w : MemWidth) (ret : w.type → DataMem → Effects)
-  | nonmem_store (dmem : DataMem) (addr : BitVec 64) {w : MemWidth} (v : w.type) (ret: DataMem → Effects)
-  | undefined {α : Type} [NondetSupportingType α] (ret : α → Effects)
-  | require_read_access (addr : BitVec 64) (w : MemWidth) (ok : Unit → Effects)
-  | require_write_access (addr : BitVec 64) (w : MemWidth) (ok : Unit → Effects)
-  | require_exec_access (p: Std.Rco Int64) (ok : Unit → Effects)
-  | unaligned_sp {w : RegWidth} (sp : w.type)
-export Effects (unimplemented nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access)
+abbrev MachineState := Kraken.MachineState MachineData
+abbrev Effects := Kraken.Effects MachineData
 
 -- the unused `Std.Rco Int64` argument and the unmodified `MachineData` return
 -- value are present for uniformity with RegOrMem.interp
@@ -192,36 +155,6 @@ def RegOrSp.interp {w} (r : RegOrSp w) (s : MachineData) (_ : Std.Rco Int64)
 def RegOrZr.interp {w} (r : RegOrZr w) (s : MachineData) (_ : Std.Rco Int64)
   (ret : w.type → MachineData → Effects) : Effects :=
   ret (s.regs.getRegOrZr r) s
-
--- Since MMIO can cause devices to do arbitrary actions, a load might actually
--- *modify* memory. For instance:
--- A TEST instruction might load a flag from an MMIO address and bitwise-and it with
--- an immediate, and if the result is non-zero, it might mean that some device has
--- finished processing a buffer and therefore now passes ownership of that buffer
--- to the CPU.
--- Note that `ret` takes a whole `MachineData` instead of only `DataMem`, which
--- provides a bit more flexibility than we need: MachineData.load might change
--- dmem, but will not change the registers or status flags.
--- But this superfluous flexibility helps us simplify the state-threading:
--- Instead of writing `fun v dmem => ... { s with dmem } ...` everywhere, we
--- can just write `fun v s => ...` and the new `s` will shadow the old `s`.
-def MachineData.load
-  (s : MachineData) (addr : BitVec 64) (w : MemWidth)
-  (ret : w.type → MachineData → Effects): Effects :=
-  require_read_access addr w (fun _unit =>
-    match Mem.loadInt s.dmem addr w.bytes with
-    | .some i => ret (.ofInt _ i) s
-    | .none => nonmem_load s.dmem addr w (fun v dmem => ret v { s with dmem }))
-
-def MachineData.store (s : MachineData) (addr : BitVec 64) {w : MemWidth} (v : w.type) (ret: MachineData → Effects) : Effects :=
-  require_write_access addr w (fun _unit =>
-    match Mem.loadInt s.dmem addr w.bytes with
-    | .some _ =>
-        ret { s with dmem := Mem.storeInt s.dmem addr w.bytes v.toInt }
-    | .none => nonmem_store s.dmem addr v (fun dmem' => ret { s with dmem := dmem' }))
-
-class Labels where label : Label → Int64
-export Labels (label)
 
 @[kstep] def ConstExpr.interp [Labels] : ConstExpr → Std.Rco Int64 → Int64
   | .label l, _ => Labels.label l
@@ -246,12 +179,12 @@ def ConstExpr.evalBranchTarget [Labels] (target : ConstExpr) (p : Std.Rco Int64)
 
 @[kstep] def BitVec.apply_extend (v : BitVec 64) (ext : Extend) :=
   let extended := match ext.type with
-               | .UXTB => (v.take MemWidth.W8.bits).unsigned
-               | .SXTB => (v.take MemWidth.W8.bits).signed
-               | .UXTH => (v.take MemWidth.W16.bits).unsigned
-               | .SXTH => (v.take MemWidth.W16.bits).signed
-               | .UXTW => (v.take MemWidth.W32.bits).unsigned
-               | .SXTW => (v.take MemWidth.W32.bits).signed
+               | .UXTB => (v.take Width.W8.bits).unsigned
+               | .SXTB => (v.take Width.W8.bits).signed
+               | .UXTH => (v.take Width.W16.bits).unsigned
+               | .SXTH => (v.take Width.W16.bits).signed
+               | .UXTW => (v.take Width.W32.bits).unsigned
+               | .SXTW => (v.take Width.W32.bits).signed
                | .UXTX => v.unsigned
                | .SXTX => v.signed
   let shifted := match ext.amount with
@@ -264,8 +197,8 @@ def ConstExpr.evalBranchTarget [Labels] (target : ConstExpr) (p : Std.Rco Int64)
 
 @[kstep] def BitVec.apply_mem_extend (v : BitVec 64) (ext : MemExtend) :=
   let extended := match ext.type with
-               | .UXTW => (v.take MemWidth.W32.bits).unsigned
-               | .SXTW => (v.take MemWidth.W32.bits).signed
+               | .UXTW => (v.take Width.W32.bits).unsigned
+               | .SXTW => (v.take Width.W32.bits).signed
                | .UXTX => v.unsigned
                | .SXTX => v.signed
   let shifted := match ext.amount with
@@ -321,21 +254,21 @@ def ConstExpr.evalBranchTarget [Labels] (target : ConstExpr) (p : Std.Rco Int64)
   match mem.base with
   | .SP =>
     if s.regs.getRegOrSp .SP % 16#64 != 0#64 then
-      .unaligned_sp (s.regs.getRegOrSp .SP)
+      .unaligned (s.regs.getRegOrSp .SP) 16
     else
       ok ()
   | _ => ok ()
 
-@[kstep] def AddrExpr.interpLoad [Labels] {w : MemWidth} (mem : AddrExpr) (s : MachineData) (p : Std.Rco Int64) (ret : w.type → MachineData → Effects) :=
+@[kstep] def AddrExpr.interpLoad [Labels] {w : Width} (mem : AddrExpr) (s : MachineData) (p : Std.Rco Int64) (ret : w.type → MachineData → Effects) :=
   mem.checkSPAlignment s (fun _unit =>
     let (addr, s') := mem.eval s p
-    s'.load addr w ret)
+    MachineData.load s' addr w ret)
 
-@[kstep] def AddrExpr.interpStore [Labels] {w : MemWidth} (mem : AddrExpr) (s : MachineData) (p : Std.Rco Int64)
+@[kstep] def AddrExpr.interpStore [Labels] {w : Width} (mem : AddrExpr) (s : MachineData) (p : Std.Rco Int64)
     (val : w.type) (next : MachineData → Effects) : Effects :=
   mem.checkSPAlignment s (fun _unit =>
     let (addr, s') := mem.eval s p
-    s'.store addr (w := w) val next)
+    MachineData.store s' addr (w := w) val next)
 
 @[kstep] def UnscaledAddrExpr.eval [Labels] (mem : UnscaledAddrExpr) (s : MachineData) (p : Std.Rco Int64) : BitVec 64 :=
   let base := (s.regs.getRegOrSp mem.base).signed
@@ -347,34 +280,34 @@ def ConstExpr.evalBranchTarget [Labels] (target : ConstExpr) (p : Std.Rco Int64)
   match mem.base with
   | .SP =>
     if s.regs.getRegOrSp .SP % 16#64 != 0#64 then
-      .unaligned_sp (s.regs.getRegOrSp .SP)
+      .unaligned (s.regs.getRegOrSp .SP) 16
     else
       ok ()
   | _ => ok ()
 
-@[kstep] def UnscaledAddrExpr.interpLoad [Labels] {w : MemWidth} (mem : UnscaledAddrExpr) (s : MachineData) (p : Std.Rco Int64) (ret : w.type → MachineData → Effects) :=
+@[kstep] def UnscaledAddrExpr.interpLoad [Labels] {w : Width} (mem : UnscaledAddrExpr) (s : MachineData) (p : Std.Rco Int64) (ret : w.type → MachineData → Effects) :=
   mem.checkSPAlignment s (fun _unit =>
     let addr := mem.eval s p
-    s.load addr w ret)
+    MachineData.load s addr w ret)
 
-@[kstep] def UnscaledAddrExpr.interpStore [Labels] {w : MemWidth} (mem : UnscaledAddrExpr) (s : MachineData) (p : Std.Rco Int64)
+@[kstep] def UnscaledAddrExpr.interpStore [Labels] {w : Width} (mem : UnscaledAddrExpr) (s : MachineData) (p : Std.Rco Int64)
     (val : w.type) (next : MachineData → Effects) : Effects :=
   mem.checkSPAlignment s (fun _unit =>
     let addr := mem.eval s p
-    s.store addr (w := w) val next)
+    MachineData.store s addr (w := w) val next)
 
-@[kstep] def Literal.interpLoad [Labels] {w : MemWidth} (expr : Literal) (s : MachineData) (p : Std.Rco Int64) (ret : w.type → MachineData → Effects) : Effects :=
+@[kstep] def Literal.interpLoad [Labels] {w : Width} (expr : Literal) (s : MachineData) (p : Std.Rco Int64) (ret : w.type → MachineData → Effects) : Effects :=
   match expr with
   | .addr addr_expr => -- Load from address.
     let addr_val := Labels.label addr_expr.label
     let addr := BitVec.ofInt 64 (Int64.toInt addr_val)
-    s.load addr w ret
+    MachineData.load s addr w ret
   | .pool litpool_expr => -- Bypass loading and return value directly.
     let val := litpool_expr.expr.interp p
     let val_bv : w.type := BitVec.ofInt w.bits (Int64.toInt val)
     ret val_bv s
 
-@[kstep] def AddrOrLit.interpLoad [Labels] {w : MemWidth} (expr : AddrOrLit) (s : MachineData) (p : Std.Rco Int64) (ret : w.type → MachineData → Effects) :=
+@[kstep] def AddrOrLit.interpLoad [Labels] {w : Width} (expr : AddrOrLit) (s : MachineData) (p : Std.Rco Int64) (ret : w.type → MachineData → Effects) :=
   match expr with
   | .addr addr_expr => addr_expr.interpLoad s p ret
   | .lit lit_expr => lit_expr.interpLoad s p ret
@@ -494,8 +427,8 @@ set_option maxHeartbeats 1000000
   | .LDP dst1 dst2 src =>
     src.checkSPAlignment s (fun _unit =>
       let (addr, s') := src.eval s p
-      s'.load addr w (fun val1 s'' =>
-        s''.load (addr + w.bytesv) w (fun val2 s''' =>
+      MachineData.load s' addr w (fun val1 s'' =>
+        MachineData.load s'' (addr + w.bytesv) w (fun val2 s''' =>
           s'''.setRegOrZr dst1 val1 (fun s'''' =>
             s''''.setRegOrZr dst2 val2 next))))
   | .STP src1 src2 dst =>
@@ -503,8 +436,8 @@ set_option maxHeartbeats 1000000
       let val1 := s.regs.getRegOrZr src1
       let val2 := s.regs.getRegOrZr src2
       let (addr, s') := dst.eval s p
-      s'.store addr val1 (fun s'' =>
-        s''.store (addr + w.bytesv) val2 next))
+      MachineData.store s' addr val1 (fun s'' =>
+        MachineData.store s'' (addr + w.bytesv) val2 next))
   | .LDRB dst src =>
     src.interpLoad (w := .W8) s p (fun val s' =>
       s'.setRegOrZr dst (val.zeroExtend RegWidth.W32.bits) next)
@@ -512,9 +445,9 @@ set_option maxHeartbeats 1000000
     src.interpLoad (w := .W8) s p (fun val s' =>
       s'.setRegOrZr dst (val.zeroExtend RegWidth.W32.bits) next)
   | .STRB src dst =>
-    dst.interpStore (w := .W8) s p ((s.regs.getRegOrZr src).take MemWidth.W8.bits) next
+    dst.interpStore (w := .W8) s p ((s.regs.getRegOrZr src).take Width.W8.bits) next
   | .STURB src dst =>
-    dst.interpStore (w := .W8) s p ((s.regs.getRegOrZr src).take MemWidth.W8.bits) next
+    dst.interpStore (w := .W8) s p ((s.regs.getRegOrZr src).take Width.W8.bits) next
   | .LDRSB dst src =>
     src.interpLoad (w := .W8) s p (fun val s' =>
       s'.setRegOrZr dst (val.signExtend w.bits) next)
@@ -528,9 +461,9 @@ set_option maxHeartbeats 1000000
     src.interpLoad (w := .W16) s p (fun val s' =>
       s'.setRegOrZr dst (val.zeroExtend RegWidth.W32.bits) next)
   | .STRH src dst =>
-    dst.interpStore (w := .W16) s p ((s.regs.getRegOrZr src).take MemWidth.W16.bits) next
+    dst.interpStore (w := .W16) s p ((s.regs.getRegOrZr src).take Width.W16.bits) next
   | .STURH src dst =>
-    dst.interpStore (w := .W16) s p ((s.regs.getRegOrZr src).take MemWidth.W16.bits) next
+    dst.interpStore (w := .W16) s p ((s.regs.getRegOrZr src).take Width.W16.bits) next
   | .LDRSH dst src =>
     src.interpLoad (w := .W16) s p (fun val s' =>
       s'.setRegOrZr dst (val.signExtend w.bits) next)
@@ -546,8 +479,8 @@ set_option maxHeartbeats 1000000
   | .LDPSW dst1 dst2 src =>
     src.checkSPAlignment s (fun _unit =>
       let (addr, s') := src.eval s p
-      s'.load addr .W32 (fun val1 s'' =>
-        s''.load (addr + MemWidth.W32.bytesv) .W32 (fun val2 s''' =>
+      MachineData.load s' addr .W32 (fun val1 s'' =>
+        MachineData.load s'' (addr + Width.W32.bytesv) .W32 (fun val2 s''' =>
           s'''.setRegOrZr dst1 (val1.signExtend RegWidth.W64.bits) (fun s'''' =>
             s''''.setRegOrZr dst2 (val2.signExtend RegWidth.W64.bits) next))))
   | .ADD_e dst src1 src2 =>
@@ -948,49 +881,15 @@ set_option maxHeartbeats 1000000
   | .instr i => i.interp s p next jmp
   | .byteArray _ => .unimplemented s!"Unimplemented: execution reached data block at {p.1}"
 
-def Directives.interp [Labels]
-  (ds : List (Kraken.Sized Directive)) (s : MachineData) (pc : Int64)
-  (ret : Int64 → MachineData → Effects) : Effects :=
-  match ds with
-  | [] => ret pc s
-  | {directive, size := sz} :: ds =>
-    directive.interp s (.mk pc (pc+.ofNat sz)) (jmp:=ret) (next := (fun s =>
-    interp ds s (pc+.ofNat sz) ret))
+@[reducible]
+instance : ArchDirective Directive MachineData where
+  label?
+    | .label l => some l
+    | _ => none
+  interp := Directive.interp
+  undefSeed s := hash s.regs
 
 abbrev Layout := Kraken.Layout Directive
-
-@[reducible]
-def Executable.labels (e : Executable) : Labels :=
-  { label l := (e.withAddresses.findSome?
-      (fun {directive, addr, ..} => if directive = .label l then .some addr else .none)).getD (-1) }
-
-def Executable.directivesFromLabel (e : Executable) (l : Label) : List (Kraken.Sized Directive) :=
-  e.program.dropWhile (·.directive != .label l)
-
-def Executable.step (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
-  let := Executable.labels e
-  Directives.interp (e.directivesAtAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
-
-def Executable.straightline (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
-  let := Executable.labels e
-  Directives.interp (e.directivesFromAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
-
--- -- Concrete evaluators for expedient testing
-
-partial def Executable.eval (e : Executable) (s : MachineState) (until_ : MachineState → Bool) : Except String (MachineState) :=
-  if until_ s then .ok s else handleEffects (Executable.straightline e s .done)
-where
-  handleEffects es :=
-    match es with
-    | .done s => eval e s until_
-    | .unimplemented msg => .error msg
-    | .require_read_access _ _ ok => handleEffects (ok ())
-    | .require_write_access _ _ ok => handleEffects (ok ())
-    | .require_exec_access _ ok => handleEffects (ok ())
-    | .nonmem_load _ addr _ _ => .error s!"Load at unmapped address {repr addr}"
-    | .nonmem_store _ addr _ _ => .error s!"Store at unmapped address {repr addr}"
-    | .unaligned_sp sp => .error s!"SP={sp} (is not 16-byte aligned)"
-    | @Effects.undefined _ t cont => handleEffects (cont (t.from_hash (hash s.1.regs)))
 
 def Directive.fakeSize (d : Directive) : Nat :=
   match d with
@@ -1004,8 +903,6 @@ def Program.fakeLayout (prog : Program) : Executable :=
   let layout : Layout := { start := h.toInt64<<<16, size i := prog[i]!.fakeSize }
   layout prog
 
-abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
-
 /-- info: Except.ok 58 -/
 #guard_msgs in
 #eval
@@ -1015,9 +912,9 @@ abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
     .instr ⟨.W64, .ADD_e .X1 .X1 0x10⟩,
     .instr ⟨.W64, .STR .X1 { base := .SP, off := 0 }⟩,
     .instr ⟨.W64, .LDR .X2 (.addr { base := .SP, off := 0 })⟩]
-  let start := (Executable.labels exe).label "main"
+  let start := exe.labels.label "main"
   let data : MachineData := { dmem := Mem.storeInt {} 0x100 8 42, regs := {SP := 0x100} }
-  (Executable.eval exe {data, pc := start} (fun st => (exe.directivesFromAddress st.pc).isEmpty)).bind (fun s => .ok s.1.regs.X2)
+  (exe.eval {data, pc := start} (fun st => (exe.directivesFromAddress st.pc).isEmpty)).bind (fun s => .ok s.1.regs.X2)
 
 /-- info: Except.ok (42, 264) -/
 #guard_msgs in
@@ -1025,9 +922,9 @@ abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
   let exe := Program.fakeLayout [
     .label "main",
     .instr ⟨.W64, .LDR .X1 (.addr { base := .SP, off := .imm { imm := 8, index := some .Pre } })⟩ ]
-  let start := (Executable.labels exe).label "main"
+  let start := exe.labels.label "main"
   let data : MachineData := { dmem := Mem.storeInt {} 0x108 8 42, regs := { SP := 0x100 } }
-  (Executable.eval exe {data, pc := start} (fun st => (exe.directivesFromAddress st.pc).isEmpty)).bind (fun s => .ok (s.1.regs.X1, s.1.regs.SP))
+  (exe.eval {data, pc := start} (fun st => (exe.directivesFromAddress st.pc).isEmpty)).bind (fun s => .ok (s.1.regs.X1, s.1.regs.SP))
 
 /-- info: Except.ok (42, 264) -/
 #guard_msgs in
@@ -1035,9 +932,9 @@ abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
   let exe := Program.fakeLayout [
     .label "main",
     .instr ⟨.W64, .STR .X1 { base := .SP, off := .imm { imm := 8, index := some .Post } }⟩ ]
-  let start := (Executable.labels exe).label "main"
+  let start := exe.labels.label "main"
   let data : MachineData := { dmem := Mem.storeInt {} 0x100 8 0, regs := { SP := 0x100, X1 := 42 } }
-  (Executable.eval exe {data, pc := start} (fun st => (exe.directivesFromAddress st.pc).isEmpty)).bind (fun s =>
+  (exe.eval {data, pc := start} (fun st => (exe.directivesFromAddress st.pc).isEmpty)).bind (fun s =>
     match Mem.loadInt s.1.dmem 0x100 8 with
     | some v => .ok (v, s.1.regs.SP)
     | none => .error "Memory store failed"
