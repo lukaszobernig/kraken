@@ -26,7 +26,9 @@ theorem Int64.add_sub_cancel' (a b : Int64) : a + (b - a) = b := by
 
 attribute [grind =]
   BitVec.ofInt_natCast
+  BitVec.ofNat_add
   Int.natCast_shiftLeft
+  List.length_append
   List.length_take
   List.length_drop
   List.take_of_length_le

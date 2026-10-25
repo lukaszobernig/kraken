@@ -80,16 +80,15 @@ structure Reg64s where
   | .r12 => s.r12 | .r13 => s.r13 | .r14 => s.r14 | .r15 => s.r15)
 
 @[kstep] def Reg64s.set64 (regs : Reg64s) (r : Reg64) (v : Width.W64.type) : Reg64s :=
-  let  v := UInt64.ofBitVec v
   match r with
-  | .rax => { regs with rax := v } | .rbx => { regs with rbx := v }
-  | .rcx => { regs with rcx := v } | .rdx => { regs with rdx := v }
-  | .rsi => { regs with rsi := v } | .rdi => { regs with rdi := v }
-  | .rsp => { regs with rsp := v } | .rbp => { regs with rbp := v }
-  | .r8  => { regs with r8  := v } | .r9  => { regs with r9  := v }
-  | .r10 => { regs with r10 := v } | .r11 => { regs with r11 := v }
-  | .r12 => { regs with r12 := v } | .r13 => { regs with r13 := v }
-  | .r14 => { regs with r14 := v } | .r15 => { regs with r15 := v }
+  | .rax => { regs with rax := UInt64.ofBitVec v } | .rbx => { regs with rbx := UInt64.ofBitVec v }
+  | .rcx => { regs with rcx := UInt64.ofBitVec v } | .rdx => { regs with rdx := UInt64.ofBitVec v }
+  | .rsi => { regs with rsi := UInt64.ofBitVec v } | .rdi => { regs with rdi := UInt64.ofBitVec v }
+  | .rsp => { regs with rsp := UInt64.ofBitVec v } | .rbp => { regs with rbp := UInt64.ofBitVec v }
+  | .r8  => { regs with r8  := UInt64.ofBitVec v } | .r9  => { regs with r9  := UInt64.ofBitVec v }
+  | .r10 => { regs with r10 := UInt64.ofBitVec v } | .r11 => { regs with r11 := UInt64.ofBitVec v }
+  | .r12 => { regs with r12 := UInt64.ofBitVec v } | .r13 => { regs with r13 := UInt64.ofBitVec v }
+  | .r14 => { regs with r14 := UInt64.ofBitVec v } | .r15 => { regs with r15 := UInt64.ofBitVec v }
 
 @[kstep] def Reg64s.get (s : Reg64s) {w} (r : Reg w) : w.type :=
   ((s.get64 r.base).drop r.offset).take w.bits
