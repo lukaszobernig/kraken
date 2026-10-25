@@ -34,6 +34,16 @@ example (v : UInt64) (a : BitVec 64) (R : Mem 64 → Prop) :
     Eq (v.At a) ⋆ R = R ⋆ Eq (v.toBytes.At a) := by
   ecancel
 
+example (bs₁ bs₂ : List UInt8) (a : BitVec 64) (R : Mem 64 → Prop) (m : Mem 64)
+    (h_bs : bs₁ = bs₂) (h : (Eq (bs₁.At a) ⋆ R) m) :
+    (R ⋆ Eq (bs₂.At a)) m := by
+  ecancel
+
+example (bs : List UInt8) (a : BitVec 64) (R : Mem 64 → Prop) (m : Mem 64)
+    (h : (Eq (bs.At (a + 4#64 + 4#64)) ⋆ R) m) :
+    (R ⋆ Eq (bs.At (a + 8#64))) m := by
+  ecancel
+
 example {w} (A : Mem w → Prop) : ∃ X : Mem w → Prop, A = X ⋆ A := by refine ⟨?_, by ecancel⟩
 
 example {w} (A B C : Mem w → Prop) : ∃ X : Mem w → Prop, A ⋆ (B ⋆ C) = X ⋆ A := by refine ⟨?_, by ecancel⟩
