@@ -693,26 +693,58 @@ def kLiftLets : DSimproc := fun e => do
   /- logInfo m!"liftLets produces {e'}" -/
   return .step e'
 
--- FIXME: a copy-paste of the Lean implementation since it's marked as private
 def rwTarget (goal: Grind.Goal) (symm : Bool) (term : Expr) : Grind.GrindTacticM (Grind.Goal × List Grind.Goal) := do
   goal.withContext do
-    let mvarCounterSaved := (← getMCtx).mvarCounter
-    let r ← Term.withSynthesize do
-      let heq := term
-      /-
-      The target is in `sym` normal form (e.g., reducible constants have been unfolded), but the
-      given equation is not. We unfold reducible constants in its statement so that `kabstract`
-      key-matching can find occurrences of the lhs in the target, and the rhs requires less
-      normalization after the rewrite.
-      -/
-      let heqType ← instantiateMVars (← inferType heq)
-      let heqType' ← Sym.unfoldReducible heqType
-      let heq ← if isSameExpr heqType heqType' then pure heq else mkExpectedTypeHint heq heqType'
-      goal.mvarId.rewrite (← instantiateMVars (← goal.mvarId.getType)) heq symm
-    let mctx ← getMCtx
-    let mvarIds := r.mvarIds.filter fun mvarId => (mctx.getDecl mvarId |>.index) >= mvarCounterSaved
-    let eNew ← Grind.liftSymM <| Sym.preprocessExpr r.eNew
-    let mvarId ← goal.mvarId.replaceTargetEq eNew r.eqProof
+    let target ← instantiateMVars (← goal.mvarId.getType)
+    let rootRewrite? : Option (Expr × Expr × List MVarId) ←
+      if target.isAppOfArity ``gimmickId 1 && target.appArg!.isAppOfArity ``Kraken.Effects.All 3 then
+        let gimmickFn := target.appFn!
+        let inner := target.appArg!
+        let saved ← saveState
+        try
+          Term.withSynthesize do
+            let heqType ← Sym.unfoldReducible (← instantiateMVars (← inferType term))
+            let (xs, bis, eqType) ← forallMetaTelescopeReducing heqType
+            let some (_, lhs, rhs) := eqType.eq? | failure
+            let (lhs, rhs) := if symm then (rhs, lhs) else (lhs, rhs)
+            let mut proof := mkAppN term xs
+            if symm then
+              proof ← mkEqSymm proof
+            let eNewInner ←
+              if lhs.isAppOfArity ``Kraken.Effects.All 3 && (← isDefEq lhs inner) then
+                pure rhs
+              else if ← isDefEq lhs inner.appArg! then
+                proof ← mkCongrArg inner.appFn! proof
+                pure (mkApp inner.appFn! rhs)
+              else
+                failure
+            for x in xs, bi in bis do
+              if bi.isInstImplicit && !(← x.mvarId!.isAssigned) then
+                x.mvarId!.assign (← synthInstance (← inferType x))
+            let eqProof ← mkCongrArg gimmickFn (← instantiateMVars proof)
+            let eNew := mkApp gimmickFn (← instantiateMVars eNewInner)
+            let mvarIds := (xs.map (·.mvarId!)).toList
+            pure (some (eNew, eqProof, mvarIds))
+        catch _ =>
+          restoreState saved
+          pure none
+      else
+        pure none
+    let (eNewRaw, eqProof, mvarIds) ← match rootRewrite? with
+      | some res => pure res
+      | none =>
+        let mvarCounterSaved := (← getMCtx).mvarCounter
+        let r ← Term.withSynthesize do
+          let heq := term
+          let heqType ← instantiateMVars (← inferType heq)
+          let heqType' ← Sym.unfoldReducible heqType
+          let heq ← if isSameExpr heqType heqType' then pure heq else mkExpectedTypeHint heq heqType'
+          goal.mvarId.rewrite target heq symm
+        let mctx ← getMCtx
+        let mvarIds := r.mvarIds.filter fun mvarId => (mctx.getDecl mvarId |>.index) >= mvarCounterSaved
+        pure (r.eNew, r.eqProof, mvarIds)
+    let eNew ← Grind.liftSymM <| Sym.preprocessExpr eNewRaw
+    let mvarId ← goal.mvarId.replaceTargetEq eNew eqProof
     let mvarIds ← mvarIds.filterM fun mvarId => return !(← mvarId.isAssigned)
     let sideGoals ← mvarIds.mapM fun mvarId => do
       let target ← mvarId.getType
