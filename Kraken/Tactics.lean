@@ -225,30 +225,33 @@ elab_rules : tactic
             (refine $sliceThm $k $n _ (by kaddr $p) ?_
              conv =>
                arg 2
-               rw [Kraken.Executable.program_apply]
+               rw [Kraken.Executable.program_apply_slice]
                (try delta $p)
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
                           List.drop_succ_cons, List.drop_zero, List.drop_nil,
-                          List.take_succ_cons, List.take_zero, List.take_nil])))
+                          List.take_succ_cons, List.take_zero, List.take_nil,
+                          Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
         | none, some n =>
           evalTactic (← `(tactic|
             (refine $sliceThm 0 $n _ (by kaddr $p) ?_
              conv =>
                arg 2
-               rw [Kraken.Executable.program_apply]
+               rw [Kraken.Executable.program_apply_slice]
                (try delta $p)
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
                           List.drop_succ_cons, List.drop_zero, List.drop_nil,
-                          List.take_succ_cons, List.take_zero, List.take_nil])))
+                          List.take_succ_cons, List.take_zero, List.take_nil,
+                          Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
         | some k, none =>
           evalTactic (← `(tactic|
             (refine $atThm $k _ (by kaddr $p) ?_
              conv =>
                arg 2
-               rw [Kraken.Executable.program_apply]
+               rw [Kraken.Executable.program_apply_drop]
                (try delta $p)
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
-                          List.drop_succ_cons, List.drop_zero, List.drop_nil])))
+                          List.drop_succ_cons, List.drop_zero, List.drop_nil,
+                          Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
         | none, none =>
           let isEventually := isTraced || (← whnfR (← instantiateMVars (← getMainTarget))).getAppFn'.constName? == some ``Eventually
           if isEventually then
@@ -265,7 +268,8 @@ elab_rules : tactic
                  arg 2
                  (try delta $p)
                  rw [Executable.directivesFromStart]
-                 simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil])))
+                 simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
+                            Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
           else
             evalTactic (← `(tactic|
               ((try unfold Kraken.Executable.Exec)
@@ -275,7 +279,8 @@ elab_rules : tactic
                  (try delta $p)
                  (try rw [Executable.directivesFromStart])
                  simp only [Kraken.Layout.apply, Kraken.Executable.startAddr_apply,
-                            List.mapIdx_cons, List.mapIdx_nil])))
+                            List.mapIdx_cons, List.mapIdx_nil,
+                            Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
       | some s =>
         let env ← getEnv
         let state ← Term.elabTerm s none
@@ -343,11 +348,12 @@ elab_rules : tactic
              (try dsimp only at *)
              conv =>
                arg 2
-               rw [Kraken.Executable.program_apply]
+               rw [Kraken.Executable.program_apply_slice]
                (try delta $p)
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
                           List.drop_succ_cons, List.drop_zero, List.drop_nil,
-                          List.take_succ_cons, List.take_zero, List.take_nil])))
+                          List.take_succ_cons, List.take_zero, List.take_nil,
+                          Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
         | none, some n =>
           evalTactic (← `(tactic|
             (refine $sliceThm (prog := $p) 0 $n _ (s := $s) (by kaddr $p) ?_
@@ -357,11 +363,12 @@ elab_rules : tactic
              (try dsimp only at *)
              conv =>
                arg 2
-               rw [Kraken.Executable.program_apply]
+               rw [Kraken.Executable.program_apply_slice]
                (try delta $p)
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
                           List.drop_succ_cons, List.drop_zero, List.drop_nil,
-                          List.take_succ_cons, List.take_zero, List.take_nil])))
+                          List.take_succ_cons, List.take_zero, List.take_nil,
+                          Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
         | some k, none =>
           evalTactic (← `(tactic|
             (refine $atThm (prog := $p) $k _ (s := $s) (by kaddr $p) ?_
@@ -371,10 +378,11 @@ elab_rules : tactic
              (try dsimp only at *)
              conv =>
                arg 2
-               rw [Kraken.Executable.program_apply]
+               rw [Kraken.Executable.program_apply_drop]
                (try delta $p)
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
-                          List.drop_succ_cons, List.drop_zero, List.drop_nil])))
+                          List.drop_succ_cons, List.drop_zero, List.drop_nil,
+                          Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
         | none, none =>
           let isEventually := isTraced || (← whnfR (← instantiateMVars (← getMainTarget))).getAppFn'.constName? == some ``Eventually
           if isEventually then
@@ -395,7 +403,8 @@ elab_rules : tactic
                  arg 2
                  (try delta $p)
                  rw [Executable.directivesFromStart]
-                 simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil])))
+                 simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
+                            Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
           else
             evalTactic (← `(tactic|
               ((try unfold Kraken.Executable.Exec)
@@ -409,7 +418,8 @@ elab_rules : tactic
                  (try delta $p)
                  (try rw [Executable.directivesFromStart])
                  simp only [Kraken.Layout.apply, Kraken.Executable.startAddr_apply,
-                            List.mapIdx_cons, List.mapIdx_nil])))
+                            List.mapIdx_cons, List.mapIdx_nil,
+                            Nat.add_zero, Nat.zero_add, Nat.reduceAdd])))
 
 /-- Pack curried secret universal quantifiers after `s₀` into a single tuple so that
     `tailrec_loop_cps_traced` can be applied directly to a `Spec (trace := some tr)` goal. -/
