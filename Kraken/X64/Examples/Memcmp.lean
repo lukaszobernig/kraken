@@ -191,8 +191,6 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
       kintro s₀ ⟨ra, a, b, R⟩ ⟨a_bs, b_bs, acc, frame⟩ ⟨s, pc⟩
         ⟨rfl, h_rdx_v, h_rdi_v, h_rsi_v, h_rax_v, h_rsp, h_rsp_p, h_cs, h_a_v, h_b_v, h_mem_v⟩
       kprologue memcmp at "loop" to "done" with s
-      rw [Mem.At_take_drop_sep a_bs 1 a_ptr (by omega) (by grind),
-          Mem.At_take_drop_sep b_bs 1 b_ptr (by omega) (by grind)] at h_mem_v
       kstep
       kdone
       refine ⟨(a_bs.drop 1, b_bs.drop 1,
@@ -203,12 +201,9 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
          h_rsp, h_rsp_p, h_cs, by simp [h_a_v], by simp [h_b_v], by ecancel⟩,
         ?_⟩
       rintro t_s ⟨hQ_pc, hQ_rax, hQ_rsp, hQ_rsp_p, hQ_cs, _, hQ_mem⟩
-      refine ⟨hQ_pc, ?_, hQ_rsp, hQ_rsp_p, hQ_cs, by omega, ?_⟩
-      · rw [hQ_rax]
-        exact diffAcc_step a_bs b_bs (by omega) (by omega) acc
-      · rw [Mem.At_take_drop_sep a_bs 1 a_ptr (by omega) (by grind),
-            Mem.At_take_drop_sep b_bs 1 b_ptr (by omega) (by grind)]
-        ecancel
+      refine ⟨hQ_pc, ?_, hQ_rsp, hQ_rsp_p, hQ_cs, by omega, by ecancel⟩
+      rw [hQ_rax]
+      exact diffAcc_step a_bs b_bs (by omega) (by omega) acc
   · kintro s₀ ⟨ra, a, b, R⟩ ⟨st, pc⟩ ⟨rfl, h_rax, h_rsp, h_rsp_p, h_cs, h_ab_len, h_mem_q⟩
     have h_rsp0 : s₀.regs.rsp.toBitVec = p_sp := by rw [← h_rsp, h_rsp_p]
     kprologue memcmp at "done" with st

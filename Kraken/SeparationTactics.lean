@@ -1,7 +1,8 @@
 module
 
-import Kraken.Mem
-import Kraken.Separation
+public import Kraken.Mem
+public import Kraken.Separation
+public import Kraken.SeparationMem
 public meta import Lean.Elab.Tactic
 public meta import Lean.Meta.Tactic.AC
 public meta import Lean.Meta.Tactic.Grind
@@ -40,12 +41,20 @@ private partial def reduceProjectionApp (e : Expr) : MetaM Expr := do
 
 inductive SepTree where
   | emp (e : Expr)
-  | sep (p q : SepTree)
+  | sep (e : Expr) (p q : SepTree)
   | atom (e : Expr)
+
+def SepTree.toExpr : SepTree → Expr
+  | .emp e | .sep e _ _ | .atom e => e
+
+def SepTree.numClauses : SepTree → Nat
+  | .emp _ => 0
+  | .sep _ p q => p.numClauses + q.numClauses
+  | .atom _ => 1
 
 def SepTree.clauses : SepTree → List Expr
   | .emp _ => []
-  | .sep p q => p.clauses ++ q.clauses
+  | .sep _ p q => p.clauses ++ q.clauses
   | .atom e => [e]
 
 partial def parseSepTree (e : Expr) : MetaM SepTree := do
@@ -56,8 +65,61 @@ partial def parseSepTree (e : Expr) : MetaM SepTree := do
     let args := e.getAppArgs
     let p ← parseSepTree args[args.size - 2]!
     let q ← parseSepTree args[args.size - 1]!
-    return .sep p q
+    return .sep e p q
   return .atom e
+
+private inductive LeafExtract where
+  | single (a : Expr) (h : Expr)
+  | split (a : Expr) (rem : Expr) (h : Expr)
+
+private partial def extractSepTreeAux (t : SepTree) (targetIdx : Nat)
+    (atLeaf : Expr → MetaM LeafExtract) : MetaM (Option LeafExtract) := do
+  match t with
+  | .emp _ => return none
+  | .atom e =>
+    if targetIdx == 0 then
+      return some (← atLeaf e)
+    else
+      return none
+  | .sep _ p q =>
+    let pCount := p.numClauses
+    if targetIdx < pCount then
+      let some res ← extractSepTreeAux p targetIdx atLeaf | return none
+      match res with
+      | .single a hp =>
+        let h ← mkAppM ``Std.ExtHashMap.sep_extract_head #[q.toExpr, hp]
+        return some (.split a q.toExpr h)
+      | .split a p' hp =>
+        let rem ← mkAppM ``Std.ExtHashMap.sep #[p', q.toExpr]
+        let h ← mkAppM ``Std.ExtHashMap.sep_extract_left #[q.toExpr, hp]
+        return some (.split a rem h)
+    else
+      let some res ← extractSepTreeAux q (targetIdx - pCount) atLeaf | return none
+      match res with
+      | .single a hq =>
+        let h ← mkAppM ``Std.ExtHashMap.sep_extract_tail #[p.toExpr, hq]
+        return some (.split a p.toExpr h)
+      | .split a q' hq =>
+        let rem ← mkAppM ``Std.ExtHashMap.sep #[p.toExpr, q']
+        let h ← mkAppM ``Std.ExtHashMap.sep_extract_right #[p.toExpr, hq]
+        return some (.split a rem h)
+
+/--
+Extracts (or splits and extracts) the leaf at `targetIdx` from `t` along the binary tree path
+in $O(\text{depth})$ steps without calling `denoteClauses`, `rebuildSepTree`, or
+`AC.rewriteUnnormalizedRefl`. Returns `(extractedClause, frameExpr, eqProof)` where
+`eqProof : t.toExpr = extractedClause ⋆ frameExpr`.
+-/
+private def extractSepTree (t : SepTree) (targetIdx : Nat)
+    (atLeaf : Expr → MetaM LeafExtract) : MetaM (Option (Expr × Expr × Expr)) := do
+  let some res ← extractSepTreeAux t targetIdx atLeaf | return none
+  match res with
+  | .split a frame h => return some (a, frame, h)
+  | .single a h =>
+    let h' ← mkAppM ``Std.ExtHashMap.sep_extract_here #[h]
+    let eqType ← inferType h'
+    let frame := eqType.appArg!.appArg!
+    return some (a, frame, h')
 
 /--
 Rebuilds a separation predicate from its parsed `SepTree` while replacing each
@@ -72,7 +134,7 @@ private partial def rebuildSepTree (t : SepTree) (clauses : List (Expr × Option
     MetaM (Option (Expr × Option Expr × List (Expr × Option Expr))) := do
   match t with
   | .emp e => return some (e, none, clauses)
-  | .sep p q =>
+  | .sep _ p q =>
     let some (p', hp?, clauses) ← rebuildSepTree p clauses | return none
     let some (q', hq?, clauses) ← rebuildSepTree q clauses | return none
     let sep' ← mkAppM ``Std.ExtHashMap.sep #[p', q']
@@ -152,10 +214,9 @@ private def isCalleeSavedEqType (t : Expr) : Bool :=
   | some n => (`Reg64s.CalleeSavedEq).isSuffixOf n
   | none => false
 
-private def provePropEq (lhs rhs : Expr) : MetaM (Option Expr) :=
+def provePropGoal (prop : Expr) : MetaM (Option Expr) :=
   commitWhenSomeNoEx? do
-    unless ← isDefEq (← inferType lhs) (← inferType rhs) do return none
-    let goal ← mkFreshExprMVar (← mkEq lhs rhs)
+    let goal ← mkFreshExprMVar prop
     let mut toClear : Array FVarId := #[]
     for localDecl? in (← getLCtx).decls do
       if let some localDecl := localDecl? then
@@ -169,6 +230,10 @@ private def provePropEq (lhs rhs : Expr) : MetaM (Option Expr) :=
     if res.hasFailed then return none
     unless ← goal.mvarId!.isAssigned do return none
     return some (← instantiateMVars goal)
+
+private def provePropEq (lhs rhs : Expr) : MetaM (Option Expr) := do
+  unless ← commitWhen (isDefEq (← inferType lhs) (← inferType rhs)) do return none
+  provePropGoal (← mkEq lhs rhs)
 
 private def matchPropAt (lhs rhs : Expr) : MetaM (Option Expr) := do
   let some (bs₁, addr₁) ← extractAtBytesAndAddr? lhs | return none
@@ -322,7 +387,87 @@ private partial def cancelAndAlign (predType : Expr) (lhs rhs : ClauseSlots) :
     return some (lhsCan, rhsCan)
   tryAssignNakedSlot predType lhs rhs
 
-private def solveSepEq (lhs rhs : Expr) : MetaM (Option Expr) :=
+private def collectTakeTargets (clauses : List Expr) : MetaM (Array (Expr × Expr)) := do
+  let mut res := #[]
+  for clause in clauses do
+    if let some (bsExpr, _) ← extractAtBytesAndAddr? clause then
+      if bsExpr.isAppOfArity ``List.take 3 then
+        let k := bsExpr.appFn!.appArg!
+        let bs' := bsExpr.appArg!
+        unless res.any (fun (b, n) => b == bs' && n == k) do
+          res := res.push (bs', k)
+  return res
+
+private partial def expandSlicesInSepExpr (e : Expr) (takeTargets : Array (Expr × Expr))
+    (fuel : Nat := 4) : MetaM (Expr × Option Expr) := do
+  if fuel == 0 || takeTargets.isEmpty then
+    return (e, none)
+  let e ← reduceProjectionApp (← instantiateMVars e)
+  if e.getAppFn.constName? == some ``Std.ExtHashMap.sep then
+    let args := e.getAppArgs
+    let p := args[args.size - 2]!
+    let q := args[args.size - 1]!
+    let (p', hp?) ← expandSlicesInSepExpr p takeTargets fuel
+    let (q', hq?) ← expandSlicesInSepExpr q takeTargets fuel
+    if hp?.isNone && hq?.isNone then
+      return (e, none)
+    let sep' ← mkAppM ``Std.ExtHashMap.sep #[p', q']
+    let hSep? ← match hp?, hq? with
+      | none, none => pure none
+      | some hp, none =>
+        let h1 ← mkCongrArg sep'.appFn!.appFn! hp
+        some <$> mkCongrFun h1 q'
+      | none, some hq =>
+        some <$> mkCongrArg sep'.appFn! hq
+      | some hp, some hq =>
+        let h1 ← mkCongrArg sep'.appFn!.appFn! hp
+        some <$> mkCongr h1 hq
+    return (sep', hSep?)
+  let some (bs, a) ← extractAtBytesAndAddr? e | return (e, none)
+  if bs.hasExprMVar || a.hasExprMVar then
+    return (e, none)
+  for (bs', k) in takeTargets do
+    let matchRes? ← commitWhenSomeNoEx? do
+      let (bsTarget, hBs?) ←
+        if ← matchClosed bs bs' then
+          pure (bs, none)
+        else if bs.isAppOfArity ``List.drop 3 && bs'.isAppOfArity ``List.drop 3 then
+          let some hBs ← provePropEq bs bs' | return none
+          pure (bs', some hBs)
+        else
+          return none
+      let splitFn ← mkAppM ``Mem.At_take_drop_sep #[bsTarget, k, a]
+      let splitFnType ← inferType splitFn
+      let kType := splitFnType.bindingDomain!
+      let lenBoundType := splitFnType.bindingBody!.bindingDomain!
+      let some hK ← provePropGoal kType | return none
+      let some hLen ← provePropGoal lenBoundType | return none
+      let hSplit := mkApp2 splitFn hK hLen
+      let hSplit ← match hBs? with
+        | none =>
+          let actualLhs := (← inferType hSplit).appFn!.appArg!
+          if e == actualLhs then
+            pure hSplit
+          else
+            mkExpectedTypeHint hSplit (← mkEq e (← inferType hSplit).appArg!)
+        | some hBs =>
+          let fn ← withLocalDeclD `x (← inferType bs) fun x => do
+            let atE ← mkAppM ``List.At #[x, a]
+            let eqE ← mkAppM ``Eq #[atE]
+            mkLambdaFVars #[x] eqE
+          let hCongr ← mkCongrArg fn hBs
+          mkEqTrans hCongr hSplit
+      return some hSplit
+    if let some hSplit := matchRes? then
+      let splitRhs := (← inferType hSplit).appArg!
+      let (splitRhs', hMore?) ← expandSlicesInSepExpr splitRhs takeTargets (fuel - 1)
+      let hTotal ← match hMore? with
+        | none => pure hSplit
+        | some hMore => mkEqTrans hSplit hMore
+      return (splitRhs', some hTotal)
+  return (e, none)
+
+private def solveSepEqCore (lhs rhs : Expr) : MetaM (Option Expr) :=
   commitWhenSomeNoEx? do
     let lhs ← instantiateMVars lhs
     let rhs ← instantiateMVars rhs
@@ -343,6 +488,31 @@ private def solveSepEq (lhs rhs : Expr) : MetaM (Option Expr) :=
     | some rhsEq => return some (← mkEqTrans acProof rhsEq)
     | none => return some acProof
 
+private def solveSepEq (lhs rhs : Expr) : MetaM (Option Expr) := do
+  if let some prf ← solveSepEqCore lhs rhs then
+    return some prf
+  commitWhenSomeNoEx? do
+    let lhs ← instantiateMVars lhs
+    let rhs ← instantiateMVars rhs
+    let lhsTree ← parseSepTree lhs
+    let rhsTree ← parseSepTree rhs
+    let rhsTakes ← collectTakeTargets rhsTree.clauses
+    let lhsTakes ← collectTakeTargets lhsTree.clauses
+    if rhsTakes.isEmpty && lhsTakes.isEmpty then
+      return none
+    let (lhs', hLhs?) ← expandSlicesInSepExpr lhs rhsTakes
+    let (rhs', hRhs?) ← expandSlicesInSepExpr rhs lhsTakes
+    if hLhs?.isNone && hRhs?.isNone then
+      return none
+    let some hMid ← solveSepEqCore lhs' rhs' | return none
+    let hMid ← match hLhs? with
+      | some hLhs => mkEqTrans hLhs hMid
+      | none => pure hMid
+    let hMid ← match hRhs? with
+      | some hRhs => mkEqTrans hMid (← mkEqSymm hRhs)
+      | none => pure hMid
+    return some hMid
+
 private def solveFromHypothesis (target : Expr) (localDecl : LocalDecl) : MetaM (Option Expr) := do
   let hypType ← reduceProjectionApp (← instantiateMVars localDecl.type)
   unless target.isApp && hypType.isApp do return none
@@ -360,7 +530,7 @@ structure SepAtCandidate where
   hyp : Expr
   hypArg : Expr
   hypTree : SepTree
-  clauses : List Expr
+  clause : Expr
   clauseIdx : Nat
   bs : Expr
   addr : Expr
@@ -393,7 +563,7 @@ def findSepAtCandidates (starGoal : MVarId) : MetaM (Array SepAtCandidate) := st
                 hyp := localDecl.toExpr
                 hypArg
                 hypTree
-                clauses
+                clause
                 clauseIdx := idx
                 bs
                 addr
@@ -402,17 +572,18 @@ def findSepAtCandidates (starGoal : MVarId) : MetaM (Array SepAtCandidate) := st
 
 /--
 Directly solves a `starGoal` of the form `(Eq (?bs.At ?addr') ⋆ ?R) s.dmem` using a
-pre-matched `SepAtCandidate` without re-scanning the local context or re-running
-`matchClosed`.
+pre-matched `SepAtCandidate` by extracting (or splitting and extracting via `leafSplit?`)
+the target leaf along the binary tree path in $O(\text{depth})$ steps without calling
+`denoteClauses`, `rebuildSepTree`, or `AC.rewriteUnnormalizedRefl`.
 -/
-def solveSepAtCandidate (starGoal : MVarId) (cand : SepAtCandidate) : MetaM Bool :=
+def solveSepAtCandidate (starGoal : MVarId) (cand : SepAtCandidate)
+    (leafSplit? : Option Expr := none) : MetaM Bool :=
   starGoal.withContext do
     withConfig (fun config => { config with assignSyntheticOpaque := true }) do
       let res? ← commitWhenSomeNoEx? do
         let target ← reduceProjectionApp (← instantiateMVars (← starGoal.getType))
         unless target.isApp do return none
         let targetFn := target.appFn!
-        let predType ← inferType targetFn
         let sepArgs := targetFn.getAppArgs
         unless sepArgs.size >= 2 do return none
         let atClause := sepArgs[sepArgs.size - 2]!
@@ -422,17 +593,47 @@ def solveSepAtCandidate (starGoal : MVarId) (cand : SepAtCandidate) : MetaM Bool
         unless atExpr.isAppOfArity ``List.At 3 do return none
         let bsMVar := atExpr.appFn!.appArg!
         let addrMVar := atExpr.appArg!
-        unless ← isDefEq addrMVar cand.addr do return none
-        unless ← isDefEq bsMVar cand.bs do return none
-        let remClauses := cand.clauses.eraseIdx cand.clauseIdx
-        unless ← isDefEq rMVar (← denoteClauses predType remClauses) do return none
-        let targetTree ← parseSepTree targetFn
-        let alignedRhs := (cand.clauses[cand.clauseIdx]! :: remClauses).map (·, none)
-        let some (lhs', _, []) ← rebuildSepTree cand.hypTree (cand.clauses.map (·, none)) | return none
-        let some (rhs', _, []) ← rebuildSepTree targetTree alignedRhs | return none
-        let hSeps ← mkFreshExprMVar (← mkEq lhs' rhs')
-        Lean.Meta.AC.rewriteUnnormalizedRefl hSeps.mvarId!
-        let hFunEq ← mkAppM ``congrFun #[← instantiateMVars hSeps, cand.hypArg]
+        let hSeps ← match leafSplit? with
+          | none =>
+            unless ← isDefEq addrMVar cand.addr do return none
+            unless ← isDefEq bsMVar cand.bs do return none
+            let atClause ← instantiateMVars atClause
+            let hRefl ← mkEqRefl atClause
+            let hLeaf ←
+              if cand.clause == atClause then
+                pure hRefl
+              else
+                mkExpectedTypeHint hRefl (← mkEq cand.clause atClause)
+            let some (_, frameExpr, hSeps) ←
+              extractSepTree cand.hypTree cand.clauseIdx (fun _ => return .single atClause hLeaf)
+              | return none
+            unless ← isDefEq rMVar frameExpr do return none
+            pure hSeps
+          | some hSplit =>
+            let splitEqType ← instantiateMVars (← inferType hSplit)
+            unless splitEqType.isAppOfArity ``Eq 3 do return none
+            let splitRhs := splitEqType.appArg!
+            let splitRhsArgs := splitRhs.getAppArgs
+            unless splitRhsArgs.size >= 2 do return none
+            let extractedClause := splitRhsArgs[splitRhsArgs.size - 2]!
+            let remainderClause := splitRhsArgs[splitRhsArgs.size - 1]!
+            let some (splitBs, splitAddr) ← extractAtBytesAndAddr? extractedClause | return none
+            unless ← isDefEq addrMVar splitAddr do return none
+            unless ← isDefEq bsMVar splitBs do return none
+            let atClause ← instantiateMVars atClause
+            let hSplit ←
+              if cand.clause == splitEqType.appFn!.appArg! && extractedClause == atClause then
+                pure hSplit
+              else
+                let expectedSplit ← mkEq cand.clause (← mkAppM ``Std.ExtHashMap.sep #[atClause, remainderClause])
+                mkExpectedTypeHint hSplit expectedSplit
+            let some (_, frameExpr, hSeps) ←
+              extractSepTree cand.hypTree cand.clauseIdx
+                (fun _ => return .split atClause remainderClause hSplit)
+              | return none
+            unless ← isDefEq rMVar frameExpr do return none
+            pure hSeps
+        let hFunEq ← mkAppM ``congrFun #[hSeps, cand.hypArg]
         let proof ← mkAppM ``Eq.mp #[hFunEq, cand.hyp]
         starGoal.assign proof
         return some ()

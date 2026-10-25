@@ -179,6 +179,18 @@ theorem At_slice_sep {w : Nat} (bs : List UInt8) (off k : Nat) (a : BitVec w)
     rw [BitVec.add_assoc, ← BitVec.ofNat_add]
   rw [h_drop, h_add]
 
+theorem At_slice_extract_sep {w : Nat} (bs : List UInt8) (off k : Nat) (a : BitVec w)
+    (h_slice : off + k ≤ bs.length) (h_len : bs.length ≤ 2 ^ w) :
+    Eq (bs.At a) =
+      Eq (((bs.drop off).take k).At (a + BitVec.ofNat w off)) ⋆
+      (Eq ((bs.take off).At a) ⋆ Eq ((bs.drop (off + k)).At (a + BitVec.ofNat w (off + k)))) := by
+  rw [At_slice_sep bs off k a h_slice h_len, sep_comm_l]
+
+theorem length_drop_take_of_le {α : Type} (bs : List α) (off k : Nat)
+    (h_slice : off + k ≤ bs.length) : ((bs.drop off).take k).length = k := by
+  simp
+  omega
+
 end Mem
 
 theorem store_sep {MD : Type} [HasDataMem MD]

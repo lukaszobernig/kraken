@@ -1000,6 +1000,12 @@ partial def evalSymKStep : Grind.GrindTactic :=
             let t ← instantiateMVars (← sg.mvarId.getType)
             unless t.isAppOfArity ``Eq 3 do return false
             return t.appArg!.isMVar
+          let lenGoal? ← subGoals.findM? fun (sg : Grind.Goal) => do
+            if sg.mvarId == g.mvarId then return false
+            let t ← instantiateMVars (← sg.mvarId.getType)
+            unless t.isAppOfArity ``Eq 3 do return false
+            let lhs := t.appFn!.appArg!
+            return lhs.isAppOfArity ``List.length 2 && lhs.appArg!.isMVar
           let solved ←
             if let some addrGoal := addrGoal? then
               let addrGoalType ← instantiateMVars (← addrGoal.mvarId.getType)
@@ -1008,9 +1014,50 @@ partial def evalSymKStep : Grind.GrindTactic :=
               let candidates ← Kraken.Tactic.findSepAtCandidates g.mvarId
               let tryAssignAndCancel (cand : Kraken.Tactic.SepAtCandidate) (hEq : Expr) : Grind.GrindTacticM Bool := do
                 withConfig (fun c => { c with assignSyntheticOpaque := true }) do
-                  unless ← isDefEq addrMVar cand.addr do return false
-                  addrGoal.mvarId.assign hEq
-                  Kraken.Tactic.solveSepAtCandidate g.mvarId cand
+                  -- Attempt 1: direct unsplit candidate `cand.bs`
+                  let saved1 ← Grind.saveState
+                  let ok1 ← try
+                    unless ← isDefEq addrMVar cand.addr do failure
+                    addrGoal.mvarId.assign hEq
+                    unless ← Kraken.Tactic.solveSepAtCandidate g.mvarId cand none do failure
+                    if let some lenGoal := lenGoal? then
+                      let (_, lenGoal') ← solveIfNotAlready lenGoal
+                      unless ← lenGoal'.mvarId.isAssigned do failure
+                    pure true
+                  catch _ =>
+                    saved1.restore
+                    pure false
+                  if ok1 then return true
+                  -- Attempt 2: prefix split via `Mem.At_take_drop_sep` when `lenGoal?` is present
+                  let some lenGoal := lenGoal? | return false
+                  let saved2 ← Grind.saveState
+                  try
+                    let lenType ← instantiateMVars (← lenGoal.mvarId.getType)
+                    let wBytes := lenType.appArg!
+                    let nExpr ← match ← (evalNat (← whnf wBytes)).run with
+                      | some n => pure (mkNatLit n)
+                      | none => pure wBytes
+                    let (hSplit, hTakeLen) ← g.mvarId.withContext do
+                      let splitFn ← mkAppM ``Mem.At_take_drop_sep #[cand.bs, nExpr, cand.addr]
+                      let splitFnType ← inferType splitFn
+                      let kType := splitFnType.bindingDomain!
+                      let lenBoundType := splitFnType.bindingBody!.bindingDomain!
+                      let some hK ← Kraken.Tactic.provePropGoal kType | failure
+                      let some hLen ← Kraken.Tactic.provePropGoal lenBoundType | failure
+                      let hSplit := mkApp2 splitFn hK hLen
+                      let hTakeLen ← mkAppM ``List.length_take_of_le #[hK]
+                      pure (hSplit, hTakeLen)
+                    unless ← isDefEq addrMVar cand.addr do failure
+                    addrGoal.mvarId.assign hEq
+                    unless ← Kraken.Tactic.solveSepAtCandidate g.mvarId cand (some hSplit) do failure
+                    lenGoal.mvarId.withContext do
+                      let expectedLenType ← instantiateMVars (← lenGoal.mvarId.getType)
+                      let hTakeLen ← mkExpectedTypeHint hTakeLen expectedLenType
+                      lenGoal.mvarId.assign hTakeLen
+                    pure true
+                  catch _ =>
+                    saved2.restore
+                    pure false
               let simplifyAddrEq (candAddr : Expr) : Grind.GrindTacticM (Expr × Grind.Goal) :=
                 addrGoal.mvarId.withContext do
                   let eqType ← mkEq addr candAddr

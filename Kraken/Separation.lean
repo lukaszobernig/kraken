@@ -111,6 +111,26 @@ theorem emp_sep (p : ExtHashMap key value → Prop) : emp ⋆ p = p := by
 theorem sep_emp (p : ExtHashMap key value → Prop) : p ⋆ emp = p := by
   rw [sep_comm, emp_sep]
 
+theorem sep_extract_here {p a : ExtHashMap key value → Prop} (h : p = a) : p = a ⋆ emp := by
+  rw [h, sep_emp]
+
+omit [LawfulBEq key] in
+theorem sep_extract_head {p a : ExtHashMap key value → Prop} (q : ExtHashMap key value → Prop)
+    (h : p = a) : p ⋆ q = a ⋆ q := by
+  rw [h]
+
+theorem sep_extract_tail (p : ExtHashMap key value → Prop) {q a : ExtHashMap key value → Prop}
+    (h : q = a) : p ⋆ q = a ⋆ p := by
+  rw [h, sep_comm]
+
+theorem sep_extract_left {p a p' : ExtHashMap key value → Prop} (q : ExtHashMap key value → Prop)
+    (h : p = a ⋆ p') : p ⋆ q = a ⋆ (p' ⋆ q) := by
+  rw [h, sep_assoc]
+
+theorem sep_extract_right (p : ExtHashMap key value → Prop) {q a q' : ExtHashMap key value → Prop}
+    (h : q = a ⋆ q') : p ⋆ q = a ⋆ (p ⋆ q') := by
+  rw [h, sep_comm_l]
+
 instance : Std.Commutative (sep : (ExtHashMap key value → Prop) → _) := ⟨sep_comm⟩
 instance : Std.Associative (sep : (ExtHashMap key value → Prop) → _) := ⟨sep_assoc⟩
 instance : Std.LawfulIdentity (sep : (ExtHashMap key value → Prop) → _) emp where

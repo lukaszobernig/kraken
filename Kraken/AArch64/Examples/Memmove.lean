@@ -77,16 +77,13 @@ private theorem memmove_forward_loop_spec [layout : Layout] [Layout.Valid memmov
     kprologue memmove at "forward_loop" to "done" with s₀
     by_cases hn : n = 0
     · subst hn
-      rw [Mem.At_take_drop_sep pre 1 X3.toBitVec (by omega) (by omega)] at h_mem
       sym => kstep; tactic =>
       apply Eventually.done
       refine ⟨by kaddr memmove, rfl, rfl, rfl, Reg64s.CalleeSavedEq_refl _, ?_⟩
       rw [List.drop_append_of_le_length (by omega),
           Mem.At_append_sep (pre.drop 1) src _ (by simp; omega)]
       ecancel
-    · rw [Mem.At_take_drop_sep pre 1 X3.toBitVec (by omega) (by omega),
-          Mem.At_take_drop_sep src 1 X1.toBitVec (by omega) (by omega)] at h_mem
-      sym => kstep; tactic =>
+    · sym => kstep; tactic =>
       refine (ih _ (pre.drop 1 ++ src.take 1) (src.drop 1) ((src.take 1) @ X3 ⋆ R)
         ⟨by omega, hd, by grind, by grind, by simp [h_pre_len, h_src_len]; omega,
          by simp [h_src_len], by omega, ?_⟩).bind_at (by kaddr memmove) ?_
@@ -97,7 +94,6 @@ private theorem memmove_forward_loop_spec [layout : Layout] [Layout.Valid memmov
         refine ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
         rw [List.append_assoc, List.take_append_drop, ← List.drop_append_of_le_length (by omega),
             List.drop_drop, Nat.add_comm] at h_mem₁
-        rw [Mem.At_take_drop_sep src 1 X3.toBitVec (by omega) (by omega)]
         ecancel
 
 private theorem memmove_backward_loop_spec [layout : Layout] [Layout.Valid memmove] (s₀ : MachineData)
@@ -153,7 +149,6 @@ private theorem memmove_backward_loop_spec [layout : Layout] [Layout.Valid memmo
         refine ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
         rw [← List.append_assoc, List.take_append_drop, List.take_append, List.take_take,
             Nat.min_eq_left (by omega), ← List.take_append] at h_mem₁
-        rw [Mem.At_take_drop_sep src n dst_ptr (by omega) (by omega)]
         ecancel
 
 /-- Result of copying `n` bytes from `src_off` to `dst_off` within a contiguous buffer `buf`
