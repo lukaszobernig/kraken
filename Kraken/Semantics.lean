@@ -50,6 +50,13 @@ structure MachineState (MachineData : Type) where
   data : MachineData
   pc : Int64
 
+/-- Observable microarchitectural events for constant-time verification. -/
+inductive LeakageEvent where
+  | exec (p : Std.Rco Int64)
+  | read (addr : BitVec 64) (w : Width)
+  | write (addr : BitVec 64) (w : Width)
+  | var_time (vals : List (BitVec 64))
+
 inductive Effects (MachineData : Type)
   | done (a : MachineState MachineData)
   | unimplemented (msg : String)
@@ -63,10 +70,12 @@ inductive Effects (MachineData : Type)
   | require_read_access (addr : BitVec 64) (w : Width) (ok : Unit → Effects MachineData)
   | require_write_access (addr : BitVec 64) (w : Width) (ok : Unit → Effects MachineData)
   | require_exec_access (p : Std.Rco Int64) (ok : Unit → Effects MachineData)
+  | require_const_time (vals : List (BitVec 64)) (ok : Unit → Effects MachineData)
 
 end Kraken
 
-export Kraken.Effects (unimplemented unaligned nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access)
+export Kraken (LeakageEvent)
+export Kraken.Effects (unimplemented unaligned nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access require_const_time)
 
 class HasDataMem (MachineData : Type) where
   dmem : MachineData → DataMem
@@ -159,6 +168,7 @@ where
     | .require_read_access _ _ ok => handleEffects (ok ())
     | .require_write_access _ _ ok => handleEffects (ok ())
     | .require_exec_access _ ok => handleEffects (ok ())
+    | .require_const_time _ ok => handleEffects (ok ())
     | .nonmem_load _ addr _ _ => .error s!"Load at unmapped address {repr addr}"
     | .nonmem_store _ addr _ _ => .error s!"Store at unmapped address {repr addr}"
     | @Kraken.Effects.undefined _ _ t cont =>

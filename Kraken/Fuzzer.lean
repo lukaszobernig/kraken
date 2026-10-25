@@ -24,7 +24,8 @@ whether any `undefined` choice was made. -/
 partial def evalEffects {MachineData : Type} (h : UInt64) (sawUndef : Bool) :
     Kraken.Effects MachineData → Option (MachineData × Bool)
   | .done st => some (st.data, sawUndef)
-  | .require_read_access _ _ ok | .require_write_access _ _ ok | .require_exec_access _ ok =>
+  | .require_read_access _ _ ok | .require_write_access _ _ ok | .require_exec_access _ ok
+  | .require_const_time _ ok =>
       evalEffects h sawUndef (ok ())
   | @Kraken.Effects.undefined _ _ t cont => evalEffects h true (cont (t.from_hash h))
   | _ => none

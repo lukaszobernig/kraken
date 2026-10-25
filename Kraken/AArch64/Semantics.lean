@@ -648,13 +648,15 @@ set_option maxHeartbeats 1000000
   | .SDIV dst src1 src2 =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := s.regs.getRegOrZr src2
-    let res := if val2 == 0 then (0 : w.type) else val1.sdiv val2
-    s.setRegOrZr dst res next
+    require_const_time [val1.setWidth 64, val2.setWidth 64] (fun _unit =>
+      let res := if val2 == 0 then (0 : w.type) else val1.sdiv val2
+      s.setRegOrZr dst res next)
   | .UDIV dst src1 src2 =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := s.regs.getRegOrZr src2
-    let res := if val2 == 0 then (0 : w.type) else val1 / val2
-    s.setRegOrZr dst res next
+    require_const_time [val1.setWidth 64, val2.setWidth 64] (fun _unit =>
+      let res := if val2 == 0 then (0 : w.type) else val1 / val2
+      s.setRegOrZr dst res next)
   | .SMADDL dst src1 src2 src3 =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := s.regs.getRegOrZr src2

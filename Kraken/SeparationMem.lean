@@ -208,7 +208,7 @@ theorem load_sep {MD : Type} [HasDataMem MD]
 
 @[kspec]
 theorem Kraken.Effects.All_store_sep {MD : Type} [HasDataMem MD]
-    (post : Kraken.MachineState MD → Prop) (s : MD) (addr addr' : BitVec 64)
+    (post : TracedPost MD) (s : MD) (addr addr' : BitVec 64)
     (w : Width) (v : w.type) (ret : MD → Kraken.Effects MD)
     (bs : List UInt8) (R : DataMem → Prop)
     (h_mem : HasDataMem.dmem s =⋆ Eq (bs.At addr') ⋆ R)
@@ -217,7 +217,7 @@ theorem Kraken.Effects.All_store_sep {MD : Type} [HasDataMem MD]
     (MachineData.store s addr v ret).All post =
       let mem' := Mem.storeInt (HasDataMem.dmem s) addr' w.bytes v.toInt
       ((mem' =⋆ Eq ((Int.toBytes w.bytes v.toInt).At addr') ⋆ R) →
-        (ret (HasDataMem.withDmem s mem')).All post) := by
+        (ret (HasDataMem.withDmem s mem')).All (fun a tr => post a (.write addr' w :: tr))) := by
   subst h_addr
   have h_load : Mem.loadInt (HasDataMem.dmem s) addr w.bytes = some (Int.ofBytes bs) :=
     Mem.loadInt_sep bs addr w.bytes R (HasDataMem.dmem s) h_mem h_len (by cases w <;> decide)
@@ -228,14 +228,14 @@ theorem Kraken.Effects.All_store_sep {MD : Type} [HasDataMem MD]
 
 @[kspec]
 theorem Kraken.Effects.All_load_sep {MD : Type} [HasDataMem MD]
-    (post : Kraken.MachineState MD → Prop) (s : MD) (addr addr' : BitVec 64)
+    (post : TracedPost MD) (s : MD) (addr addr' : BitVec 64)
     (w : Width) (ret : w.type → MD → Kraken.Effects MD)
     (bs : List UInt8) (R : DataMem → Prop)
     (h_mem : HasDataMem.dmem s =⋆ Eq (bs.At addr') ⋆ R)
     (h_addr : addr = addr')
     (h_len : bs.length = w.bytes) :
     (MachineData.load s addr w ret).All post =
-      (ret (.ofInt w.bits (Int.ofBytes bs)) s).All post := by
+      (ret (.ofInt w.bits (Int.ofBytes bs)) s).All (fun a tr => post a (.read addr' w :: tr)) := by
   subst h_addr
   have h_load : Mem.loadInt (HasDataMem.dmem s) addr w.bytes = some (Int.ofBytes bs) :=
     Mem.loadInt_sep bs addr w.bytes R (HasDataMem.dmem s) h_mem h_len (by cases w <;> decide)
