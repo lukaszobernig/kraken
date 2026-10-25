@@ -84,7 +84,6 @@ _end:
 
 def p3_spec (s: MachineData): Nat := 2^(2^s.regs.rbx.toNat)
 
-set_option maxHeartbeats 4000000 in
 theorem p3_correct [layout: Layout] [Layout.Valid p3] (s: MachineData):
     (layout p3).Spec s
       (pre := p3_spec s < 2^64)
@@ -157,8 +156,6 @@ def p5 := parse("start: mov $2, %rax
 dec %rax
 start2:
 dec %rax")
-
-set_option maxHeartbeats 1000000
 
 example [layout : Layout] [Layout.Valid p5] (s : MachineData) :
     (layout p5).Spec s (post := fun st => st.data.regs.rax = 0) := by
@@ -318,25 +315,23 @@ theorem memset_loop_correct [layout : Layout] [Layout.Valid memset_loop] (s₀ :
     (g0 := (s₀.regs.rdi.toBitVec, buf, R))
   · exact ⟨rfl, hn, h_rcx, rfl, h_len, h_bound, h_mem⟩
   · rintro v ⟨ptr, bs, frame⟩ ⟨s, pc⟩ ⟨rfl, hv, h_rcx, rfl, h_bs_len, h_bs_bound, h_mem⟩
-    kprologue memset_loop with s
-    rw [Mem.At_take_drop_sep bs 8 rdi.toBitVec (by omega) h_bs_bound] at h_mem
     by_cases hv1 : v = 1
-    · sym => kstep; tactic =>
-      subst hv1
-      rename_i h_store _ _ _ _
-      rw [List.drop_eq_nil_of_le (by omega), Mem.At_nil_sep] at h_store
+    · subst hv1
+      kprologue memset_loop with s
+      sym => kstep; tactic =>
       apply Eventually.done
-      exact Or.inl ⟨by grind, by grind, by dsimp only [Nat.mul_one]; ecancel⟩
-    · sym => kstep; tactic =>
+      exact Or.inl ⟨by grind, by grind, by ecancel⟩
+    · kprologue memset_loop with s
+      rw [Mem.At_take_drop_sep bs 8 rdi.toBitVec (by omega) h_bs_bound] at h_mem
+      sym => kstep; tactic =>
       apply Eventually.done
       refine Or.inr ⟨v - 1, rdi.toBitVec + 8#64, bs.drop 8,
         (List.replicate 8 0) @ rdi ⋆ frame,
-        ⟨rfl, by grind, by grind, by grind, by simp [h_bs_len]; omega, by simp; omega, by dsimp only; ecancel⟩,
+        ⟨rfl, by grind, by grind, by grind, by simp [h_bs_len]; omega, by simp; omega, by ecancel⟩,
         by omega, ?_⟩
       intro t_s hQ_rcx hQ_rdi hQ_mem
       refine ⟨hQ_rcx, by grind, ?_⟩
       rw [Mem.At_take_drop_sep _ 8 _ (by simp; omega) (by simp; omega)]
-      rw [List.take_replicate, List.drop_replicate, show min 8 (8 * v) = 8 by omega, show 8 * v - 8 = 8 * (v - 1) by omega]
       ecancel
   · intro st hQ
     exact hQ
@@ -361,7 +356,6 @@ done:
   ret
 ")
 
-set_option maxHeartbeats 4000000 in
 theorem memcpy_correct [layout : Layout] [Layout.Valid memcpy] (s₀ : MachineData)
     (n : Nat) (ra : UInt64) (dst src : List UInt8) (R : DataMem → Prop) :
     (layout memcpy).Spec s₀
@@ -409,46 +403,38 @@ theorem memcpy_correct [layout : Layout] [Layout.Valid memcpy] (s₀ : MachineDa
       obtain rfl := List.eq_nil_of_length_eq_zero h_dst_len
       obtain rfl := List.eq_nil_of_length_eq_zero h_src_len
       apply Eventually.done
-      exact Or.inl ⟨by kaddr memcpy, rfl, rfl, Reg64s.CalleeSavedEq_refl _, by dsimp; ecancel⟩
+      exact Or.inl ⟨by kaddr memcpy, rfl, rfl, Reg64s.CalleeSavedEq_refl _, by ecancel⟩
     · sym => kstep; tactic =>
       apply Eventually.done
-      exact Or.inr ⟨by kaddr memcpy, by omega, by grind, rfl, rfl, rfl, rfl, Reg64s.CalleeSavedEq_refl _, h_dst_len, h_src_len, h_bound, by dsimp; ecancel⟩
+      exact Or.inr ⟨by kaddr memcpy, by omega, by grind, rfl, rfl, rfl, rfl, Reg64s.CalleeSavedEq_refl _, h_dst_len, h_src_len, h_bound, by ecancel⟩
   · rintro v ⟨dst_ptr, src_ptr, dst_bs, src_bs, frame⟩ ⟨s, pc⟩
       ⟨rfl, hv, h_rdx_v, rfl, rfl, h_rax, h_rsp, h_cs, h_dst_v, h_src_v, h_v_bound, h_mem_v⟩
-    kprologue memcpy at "loop" to "done" with s
-    rw [Mem.At_take_drop_sep dst_bs 1 rdi.toBitVec (by omega) (by omega),
-        Mem.At_take_drop_sep src_bs 1 rsi.toBitVec (by omega) (by omega)] at h_mem_v
     by_cases hv1 : v = 1
-    · sym => kstep; tactic =>
-      subst hv1
-      rename_i h_store _ _ _ _ _ _
-      rw [BitVec.toBytes_ofBytes_eq 8 1 rfl (src_bs.take 1) (by simp; omega),
-          List.drop_eq_nil_of_le (by omega), List.drop_eq_nil_of_le (by omega),
-          List.take_of_length_le (by omega), Mem.At_nil_sep, Mem.At_nil_sep] at h_store
+    · subst hv1
+      kprologue memcpy at "loop" to "done" with s
+      sym => kstep; tactic =>
       apply Eventually.done
-      exact Or.inl ⟨by kaddr memcpy, h_rax, h_rsp, h_cs, by dsimp; ecancel⟩
-    · sym => kstep; tactic =>
-      rename_i h_store _ _ _ _ _ _
-      rw [BitVec.toBytes_ofBytes_eq 8 1 rfl (src_bs.take 1) (by simp; omega)] at h_store
+      exact Or.inl ⟨by kaddr memcpy, h_rax, h_rsp, h_cs, by ecancel⟩
+    · kprologue memcpy at "loop" to "done" with s
+      rw [Mem.At_take_drop_sep dst_bs 1 rdi.toBitVec (by omega) (by omega),
+          Mem.At_take_drop_sep src_bs 1 rsi.toBitVec (by omega) (by omega)] at h_mem_v
+      sym => kstep; tactic =>
       apply Eventually.done
       refine Or.inr ⟨v - 1, (rdi.toBitVec + 1#64, rsi.toBitVec + 1#64, dst_bs.drop 1, src_bs.drop 1,
         (src_bs.take 1) @ rdi ⋆ (src_bs.take 1) @ rsi ⋆ frame),
         ⟨by kaddr memcpy, by grind, by grind, by grind, by grind, h_rax, h_rsp, h_cs,
-         by simp [h_dst_v], by simp [h_src_v], by omega, by dsimp; ecancel⟩,
+         by simp [h_dst_v], by simp [h_src_v], by omega, by ecancel⟩,
         by omega, ?_⟩
       rintro t_s ⟨hQ_pc, hQ_rax, hQ_rsp, hQ_cs, hQ_mem⟩
       refine ⟨hQ_pc, hQ_rax, hQ_rsp, hQ_cs, ?_⟩
-      dsimp only at hQ_mem ⊢
       rw [Mem.At_take_drop_sep src_bs 1 rdi.toBitVec (by omega) (by omega),
           Mem.At_take_drop_sep src_bs 1 rsi.toBitVec (by omega) (by omega)]
       ecancel
   · rintro ⟨st, pc⟩ ⟨rfl, h_rax, h_rsp, h_cs, h_mem_q⟩
     kprologue memcpy at "done" with st
-    have h_mem' : mem =⋆ ra @ rsp ⋆ (src @ s₀.regs.rdi ⋆ src @ s₀.regs.rsi ⋆ R) := by
-      rw [h_rsp]; ecancel
     sym => kstep; tactic =>
     apply Eventually.done
-    exact ⟨rfl, h_rax, by grind, h_cs, by dsimp; ecancel⟩
+    exact ⟨rfl, h_rax, by grind, h_cs, by ecancel⟩
 
 -- Example 12: Composable basic blocks (both standalone subprograms and per-block lemmas)
 
