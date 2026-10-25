@@ -298,6 +298,17 @@ theorem Layout.program_shift {Directive : Type} (l : Layout Directive) (prog : L
   by_cases hi : i < n <;>
     simp [Layout.apply, List.getElem?_take, List.getElem?_drop, hi]
 
+theorem Executable.program_apply_drop {Directive : Type} [layout : Layout Directive] (prog : List Directive) (k : Nat) :
+    (layout prog).program.drop k =
+      (prog.drop k).mapIdx (fun i directive => {directive, size := layout.size (k + i)}) := by
+  ext i c
+  simp [Layout.apply, List.getElem?_drop]
+
+theorem Executable.program_apply_slice {Directive : Type} [layout : Layout Directive] (prog : List Directive) (k n : Nat) :
+    ((layout prog).program.drop k).take n =
+      ((prog.drop k).take n).mapIdx (fun i directive => {directive, size := layout.size (k + i)}) := by
+  rw [← Layout.program_shift layout prog k n]; rfl
+
 theorem Layout.program_shift_of_slice {Directive : Type} (l : Layout Directive)
     {prog sub : List Directive} {k : Nat} (hsub : (prog.drop k).take sub.length = sub) :
     ((l.shift prog k) sub).program = ((l prog).program.drop k).take sub.length := by
