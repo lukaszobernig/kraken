@@ -164,7 +164,7 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
       kdone
       obtain rfl := List.eq_nil_of_length_eq_zero h_a_len
       obtain rfl := List.eq_nil_of_length_eq_zero h_b_len
-      exact ⟨by kaddr memcmp, rfl, rfl, h_rsp, Reg64s.CalleeSavedEq_refl _, rfl, by ecancel⟩
+      exact ⟨by kaddr memcmp, rfl, rfl, h_rsp, by grind, rfl, by ecancel⟩
     · right
       refine ⟨by omega, ?_⟩
       kintro s ⟨ra, a, b, R⟩ ⟨h_rdi, h_rsi, h_rsp, h_rdx, h_a_len, h_b_len, h_mem⟩
@@ -173,7 +173,7 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
       kstep
       kdone
       exact ⟨by kaddr memcmp, by grind, h_rdi, h_rsi, rfl, rfl, h_rsp,
-        Reg64s.CalleeSavedEq_refl _, h_a_len, h_b_len, by ecancel⟩
+        by grind, h_a_len, h_b_len, by ecancel⟩
   · rintro v ⟨a_ptr, b_ptr⟩ hv
     by_cases hv1 : v = 1
     · subst hv1

@@ -168,6 +168,7 @@ structure Reg64s where
   | .low r .W32 => s.setRegOrZr64 r (v.zeroExtend _)
 
 /-- AAPCS64 callee-saved general-purpose registers (`X19`–`X29`). -/
+@[grind]
 def Reg64s.CalleeSavedEq (r r₀ : Reg64s) : Prop :=
   r.X19 = r₀.X19 ∧
   r.X20 = r₀.X20 ∧
@@ -181,9 +182,18 @@ def Reg64s.CalleeSavedEq (r r₀ : Reg64s) : Prop :=
   r.X28 = r₀.X28 ∧
   r.X29 = r₀.X29
 
-@[simp, grind .]
+@[simp, ksimp, grind .]
 theorem Reg64s.CalleeSavedEq_refl (r : Reg64s) : r.CalleeSavedEq r :=
   ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+theorem Reg64s.CalleeSavedEq.symm {r₁ r₂ : Reg64s} (h : r₁.CalleeSavedEq r₂) :
+    r₂.CalleeSavedEq r₁ := by
+  grind
+
+theorem Reg64s.CalleeSavedEq.trans {r₁ r₂ r₃ : Reg64s}
+    (h₁ : r₁.CalleeSavedEq r₂) (h₂ : r₂.CalleeSavedEq r₃) :
+    r₁.CalleeSavedEq r₃ := by
+  grind
 
 structure StatusFlags where
   n : Bool
