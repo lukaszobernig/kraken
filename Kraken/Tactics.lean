@@ -250,7 +250,7 @@ elab_rules : tactic
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
                           List.drop_succ_cons, List.drop_zero, List.drop_nil])))
         | none, none =>
-          let isEventually := isTraced || (← whnfR (← getMainTarget)).getAppFn.constName? == some ``Eventually
+          let isEventually := isTraced || (← whnfR (← instantiateMVars (← getMainTarget))).getAppFn'.constName? == some ``Eventually
           if isEventually then
             evalTactic (← `(tactic|
               (apply $cpsThm
@@ -376,7 +376,7 @@ elab_rules : tactic
                simp only [Kraken.Layout.apply, List.mapIdx_cons, List.mapIdx_nil,
                           List.drop_succ_cons, List.drop_zero, List.drop_nil])))
         | none, none =>
-          let isEventually := isTraced || (← whnfR (← getMainTarget)).getAppFn.constName? == some ``Eventually
+          let isEventually := isTraced || (← whnfR (← instantiateMVars (← getMainTarget))).getAppFn'.constName? == some ``Eventually
           if isEventually then
             evalTactic (← `(tactic|
               (apply $cpsThm
@@ -683,7 +683,7 @@ def rwTarget (goal: Grind.Goal) (symm : Bool) (term : Expr) : Grind.GrindTacticM
       let heqType ← instantiateMVars (← inferType heq)
       let heqType' ← Sym.unfoldReducible heqType
       let heq ← if isSameExpr heqType heqType' then pure heq else mkExpectedTypeHint heq heqType'
-      goal.mvarId.rewrite (← goal.mvarId.getType) heq symm
+      goal.mvarId.rewrite (← instantiateMVars (← goal.mvarId.getType)) heq symm
     let mctx ← getMCtx
     let mvarIds := r.mvarIds.filter fun mvarId => (mctx.getDecl mvarId |>.index) >= mvarCounterSaved
     let eNew ← Grind.liftSymM <| Sym.preprocessExpr r.eNew
@@ -691,7 +691,8 @@ def rwTarget (goal: Grind.Goal) (symm : Bool) (term : Expr) : Grind.GrindTacticM
     let mvarIds ← mvarIds.filterM fun mvarId => return !(← mvarId.isAssigned)
     let sideGoals ← mvarIds.mapM fun mvarId => do
       let target ← mvarId.getType
-      let target' ← Grind.liftSymM <| Sym.preprocessExpr target
+      let targetInst ← instantiateMVars target
+      let target' ← Grind.liftSymM <| Sym.preprocessExpr targetInst
       if isSameExpr target target' then
         -- The metavariable was created by `forallMetaTelescopeReducing` with kind `.natural`;
         -- prevent it from being assigned by unification in later steps.
@@ -749,9 +750,18 @@ partial def evalSymKStep : Grind.GrindTactic :=
     pure (insertPattern specTree pat name)
   ) {}
 
+  let preprocessGoalIfNeeded (goal : Grind.Goal) : Grind.GrindTacticM Grind.Goal := do
+    let target ← goal.mvarId.getType
+    unless target.hasExprMVar do return goal
+    let targetInst ← instantiateMVars target
+    if isSameExpr target targetInst then return goal
+    let target' ← Grind.liftSymM (Sym.preprocessExpr targetInst)
+    let mvarId ← goal.mvarId.replaceTargetDefEq target'
+    return { goal with mvarId }
+
   -- TODO: remove once we have lift_lets
   let introsIf (goal: Grind.Goal): Grind.GrindTacticM Grind.Goal := do
-    let goalT ← goal.mvarId.getType
+    let goalT ← instantiateMVars (← goal.mvarId.getType)
     let_expr gimmickId inner := goalT | return goal
     let inner := inner.consumeMData
     unless inner.isLet || inner.isForall do return goal
@@ -763,6 +773,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
 
   -- MAIN LOOP
   let rec go (goal: Grind.Goal): Grind.GrindTacticM (Grind.Goal × List Grind.Goal) := do
+    let goal ← goal.withContext (preprocessGoalIfNeeded goal)
     -- STEP 1: dsimp
     let goal ← goal.withContext do
       let mvarId ← goal.mvarId.replaceTargetDefEq (← Grind.liftGrindM $
@@ -785,7 +796,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
       | .goal mvarId => pure (true, { goal with mvarId })
       | .closed => throwError "unexpected"
     if config.debug then
-      let t ← goal.mvarId.getType
+      let t ← instantiateMVars (← goal.mvarId.getType)
       logInfo m!"MAIN LOOP, after step 2: {t}"
 
     -- STEP 3: spec lemmas
@@ -812,6 +823,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
     let specMatches := if m.isEmpty then Sym.getMatch mctx specTree effectsAll.appArg! else m
 
     let rec expandLets (e : Expr) : MetaM Expr := do
+      let e ← if e.hasExprMVar then instantiateMVars e else pure e
       match e with
       | .fvar fvarId =>
         if let some localDecl ← fvarId.findDecl? then
@@ -838,20 +850,21 @@ partial def evalSymKStep : Grind.GrindTactic :=
 
         -- Found a spec lemma, which will generate subgoals; subgoals (if not solved
         -- already!) are solved via ecancel, ksimp, exact, refl, or grind.
-        let solveIfNotAlready: Grind.Goal → Grind.GrindTacticM Bool := fun subGoal => do
+        let solveIfNotAlready : Grind.Goal → Grind.GrindTacticM (Bool × Grind.Goal) := fun subGoal => do
           -- Already solved this subgoal; skip
           if ← subGoal.mvarId.isAssigned then
-            return false
+            return (false, subGoal)
 
-          let t ← instantiateMVars (← subGoal.mvarId.getType)
+          let subGoal ← subGoal.mvarId.withContext (preprocessGoalIfNeeded subGoal)
+          let t ← subGoal.mvarId.getType
           unless ← subGoal.mvarId.withContext (isProp t) do
-            return false
+            return (false, subGoal)
 
           -- Try ecancel on separation-logic goals
           if t.getAppFn.isConstOf ``Std.ExtHashMap.sep then
             if ← Kraken.Tactic.ecancelGoal subGoal.mvarId then
               trace[Kraken.kstep] "Solved by ecancel: {t}"
-              return true
+              return (true, subGoal)
 
           -- Try simp with @[ksimp]
           let subGoal ← do
@@ -862,14 +875,14 @@ partial def evalSymKStep : Grind.GrindTactic :=
             | .closed => pure subGoal
           if ← subGoal.mvarId.isAssigned then
             trace[Kraken.kstep] "Solved by ksimp: {t}"
-            return true
+            return (true, subGoal)
 
           -- Solvable with exact; we made progress
           if ← withReducible subGoal.mvarId.assumptionCore then
-            let t ← subGoal.mvarId.getType
+            let t ← instantiateMVars (← subGoal.mvarId.getType)
             let .some e ← getExprMVarAssignment? subGoal.mvarId | throwError "oh noes"
             trace[Kraken.kstep] "Solved by exact: {t} by {e}"
-            return true
+            return (true, subGoal)
 
           let clearSepAndLets (mvarId : MVarId) : MetaM MVarId := mvarId.withContext do
             let mut toClear : Array FVarId := #[]
@@ -887,7 +900,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             try
               subGoal.mvarId.refl
               trace[Kraken.kstep] "Solved by refl: {t}"
-              return true
+              return (true, subGoal)
             catch _ => pure ()
 
             -- Try solving with grind, roll back state otherwise (we don't want to
@@ -900,15 +913,15 @@ partial def evalSymKStep : Grind.GrindTactic :=
               match ← Grind.liftGrindM g.grind with
               | .closed =>
                   trace[Kraken.kstep] "Solved by grind: {t}"
-                  return true
+                  return (true, subGoal)
               | .failed _ =>
                   trace[Kraken.kstep] "NOT solved by grind: {t}"
                   saved.restore
-                  return false
+                  return (false, subGoal)
             catch _ =>
               saved.restore
-              return false
-          return false
+              return (false, subGoal)
+          return (false, subGoal)
 
         -- For this reason, we try to be intentional about the order in which we solve subgoals:
         -- solving the ⋆ separation logic predicate first allows making sensible decisions about
@@ -924,6 +937,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
 
         -- If we couldn't solve the ⋆ goal, we are likely going to make bad
         -- decisions and instantiate metavariables randomly. Abort.
+        let mut subGoals := subGoals
         if let some g := starGoal then
           let addrGoal? ← subGoals.findM? fun (sg : Grind.Goal) => do
             if sg.mvarId == g.mvarId then return false
@@ -1032,19 +1046,22 @@ partial def evalSymKStep : Grind.GrindTactic :=
                       saved.restore
               pure solvedSep
             else
-              solveIfNotAlready g
+              let (r, g') ← solveIfNotAlready g
+              subGoals := subGoals.map fun sg => if sg.mvarId == g.mvarId then g' else sg
+              pure r
           if not solved then
             return (goal, subGoals)
 
         -- Then, we repeatedly visit subgoals until all are solved or we make no progress.
-        while ← (do
-          if ← subGoals.allM (·.mvarId.isAssigned) then
-            return false
-          subGoals.foldlM (fun progress subGoal => do
-            let r ← solveIfNotAlready subGoal
-            pure (r || progress)
-          ) false
-        ) do pure ()
+        while !(← subGoals.allM (·.mvarId.isAssigned)) do
+          let mut progress := false
+          let mut newSubGoals := []
+          for subGoal in subGoals do
+            let (r, subGoal') ← solveIfNotAlready subGoal
+            progress := progress || r
+            newSubGoals := newSubGoals ++ [subGoal']
+          subGoals := newSubGoals
+          unless progress do break
 
         -- Unsolved goals left? Return control to the user
         let unsolvedGoals ← subGoals.filterMapM fun (g: Grind.Goal) => do
