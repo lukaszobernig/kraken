@@ -102,6 +102,7 @@ structure Reg64s where
     s.set64 r.base (old.replaceLow (BitVec.append v (s.get (.low r.base .W8))))
 
 /-- System V AMD64 ABI callee-saved general-purpose registers (`rbx`, `rbp`, `r12`–`r15`). -/
+@[grind]
 def Reg64s.CalleeSavedEq (r r₀ : Reg64s) : Prop :=
   r.rbx = r₀.rbx ∧
   r.rbp = r₀.rbp ∧
@@ -110,9 +111,18 @@ def Reg64s.CalleeSavedEq (r r₀ : Reg64s) : Prop :=
   r.r14 = r₀.r14 ∧
   r.r15 = r₀.r15
 
-@[simp, grind .]
+@[simp, ksimp, grind .]
 theorem Reg64s.CalleeSavedEq_refl (r : Reg64s) : r.CalleeSavedEq r :=
   ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+theorem Reg64s.CalleeSavedEq.symm {r₁ r₂ : Reg64s} (h : r₁.CalleeSavedEq r₂) :
+    r₂.CalleeSavedEq r₁ := by
+  grind
+
+theorem Reg64s.CalleeSavedEq.trans {r₁ r₂ r₃ : Reg64s}
+    (h₁ : r₁.CalleeSavedEq r₂) (h₂ : r₂.CalleeSavedEq r₃) :
+    r₁.CalleeSavedEq r₃ := by
+  grind
 
 def ZmmValue : Type := BitVec 512
   deriving Repr, BEq, DecidableEq, Hashable, Hashable, Lean.ToExpr

@@ -85,6 +85,23 @@ public meta section
 
 open Lean Meta Elab Tactic Kraken
 
+private def isCalleeSavedEqType (t : Expr) : Bool :=
+  match t.consumeMData.getAppFn'.constName? with
+  | some n => (`Reg64s.CalleeSavedEq).isSuffixOf n
+  | none => false
+
+private def clearSepAndLets (mvarId : MVarId) (clearCS : Bool := true) : MetaM MVarId :=
+  mvarId.withContext do
+    let mut toClear : Array FVarId := #[]
+    for localDecl? in (← getLCtx).decls do
+      if let some localDecl := localDecl? then
+        if localDecl.hasValue ||
+           localDecl.type.getAppFn.isConstOf ``Std.ExtHashMap.sep ||
+           localDecl.type.isAppOf ``Std.ExtHashMap ||
+           (clearCS && isCalleeSavedEqType localDecl.type) then
+          toClear := toClear.push localDecl.fvarId
+    mvarId.tryClearMany toClear
+
 /-- Discharge program address and label offset equalities for program(s) `ps`. -/
 elab "kaddr" ps:ident+ : tactic => withMainContext do
   let solved ← withReducible do
@@ -93,15 +110,7 @@ elab "kaddr" ps:ident+ : tactic => withMainContext do
   evalTactic (← `(tactic| (try simp only [Kraken.Executable.addrOf_zero, Kraken.Executable.startAddr_apply, Kraken.Layout.start_shift])))
   if (← getUnsolvedGoals).isEmpty then return
   let goal ← getMainGoal
-  let cleanGoal ← goal.withContext do
-    let mut toClear : Array FVarId := #[]
-    for localDecl? in (← getLCtx).decls do
-      if let some localDecl := localDecl? then
-        if localDecl.hasValue ||
-           localDecl.type.getAppFn.isConstOf ``Std.ExtHashMap.sep ||
-           localDecl.type.isAppOf ``Std.ExtHashMap then
-          toClear := toClear.push localDecl.fvarId
-    goal.tryClearMany toClear
+  let cleanGoal ← clearSepAndLets goal
   replaceMainGoal [cleanGoal]
   let target ← instantiateMVars (← getMainTarget)
   let extraDeclsRef ← IO.mkRef (#[] : Array Ident)
@@ -941,16 +950,6 @@ partial def evalSymKStep : Grind.GrindTactic :=
             trace[Kraken.kstep] "Solved by exact: {t} by {e}"
             return (true, subGoal)
 
-          let clearSepAndLets (mvarId : MVarId) : MetaM MVarId := mvarId.withContext do
-            let mut toClear : Array FVarId := #[]
-            for localDecl? in (← getLCtx).decls do
-              if let some localDecl := localDecl? then
-                if localDecl.hasValue ||
-                   localDecl.type.getAppFn.isConstOf ``Std.ExtHashMap.sep ||
-                   localDecl.type.isAppOf ``Std.ExtHashMap then
-                  toClear := toClear.push localDecl.fvarId
-            mvarId.tryClearMany toClear
-
           let t ← instantiateMVars (← subGoal.mvarId.getType)
           if !t.hasExprMVar then
             -- Solvable with refl, maybe.
@@ -964,7 +963,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             -- return the failed Grind state).
             let saved ← Grind.saveState
             try
-              let cleanMVarId ← clearSepAndLets subGoal.mvarId
+              let cleanMVarId ← clearSepAndLets subGoal.mvarId (!isCalleeSavedEqType t)
               let g ← Grind.liftGrindM (Grind.mkGoal cleanMVarId)
               let g ← Grind.liftGrindM g.internalizeAll
               match ← Grind.liftGrindM g.grind with
@@ -1080,15 +1079,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
                     try
                       let (eqMVar, eqGoal) ← simplifyAddrEq cand.addr
                       unless ← eqGoal.mvarId.isAssigned do
-                        let cleanMVarId ← eqGoal.mvarId.withContext do
-                          let mut toClear : Array FVarId := #[]
-                          for localDecl? in (← getLCtx).decls do
-                            if let some localDecl := localDecl? then
-                              if localDecl.hasValue ||
-                                 localDecl.type.getAppFn.isConstOf ``Std.ExtHashMap.sep ||
-                                 localDecl.type.isAppOf ``Std.ExtHashMap then
-                                toClear := toClear.push localDecl.fvarId
-                          eqGoal.mvarId.tryClearMany toClear
+                        let cleanMVarId ← clearSepAndLets eqGoal.mvarId
                         let g ← Grind.liftGrindM (Grind.mkGoal cleanMVarId)
                         let g ← Grind.liftGrindM g.internalizeAll
                         match ← Grind.liftGrindM g.grind with

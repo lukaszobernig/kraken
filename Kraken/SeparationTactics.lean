@@ -147,15 +147,23 @@ private def extractAtBytesAndAddr? (clause : Expr) : MetaM (Option (Expr × Expr
     return some (← mkAppM ``UInt8.toBytes #[v], ← reduceProjectionApp rhs.appArg!)
   return none
 
+private def isCalleeSavedEqType (t : Expr) : Bool :=
+  match t.consumeMData.getAppFn'.constName? with
+  | some n => (`Reg64s.CalleeSavedEq).isSuffixOf n
+  | none => false
+
 private def provePropEq (lhs rhs : Expr) : MetaM (Option Expr) :=
   commitWhenSomeNoEx? do
     unless ← isDefEq (← inferType lhs) (← inferType rhs) do return none
     let goal ← mkFreshExprMVar (← mkEq lhs rhs)
-    let mut goalId := goal.mvarId!
-    for localDecl? in (← getLCtx).decls.toArray.reverse do
+    let mut toClear : Array FVarId := #[]
+    for localDecl? in (← getLCtx).decls do
       if let some localDecl := localDecl? then
-        if localDecl.isLet || (localDecl.type.find? (·.isConstOf ``Std.ExtHashMap)).isSome then
-          try goalId ← goalId.clear localDecl.fvarId catch _ => pure ()
+        if localDecl.hasValue ||
+           (localDecl.type.find? (·.isConstOf ``Std.ExtHashMap)).isSome ||
+           isCalleeSavedEqType localDecl.type then
+          toClear := toClear.push localDecl.fvarId
+    let goalId ← goal.mvarId!.tryClearMany toClear
     let params ← Lean.Meta.Grind.mkDefaultParams {}
     let res ← Lean.Meta.Grind.main goalId params
     if res.hasFailed then return none
