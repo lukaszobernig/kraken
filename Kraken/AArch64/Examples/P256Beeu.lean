@@ -356,8 +356,6 @@ theorem val256_of_limbs (bs : List UInt8) (h : bs.length = 32) :
 
 /-! ## 1. Prologue Verification (`beeu_mod_inverse_vartime` to `.Lbeeu_loop`) -/
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_prologue_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s₀ : MachineData) (stack a_bs n_bs : List UInt8) (R : DataMem → Prop) :
     (layout beeu_mod_inverse_vartime).Spec s₀
@@ -907,8 +905,6 @@ theorem sub320_val_of_ge (b0 b1 b2 b3 b4 a0 a1 a2 a3 a4 : UInt64)
 
 /-! ## 2. Loop Exit Verification (`.Lbeeu_loop` to `.Lbeeu_loop_end` when `B = 0`) -/
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_loop_exit_when_B_zero [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s₀ : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s₀
@@ -933,8 +929,6 @@ theorem beeu_loop_exit_when_B_zero [layout : Layout] [Layout.Valid beeu_mod_inve
 
 /-! ## 3. Loop Update Step Verification (`.Lbeeu_update_B_X_or_A_Y` to `.Lbeeu_loop`) -/
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_update_step_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s₀ : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s₀
@@ -989,8 +983,6 @@ theorem beeu_update_step_correct [layout : Layout] [Layout.Valid beeu_mod_invers
 
 /-! ## 4. Epilogue & Modular Negation Verification (`.Lbeeu_err` and `.Lbeeu_reduction_loop` to Return) -/
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_epilogue_err_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) (r₀ : Reg64s) (R : DataMem → Prop) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1021,8 +1013,6 @@ theorem beeu_epilogue_err_correct [layout : Layout] [Layout.Valid beeu_mod_inver
   change (r₀.SP.toBitVec + 18446744073709551504#64 + 0#64) + 112#64 = r₀.SP.toBitVec
   grind
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_reduction_and_store_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) (sp' out_p : BitVec 64) (o0 o1 o2 o3 : UInt64) (R : DataMem → Prop) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1066,8 +1056,6 @@ theorem beeu_reduction_and_store_correct [layout : Layout] [Layout.Valid beeu_mo
     h_carry4, h_zero_sbc, Bool.false_eq_true, ↓reduceIte] at *
   refine ⟨by kaddr beeu_mod_inverse_vartime, rfl, trivial, trivial, _, _, _, _, h_sub, by ecancel⟩
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_finish_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) (r₀ : Reg64s) (R : DataMem → Prop) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1098,8 +1086,6 @@ theorem beeu_finish_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_var
   change (r₀.SP.toBitVec + 18446744073709551504#64 + 0#64) + 112#64 = r₀.SP.toBitVec
   grind
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_loop_end_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1144,8 +1130,6 @@ theorem beeu_loop_end_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
     apply Eventually.done
     refine ⟨rfl, rfl, rfl, rfl, rfl, by kaddr beeu_mod_inverse_vartime⟩
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_reduction_step_ge_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1185,8 +1169,6 @@ theorem beeu_reduction_step_ge_correct [layout : Layout] [Layout.Valid beeu_mod_
   dsimp only [val320, val256]
   omega
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 /-- Full verification of `.Lbeeu_reduction_loop` through `.Lbeeu_finish` to `ret`:
     repeatedly subtracts `N` from `Y` while `Y ≥ N`, then stores `N - (Y % N)` to `out_p`,
     restores callee-saved registers, and returns `1`. -/
@@ -1301,8 +1283,6 @@ theorem beeu_reduction_to_return_correct [layout : Layout] [Layout.Valid beeu_mo
   · intro st hQ
     exact hQ
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 /-- Complete verification from `.Lbeeu_loop_end` to function return:
     if `A = 1`, reduces `Y` modulo `N`, writes `N - (Y % N)` to `out`, and returns `1`;
     if `A ≠ 1`, leaves `out` unchanged and returns `0`. -/
@@ -1391,8 +1371,6 @@ theorem pow2_mul_emod_step (m : Nat) (x x' n z : Int)
     rw [Nat.pow_succ, Int.natCast_mul]; grind
   rw [h_pow, Int.mul_emod, h_step, ← Int.mul_emod, h_inv]
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_shift_loop_X_pre_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1446,8 +1424,6 @@ theorem beeu_shift_loop_X_pre_correct [layout : Layout] [Layout.Valid beeu_mod_i
     · rw [h_add, h_n320]
       omega
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_shift1_0_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1627,8 +1603,6 @@ theorem beeu_shift_loop_X_correct [layout : Layout] [Layout.Valid beeu_mod_inver
   · intro st hQ
     exact hQ
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_shift_loop_Y_pre_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1682,8 +1656,6 @@ theorem beeu_shift_loop_Y_pre_correct [layout : Layout] [Layout.Valid beeu_mod_i
     · rw [h_add, h_n320]
       omega
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_shift1_1_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1863,8 +1835,6 @@ theorem beeu_shift_loop_Y_correct [layout : Layout] [Layout.Valid beeu_mod_inver
   · intro st hQ
     exact hQ
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_shift_B_header_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -1915,8 +1885,6 @@ theorem beeu_shift_B_header_correct [layout : Layout] [Layout.Valid beeu_mod_inv
     exact ⟨trivial, trivial, trivial, trivial, trivial, trivial, trivial,
       by kaddr beeu_mod_inverse_vartime, rfl, hk_pos, rfl, h_shift⟩
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 theorem beeu_shift_A_header_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -2029,8 +1997,6 @@ theorem shift_A_Y_mod_inv (k : Nat) (a A A' Y Y' n : Int)
     rw [← hA]; grind
   rw [h_lin, Int.add_emod, Int.mul_emod a, hY, ← Int.mul_emod, ← Int.add_emod, h_inv]
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 /-- Full verification of the `B`/`X` shift phase (`.Lbeeu_loop` to `.Lbeeu_shift_A_Y` when `B > 0`):
     shifts `B` right by `k = ctzClamped(b0)` bits and divides `X` by `2^k` modulo `N`. -/
 theorem beeu_shift_B_X_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
@@ -2087,8 +2053,6 @@ theorem beeu_shift_B_X_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
       s.regs.beeuB fin.data.regs.beeuB s.regs.beeuX fin.data.regs.beeuX s.regs.beeuN
       hN_odd (h_fin_B.symm ▸ h_B_shift) h_fin_X_mod h_inv
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 /-- Full verification of the `A`/`Y` shift phase (`.Lbeeu_shift_A_Y` to `.Lbeeu_update_B_X_or_A_Y`):
     shifts `A` right by `k = ctzClamped(a0)` bits and divides `Y` by `2^k` modulo `N`. -/
 theorem beeu_shift_A_Y_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
@@ -2147,8 +2111,6 @@ theorem beeu_shift_A_Y_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
 
 /-! ## 6. Outer Loop & Top-Level `beeu_mod_inverse_vartime` Specification -/
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 /-- One full iteration of `.Lbeeu_loop` when `0 < B`:
     executes `beeu_shift_B_X`, `beeu_shift_A_Y`, and `.Lbeeu_update_B_X_or_A_Y`,
     returning to `.Lbeeu_loop` with strictly smaller `(B + A).toNat` and preserving
@@ -2237,8 +2199,6 @@ def BeeuNoOverflow319 (a n : Int) : Prop :=
     (a * r.beeuY + r.beeuA) % n = 0 →
     r.beeuX < 256 ^ 40 / 2 ∧ r.beeuY < 256 ^ 40 / 2
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 /-- Full verification of the outer binary extended Euclidean loop (`.Lbeeu_loop` to `.Lbeeu_loop_end`):
     terminates by well-founded induction on `(B + A).toNat`, exiting with `B = 0`, `0 < A ≤ A₀`,
     and `(a * Y + A) % N = 0`. -/
@@ -2341,8 +2301,6 @@ theorem mod_inv_of_beeu_end (a y out n : Int)
   rw [h_eq, Int.add_emod, Int.mul_emod, Int.emod_self, Int.mul_zero,
     Int.zero_emod, Int.add_zero, Int.emod_emod]
 
-set_option maxRecDepth 4096 in
-set_option maxHeartbeats 800000 in
 /-- Top-level end-to-end functional correctness of BoringSSL's `beeu_mod_inverse_vartime`:
     Given a 16-byte-aligned stack with 112 bytes of frame space, 32-byte input buffers `a_bs` at `x1`
     and odd modulus `n_bs` at `x2` with `0 ≤ a ≤ n`, and a 32-byte output buffer at `x0`,

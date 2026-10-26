@@ -158,8 +158,13 @@ private def getProgInfo? (declName : Name) : MetaM (Option ProgInfo) := do
   progInfoCache.modify (·.insert declName info)
   return some info
 
+private def withKrakenRecDepth {α : Type} (x : TacticM α) : TacticM α :=
+  withOptions (fun opts =>
+    let cur := maxRecDepth.get opts
+    if cur < 4096 then maxRecDepth.set opts 4096 else opts) x
+
 /-- Discharge program address and label offset equalities for program(s) `ps`. -/
-elab "kaddr" ps:ident+ : tactic => withMainContext do
+elab "kaddr" ps:ident+ : tactic => withKrakenRecDepth <| withMainContext do
   let solved ← withReducible do
     try (← getMainGoal).refl; pure true catch _ => pure false
   if solved then return
@@ -310,7 +315,7 @@ private partial def mkAndSplitPat (e : Expr) : TacticM (TSyntax `rcasesPat) := d
     `(rcasesPat| _)
 
 elab_rules : tactic
-  | `(tactic| kprologue $p:ident $[at $kRaw?]? $[take $nRaw?]? $[to $toRaw?]? $[with $s?]?) => withMainContext do
+  | `(tactic| kprologue $p:ident $[at $kRaw?]? $[take $nRaw?]? $[to $toRaw?]? $[with $s?]?) => withKrakenRecDepth <| withMainContext do
       let targetInit := (← instantiateMVars (← getMainTarget)).consumeMData
       if targetInit.getAppFn'.constName? == some ``CtEventually then
         evalTactic (← `(tactic| unfold CtEventually))
