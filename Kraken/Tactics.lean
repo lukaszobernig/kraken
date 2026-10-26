@@ -662,7 +662,8 @@ private def tryClose (tac : TSyntax `tactic) : TacticM Bool := do
   let s ← saveState
   tryCatchRuntimeEx
     (do
-      evalTactic tac
+      -- `withoutRecover`: elaboration errors must fail the attempt instead of inserting `sorry`.
+      Tactic.withoutRecover (evalTactic tac)
       if (← getUnsolvedGoals).isEmpty then return true
       s.restore; return false)
     (fun _ => do s.restore; return false)
@@ -721,6 +722,364 @@ elab_rules : tactic
           closed ← tryClose tac
       unless closed do remaining := remaining ++ [g]
     setGoals remaining
+
+--------------------------------------------------------------------------------
+-- Composition tactics: `kcall`, `kloop`, `kloop_exit`, `kloop_next`
+
+/-- The program constant `p` of the first `(layout p)` occurring in `e`, if any. -/
+initialize registerTraceClass `Kraken.kcall
+
+private def findLayoutProg? (e : Expr) : Option Name := do
+  let sub ← e.find? fun s => s.isAppOfArity ``Kraken.Layout.apply 3 && (s.getArg! 2).isConst
+  return (sub.getArg! 2).constName!
+
+/-- Close the main goal (a program-counter equation) by `rfl` or `kaddr p`. -/
+private def closePcGoal (prog? : Option Name) : TacticM Bool := do
+  if ← tryClose (← `(tactic| with_reducible rfl)) then return true
+  match prog? with
+  | some p => tryClose (← `(tactic| kaddr $(mkIdent p):ident))
+  | none => pure false
+
+/-- Close the main goal if it is a conjunction of hypotheses / `True` / reflexive equations;
+otherwise leave it untouched. -/
+private def tryCloseSimple (g : MVarId) : TacticM Bool := do
+  let s ← saveState
+  setGoals [g]
+  let ok ← try
+      evalTactic (← `(tactic| (try dsimp only)))
+      let g ← getMainGoal
+      let leaves ← splitConjGoals g
+      let mut all := true
+      for l in leaves do
+        if ← l.isAssigned then continue
+        setGoals [l]
+        let closed ← do
+          if ← tryClose (← `(tactic| assumption)) then pure true
+          else if ← tryClose (← `(tactic| exact True.intro)) then pure true
+          else tryClose (← `(tactic| with_reducible rfl))
+        unless closed do all := false
+      pure all
+    catch _ => pure false
+  if ok then return true
+  s.restore
+  return false
+
+/-- `h : a = b ∧ rest` or `h : a = b`, where one side is a local variable not occurring in the
+other: substitute the variable away (keeping `h : rest` in the first case). Used to eliminate the
+`st.pc = …` conjunct every block postcondition starts with. -/
+private def substLeadingVarEq (h : Ident) : TacticM Unit := withMainContext do
+  let some decl := (← getLCtx).findFromUserName? h.getId | return
+  let t ← whnfR (← instantiateMVars decl.type)
+  let isVarEq (e : Expr) : Bool :=
+    match e.consumeMData.eq? with
+    | some (_, lhs, rhs) =>
+      (lhs.isFVar && !rhs.containsFVar lhs.fvarId!) || (rhs.isFVar && !lhs.containsFVar rhs.fvarId!)
+    | none => false
+  if t.isAppOfArity ``And 2 && isVarEq (t.getArg! 0) then
+    let hpc := mkIdent (← mkFreshUserName `hpc)
+    evalTactic (← `(tactic| obtain ⟨$hpc:ident, $h:ident⟩ := $h:ident))
+    evalTactic (← `(tactic| subst $hpc:ident))
+  else if isVarEq t then
+    evalTactic (← `(tactic| subst $h:ident))
+
+/-- Introduce the continuation of a `bind`/loop rule: `rintro ⟨st, st_pc⟩ h`, beta-reduce `h`,
+substitute a leading `st_pc = …` conjunct, and destructure the rest with `pat?`. -/
+private def introContinuation (st h : Ident) (pat? : Option (TSyntax `rcasesPat)) :
+    TacticM Unit := do
+  let stPc := mkIdent (st.getId.appendAfter "_pc")
+  let stPat ← `(rcasesPat| ⟨$st:ident, $stPc:ident⟩)
+  let hPat ← `(rcasesPat| $h:ident)
+  evalTactic (← `(tactic| rintro $stPat:rcasesPat $hPat:rcasesPat))
+  evalTactic (← `(tactic| (try dsimp only at $h:ident)))
+  try substLeadingVarEq h catch _ => pure ()
+  if let some pat := pat? then
+    evalTactic (← `(tactic| obtain $pat:rcasesPat := $h:ident))
+
+private def rcasesPatIdent? (p : TSyntax `rcasesPat) : Option Name :=
+  if p.raw.isOfKind ``Lean.Parser.Tactic.rcasesPat.one then
+    match p.raw[0] with
+    | .ident _ _ n _ => some n
+    | _ => none
+  else none
+
+private def tagGoals (tag : Name) : TacticM Unit := do
+  for g in (← getGoals) do
+    g.setTag tag
+
+/-- `kcall e [with [st] pat]`: sequence the specification `e` of a block or sub-program into the
+current `Eventually` goal via `Eventually.bind_at` (or `Eventually.bind_at_traced`).
+
+`e` may prove `(layout p).Spec s (pc := …) (pre := …) (post := …)`, an `Eventually`, or a
+`TracedEventually`; leading hypotheses of `e` that are not supplied (its preconditions) become
+`pre` goals, closed automatically when they follow from the context. The program-counter side
+condition is closed by `rfl`/`kaddr`. The continuation is introduced as `st : MachineData` with
+`hst : post`, a leading `st.pc = …` conjunct is substituted, and `pat` destructures the rest. -/
+syntax (name := kcall) "kcall " term (" with " (ppSpace colGt rcasesPat)+)? : tactic
+
+elab_rules : tactic
+  | `(tactic| kcall $e:term $[with $pats?*]?) => withKrakenRecDepth <| withMainContext do
+    let pats : Array (TSyntax `rcasesPat) := pats?.getD #[]
+    let (stName, hPat?) ← match pats with
+      | #[] => pure (`st, none)
+      | #[p] => pure (`st, some p)
+      | #[s, p] =>
+        match rcasesPatIdent? s with
+        | some n => pure (n, some p)
+        | none => throwErrorAt s "kcall: expected a name for the intermediate state"
+      | _ => throwError "kcall: expected at most two patterns (`with [st] pat`)"
+    let st := mkIdent stName
+    let h := mkIdent (Name.mkSimple ("h" ++ stName.toString))
+    let target := (← instantiateMVars (← getMainTarget)).consumeMData
+    if target.isAppOf ``TracedEventually then
+      evalTactic (← `(tactic| unfold TracedEventually))
+    let target := (← instantiateMVars (← getMainTarget)).consumeMData
+    unless target.isAppOfArity ``Eventually 4 do
+      throwError "kcall: the goal must be an `Eventually` (introduce the specification first, e.g. with `kintro`):{indentExpr target}"
+    let traced := (target.getArg! 1).consumeMData.getAppFn'.constName? == some ``step1Traced
+    let prog? := findLayoutProg? target
+    -- Elaborate the call and instantiate its leading hypotheses with metavariables.
+    let callExpr ← Tactic.elabTerm e none
+    Term.synthesizeSyntheticMVarsNoPostponing
+    let callType ← instantiateMVars (← inferType callExpr)
+    let (args, _, _) ← forallMetaTelescopeReducing callType
+    let callProof := mkAppN callExpr args
+    let thm := if traced then ``Eventually.bind_at_traced else ``Eventually.bind_at
+    -- `thm implicits… callProof`, leaving the implicit arguments as metavariables for `apply`.
+    let thmFn ← mkConstWithFreshMVarLevels thm
+    let (xs, bis, _) ← forallMetaTelescopeReducing (← inferType thmFn)
+    let some i := bis.findIdx? (·.isExplicit) | throwError "kcall: unexpected signature of {thm}"
+    unless ← isDefEq (← inferType xs[i]!) (← inferType callProof) do
+      throwError "kcall: `{e}` does not prove an `Eventually`{if traced then " (traced)" else ""} specification:{indentExpr callType}"
+    let partialApp := mkAppN thmFn ((xs.extract 0 i).push callProof)
+    let goal ← getMainGoal
+    -- `apply` returns the two new goals first, followed by any other unassigned metavariables
+    -- occurring in the term (the `pre` holes, handled below, and holes already present in the goal).
+    let newGoals ← goal.apply partialApp
+    let hpcGoal :: kGoal :: _ := newGoals
+      | throwError "kcall: unexpected goals after applying {thm}"
+    -- Program-counter side condition.
+    setGoals [hpcGoal]
+    let pcClosed ← closePcGoal prog?
+    -- Preconditions.
+    let mut preGoals : Array MVarId := #[]
+    for a in args do
+      let m := a.mvarId!
+      if ← m.isAssigned then continue
+      let isProp ← m.withContext do isProp (← m.getType)
+      unless isProp do
+        throwError "kcall: could not infer the argument `{a}` of `{e}`:{indentExpr (← m.getType)}"
+      m.setKind .syntheticOpaque
+      unless ← tryCloseSimple m do
+        m.setTag `pre
+        preGoals := preGoals.push m
+    -- Continuation.
+    setGoals [kGoal]
+    trace[Kraken.kcall] "goals before intro: {(← getGoals).map (·.name)}; pre: {preGoals.map (·.name)}; newGoals: {newGoals.map (·.name)}"
+    introContinuation st h hPat?
+    let kGoals ← getGoals
+    trace[Kraken.kcall] "goals after intro: {kGoals.map (·.name)}"
+    unless pcClosed do hpcGoal.setTag `pc
+    setGoals (kGoals ++ preGoals.toList ++ (if pcClosed then [] else [hpcGoal]))
+
+syntax kloopArg := " (" ident " := " term ")"
+
+/-- `kloop (inv := P) [(exit := Q)] (measure := v₀) [(ghost := g₀)] [(lt := r) (wf := h)]
+[(state := st)] [with v g pat]`: apply the tail-recursive loop rule to an `Eventually` goal.
+
+* `P : Measure → Ghost → State → Prop` (or `Measure → State → Prop` without `ghost`) is the loop
+  invariant, `v₀`/`g₀` the initial measure and ghost; `lt`/`wf` default to `<` on `Nat`.
+* Without `exit`, `tailrec_loop_simple` is used: goals `init : P v₀ g₀ s` and `body`, whose
+  conclusion is `post mid ∨ ∃ v' g', P v' g' mid ∧ v' < v` (see `kloop_exit` / `kloop_next`).
+* With `exit`, `tailrec_loop_cps` is used: goals `init : Eventually (Q v₀ g₀ ∨ P v₀ g₀) s`,
+  `body` (conclusion `Q v g mid ∨ ∃ v' g', P v' g' mid ∧ v' < v ∧ (∀ t, Q v' g' t → Q v g t)`)
+  and `exit : ∀ st, Q v₀ g₀ st → Eventually post st`.
+
+In `body` the measure, ghost, state and invariant hypothesis are introduced as `v g st hst`
+(names/patterns from `state :=` and `with`), with a leading `st.pc = …` conjunct substituted. -/
+syntax (name := kloop) "kloop" (ppSpace kloopArg)+ (" with " (ppSpace colGt rcasesPat)+)? : tactic
+
+elab_rules : tactic
+  | `(tactic| kloop $args* $[with $pats?*]?) => withKrakenRecDepth <| withMainContext do
+    let pats : Array (TSyntax `rcasesPat) := pats?.getD #[]
+    let mut inv? : Option Term := none
+    let mut exit? : Option Term := none
+    let mut measure? : Option Term := none
+    let mut ghost? : Option Term := none
+    let mut lt? : Option Term := none
+    let mut wf? : Option Term := none
+    let mut stName := `st
+    for arg in args do
+      let key := arg.raw[1].getId
+      let val : Term := ⟨arg.raw[3]⟩
+      match key with
+      | `inv => inv? := some val
+      | `exit => exit? := some val
+      | `measure => measure? := some val
+      | `ghost => ghost? := some val
+      | `lt => lt? := some val
+      | `wf => wf? := some val
+      | `state =>
+        unless val.raw.isIdent do throwErrorAt val "kloop: `state` expects a name"
+        stName := val.raw.getId
+      | _ => throwErrorAt arg "kloop: unknown argument `{key}` (expected inv, exit, measure, ghost, lt, wf, state)"
+    let some inv := inv? | throwError "kloop: missing `(inv := …)`"
+    let some v0Stx := measure? | throwError "kloop: missing `(measure := …)`"
+    let target := (← instantiateMVars (← getMainTarget)).consumeMData
+    if target.isAppOf ``TracedEventually then
+      evalTactic (← `(tactic| unfold TracedEventually))
+    let target := (← instantiateMVars (← getMainTarget)).consumeMData
+    unless target.isAppOfArity ``Eventually 4 do
+      throwError "kloop: the goal must be an `Eventually`:{indentExpr target}"
+    let trans := target.getArg! 1
+    let post := target.getArg! 2
+    let initial := target.getArg! 3
+    let stateType ← inferType initial
+    let postType ← mkArrow stateType (mkSort .zero)
+    -- Measure and ghost.
+    let v0 ← Tactic.elabTerm v0Stx none
+    let measureType ← instantiateMVars (← inferType v0)
+    let (g0, ghostType) ← match ghost? with
+      | some gStx =>
+        let g0 ← Tactic.elabTerm gStx none
+        pure (g0, ← instantiateMVars (← inferType g0))
+      | none => pure (mkConst ``Unit.unit, mkConst ``Unit)
+    -- Invariant (and exit condition).
+    let invType ← mkArrow measureType (← mkArrow ghostType postType)
+    let invTypeNoGhost ← mkArrow measureType postType
+    let elabInv (stx : Term) : TacticM Expr := do
+      match ghost? with
+      | some _ => Tactic.elabTermEnsuringType stx invType
+      | none =>
+        let f ← Tactic.elabTermEnsuringType stx invTypeNoGhost
+        withLocalDeclD `v measureType fun v =>
+          withLocalDeclD `g ghostType fun g =>
+            withLocalDeclD `st stateType fun s => do
+              mkLambdaFVars #[v, g, s] (mkAppN f #[v, s]).headBeta
+    let P ← elabInv inv
+    let Q? ← exit?.mapM elabInv
+    -- Well-founded order on the measure.
+    let (lt, wf) ← match lt?, wf? with
+      | some l, some w =>
+        let lt ← Tactic.elabTermEnsuringType l (← mkArrow measureType (← mkArrow measureType (mkSort .zero)))
+        let wf ← Tactic.elabTermEnsuringType w (← mkAppM ``WellFounded #[lt])
+        pure (lt, wf)
+      | none, none =>
+        unless measureType.isConstOf ``Nat do
+          throwError "kloop: give `(lt := …) (wf := …)` for a measure of type{indentExpr measureType}"
+        let lt ← Tactic.elabTerm (← `(fun a b : Nat => a < b)) none
+        let wf ← Tactic.elabTerm (← `(Nat.lt_wfRel.wf)) none
+        pure (lt, wf)
+      | _, _ => throwError "kloop: `lt` and `wf` must be given together"
+    Term.synthesizeSyntheticMVarsNoPostponing
+    -- Apply the loop rule.
+    let proof ← match Q? with
+      | none => mkAppM ``tailrec_loop_simple #[trans, post, initial, P, lt, wf, v0, g0]
+      | some Q => mkAppM ``tailrec_loop_cps #[trans, post, initial, P, Q, lt, wf, v0, g0]
+    let goal ← getMainGoal
+    let newGoals ← goal.apply proof
+    let (gInit, gBody, gExit?) ← match Q?, newGoals with
+      | none, [gInit, gBody] => pure (gInit, gBody, none)
+      | some _, [gInit, gBody, gExit] => pure (gInit, gBody, some gExit)
+      | _, _ => throwError "kloop: unexpected goals after applying the loop rule"
+    -- `init`
+    setGoals [gInit]
+    evalTactic (← `(tactic| (try dsimp only)))
+    tagGoals `init
+    let initGoals ← getGoals
+    -- `body`
+    setGoals [gBody]
+    let vPat ← match pats[0]? with
+      | some p => pure p
+      | none => `(rcasesPat| v)
+    let gPat ← match pats[1]? with
+      | some p => pure p
+      | none => `(rcasesPat| g)
+    evalTactic (← `(tactic| rintro $vPat:rcasesPat $gPat:rcasesPat))
+    let st := mkIdent stName
+    let h := mkIdent (Name.mkSimple ("h" ++ stName.toString))
+    introContinuation st h pats[2]?
+    tagGoals `body
+    let bodyGoals ← getGoals
+    -- `exit`
+    let exitGoals ← match gExit? with
+      | none => pure []
+      | some gExit =>
+        setGoals [gExit]
+        introContinuation st h none
+        tagGoals `exit
+        getGoals
+    setGoals (initGoals ++ bodyGoals ++ exitGoals)
+
+/-- Reduce a loop-body/entry goal to its disjunction `post ∨ …` (applying `Eventually.done` if
+needed) and return the right disjunct. -/
+private def kloopDisjunct : TacticM Expr := do
+  let t := (← instantiateMVars (← getMainTarget)).consumeMData
+  if t.isAppOfArity ``Eventually 4 then
+    evalTactic (← `(tactic| apply Eventually.done))
+  evalTactic (← `(tactic| (try dsimp only)))
+  let t := (← instantiateMVars (← getMainTarget)).consumeMData
+  unless t.isAppOfArity ``Or 2 do
+    throwError "expected a loop goal `post ∨ …` (see `kloop`):{indentExpr t}"
+  return (t.getArg! 1).consumeMData
+
+/-- Leave the loop: select the left (`post`/`Q`) disjunct of a `kloop` body or entry goal. -/
+elab "kloop_exit" : tactic => withMainContext do
+  discard <| kloopDisjunct
+  evalTactic (← `(tactic| refine Or.inl ?_))
+  evalTactic (← `(tactic| (try dsimp only)))
+
+/-- `kloop_next v' [g']`: go round the loop again with measure `v'` and ghost `g'` (`()` for a
+unit ghost). Produces the goal `P v' g' mid` (first), tries to close the decrease goal `v' < v`
+with `omega`/`decide` and the `Q`-monotonicity goal of `tailrec_loop_cps` with
+`fun _ h => h`, and leaves whatever remains. Without arguments, selects the right disjunct of a
+`kloop … (exit := Q)` entry goal (`P v₀ g₀ mid`). -/
+elab "kloop_next" vs:(ppSpace colGt term:max)* : tactic => withMainContext do
+    let rhs ← kloopDisjunct
+    if !rhs.isAppOfArity ``Exists 2 then
+      unless vs.isEmpty do
+        throwError "kloop_next: this goal has no measure to supply:{indentExpr rhs}"
+      evalTactic (← `(tactic| refine Or.inr ?_))
+      evalTactic (← `(tactic| (try dsimp only)))
+      return
+    -- `∃ v' g', P v' g' mid ∧ lt v' v [∧ mono]`
+    let vLam := (rhs.getArg! 1).consumeMData
+    let ghostType? : Option Expr :=
+      if vLam.isLambda then
+        let inner := vLam.bindingBody!.consumeMData
+        if inner.isAppOfArity ``Exists 2 then some (inner.getArg! 0) else none
+      else none
+    let unitStx ← `(Unit.unit)
+    let (v', g') ← match vs with
+      | #[v'] =>
+        if ghostType?.any (·.isConstOf ``Unit) then
+          pure (v', unitStx)
+        else
+          throwError "kloop_next: the loop has a ghost state; use `kloop_next v' g'`"
+      | #[v', g'] => pure (v', g')
+      | _ => throwError "kloop_next: expected `kloop_next v' [g']`"
+    evalTactic (← `(tactic| refine Or.inr ⟨$v', $g', ?inv, ?rest⟩))
+    let gs ← getGoals
+    let [gInv, gRest] := gs | throwError "kloop_next: unexpected goals"
+    -- decrease (and monotonicity) side conditions
+    setGoals [gRest]
+    evalTactic (← `(tactic| (try dsimp only)))
+    let restT := (← instantiateMVars (← getMainTarget)).consumeMData
+    let mut side : List MVarId := []
+    if restT.isAppOfArity ``And 2 then
+      evalTactic (← `(tactic| refine ⟨?dec, ?mono⟩))
+      let [gDec, gMono] ← getGoals | throwError "kloop_next: unexpected goals"
+      setGoals [gDec]
+      unless (← tryClose (← `(tactic| omega))) || (← tryClose (← `(tactic| decide))) do
+        side := side ++ [gDec]
+      setGoals [gMono]
+      unless ← tryClose (← `(tactic| exact fun _ h => h)) do
+        side := side ++ [gMono]
+    else
+      unless (← tryClose (← `(tactic| omega))) || (← tryClose (← `(tactic| decide))) do
+        side := side ++ [gRest]
+    setGoals [gInv]
+    evalTactic (← `(tactic| (try dsimp only)))
+    setGoals ((← getGoals) ++ side)
 
 --------------------------------------------------------------------------------
 
