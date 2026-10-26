@@ -633,6 +633,83 @@ elab "kdone" : tactic =>
     else
       evalTactic (← `(tactic| apply Eventually.done))
 
+/-- Split a goal into its conjunctive components (`And` chains and `Prop`-valued structures such
+as record-shaped invariants), returning the leaf goals in order. -/
+private partial def splitConjGoals (g : MVarId) : TacticM (List MVarId) := g.withContext do
+  if ← g.isAssigned then return []
+  let t := (← instantiateMVars (← g.getType)).consumeMData
+  if t.isAppOfArity ``And 2 then
+    let gs ← g.apply (mkConst ``And.intro)
+    gs.foldlM (fun acc g' => do return acc ++ (← splitConjGoals g')) []
+  else if let some n := t.getAppFn.constName? then
+    if n != ``Exists && isStructure (← getEnv) n && (← isProp t) then
+      let gs ← g.constructor
+      gs.foldlM (fun acc g' => do return acc ++ (← splitConjGoals g')) []
+    else
+      return [g]
+  else
+    return [g]
+
+private def mentionsConst (e : Expr) (names : List Name) : Bool :=
+  (e.find? fun s =>
+    match s.getAppFn.constName? with
+    | some n => names.contains n
+    | none => false).isSome
+
+/-- Run `tac` on the current goal; succeed only if it closes all goals, otherwise roll back
+(also on runtime exceptions such as `maxRecDepth`). -/
+private def tryClose (tac : TSyntax `tactic) : TacticM Bool := do
+  let s ← saveState
+  tryCatchRuntimeEx
+    (do
+      evalTactic tac
+      if (← getUnsolvedGoals).isEmpty then return true
+      s.restore; return false)
+    (fun _ => do s.restore; return false)
+
+/-- Finish a post-`kstep` goal: apply `Eventually.done` if needed, zeta-reduce and normalise the
+goal and hypotheses (`dsimp +zetaDelta only [extra lemmas] at *`, the `BitVec`/`UInt64` normal form
+used by `kstep`, then `simp only [extra lemmas, ↓reduceIte]` on the goal), split conjunctions and
+`Prop`-valued structures, and discharge the components by `rfl`, `trivial`, `assumption`, `omega`,
+`kaddr p` (label/address goals) or `ecancel` (separation-logic goals). Components that cannot be
+discharged are left to the user, in order of appearance. -/
+syntax (name := kfinish) "kfinish" ident ("[" Lean.Parser.Tactic.simpLemma,* "]")? : tactic
+
+elab_rules : tactic
+  | `(tactic| kfinish $p:ident $[[$lemmas,*]]?) => withKrakenRecDepth <| withMainContext do
+    let lemmas : Array (TSyntax `Lean.Parser.Tactic.simpLemma) :=
+      match lemmas with | some l => l.getElems | none => #[]
+    let tgt := (← instantiateMVars (← getMainTarget)).consumeMData
+    if tgt.isAppOfArity ``Eventually 4 then
+      evalTactic (← `(tactic| apply Eventually.done))
+    evalTactic (← `(tactic| (try dsimp +zetaDelta only [$lemmas,*] at *)))
+    evalTactic (← `(tactic| (try dsimp +zetaDelta only at *)))
+    evalTactic (← `(tactic| (try simp only [BitVec.shiftLeft_zero, BitVec.zero_or, BitVec.or_zero,
+      BitVec.xor_self, UInt64.toNat_toBitVec, UInt64.toBitVec_ofBitVec] at *)))
+    evalTactic (← `(tactic| (try simp only [$lemmas,*, ↓reduceIte])))
+    if (← getUnsolvedGoals).isEmpty then return
+    let leaves ← splitConjGoals (← getMainGoal)
+    let mut remaining : List MVarId := []
+    for g in leaves do
+      if ← g.isAssigned then continue
+      setGoals [g]
+      let t := (← instantiateMVars (← g.getType)).consumeMData
+      let closers : List (TSyntax `tactic) ←
+        if mentionsConst t [``Kraken.Executable.label, ``Labels.label, ``Kraken.Executable.addrOf,
+            ``Kraken.Layout.addrOf] then
+          pure [← `(tactic| kaddr $p)]
+        else if mentionsConst t [``Std.ExtHashMap.sep, ``List.At] then
+          pure [← `(tactic| ecancel)]
+        else
+          pure [← `(tactic| assumption), ← `(tactic| rfl), ← `(tactic| exact True.intro),
+            ← `(tactic| omega)]
+      let mut closed := false
+      for tac in closers do
+        if !closed then
+          closed ← tryClose tac
+      unless closed do remaining := remaining ++ [g]
+    setGoals remaining
+
 --------------------------------------------------------------------------------
 
 open Sym Sym.DSimp
