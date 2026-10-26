@@ -333,6 +333,56 @@ theorem Executable.addrOf_apply_succ {Directive : Type} [layout : Layout Directi
   Executable.addrOf_succ _ (c := {directive := d, size := layout.size k})
     (by rw [Layout.apply_getElem?, hd]; rfl)
 
+def Layout.sizeBefore {Directive : Type} (l : Layout Directive) (n : Nat) : Nat :=
+  match n with
+  | 0 => 0
+  | k + 1 => l.sizeBefore k + l.size k
+
+def Layout.addrOf {Directive : Type} (l : Layout Directive) (n : Nat) : Int64 :=
+  l.start + .ofNat (l.sizeBefore n)
+
+@[simp] theorem Layout.addrOf_zero {Directive : Type} (l : Layout Directive) :
+    l.addrOf 0 = l.start := by
+  simp [Layout.addrOf, Layout.sizeBefore]
+
+@[simp] theorem Layout.start_add_size_zero {Directive : Type} (l : Layout Directive) :
+    l.start + .ofNat (l.size 0) = l.addrOf 1 := by
+  simp [Layout.addrOf, Layout.sizeBefore]
+
+@[simp] theorem Layout.addrOf_succ {Directive : Type} (l : Layout Directive) (n : Nat) :
+    l.addrOf n + .ofNat (l.size n) = l.addrOf (n + 1) := by
+  simp [Layout.addrOf, Layout.sizeBefore, Int64.ofNat_add, Int64.add_assoc]
+
+theorem Layout.addrOf_add_size_eq {Directive : Type} (l : Layout Directive) (n m : Nat)
+    (h : n + 1 = m) :
+    l.addrOf n + .ofNat (l.size n) = l.addrOf m := by
+  subst h; exact l.addrOf_succ n
+
+theorem Executable.sizeBefore_apply_eq {Directive : Type} (l : Layout Directive)
+    (prog : List Directive) (n : Nat) (hn : n ≤ prog.length) :
+    (l prog).sizeBefore n = l.sizeBefore n := by
+  induction n with
+  | zero => rfl
+  | succ k ih =>
+    have hk : k < prog.length := hn
+    rw [Executable.sizeBefore_succ _ (c := {directive := prog[k], size := l.size k}),
+      ih (Nat.le_of_lt hk), Layout.sizeBefore]
+    rw [Layout.apply_getElem? (layout := l), List.getElem?_eq_getElem hk]; rfl
+
+theorem Executable.addrOf_apply_eq {Directive : Type} (l : Layout Directive)
+    (prog : List Directive) (n : Nat) (hn : n ≤ prog.length) :
+    (l prog).addrOf n = l.addrOf n := by
+  simp [Executable.addrOf, Layout.addrOf, Executable.sizeBefore_apply_eq l prog n hn]
+
+theorem Executable.addrOf_apply_of_length {Directive : Type}
+    {prog : List Directive} {len : Nat} (hlen : prog.length = len)
+    (n : Nat) (hn : decide (n ≤ len) = true) (l : Layout Directive) :
+    (l prog).addrOf n = l.addrOf n :=
+  Executable.addrOf_apply_eq l prog n (hlen ▸ of_decide_eq_true hn)
+
+theorem list_length_eq {α : Type _} (l : List α) (n : Nat) (h : l.length = n) :
+    l.length = n := h
+
 theorem Executable.directivesAtAddress_addrOf {Directive : Type} (e : Executable Directive)
     (h_offset : ∀ j k, e.addrOf j = e.addrOf k → e.sizeBefore j = e.sizeBefore k)
     {k : Nat} {c : Sized Directive} (hc : e.program[k]? = some c) (hz : 0 < c.size) :
