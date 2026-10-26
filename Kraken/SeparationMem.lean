@@ -147,6 +147,19 @@ theorem At_append_sep {w : Nat} (bs1 bs2 : List UInt8) (a : BitVec w)
     rw [← h_union]
     rw [← List.At_append _ _ _ h_len]
 
+theorem At_append_sep_len {w : Nat} (bs1 bs2 : List UInt8) (n : Nat) (a : BitVec w)
+    (h_n : bs1.length = n) (h_len : n + bs2.length ≤ 2 ^ w) :
+    Eq ((bs1 ++ bs2).At a) = Eq (bs1.At a) ⋆ Eq (bs2.At (a + .ofNat _ n)) := by
+  subst h_n
+  exact At_append_sep bs1 bs2 a h_len
+
+theorem At_append_sep_len2 {w : Nat} (bs1 bs2 : List UInt8) (n1 n2 : Nat) (a : BitVec w)
+    (h_n1 : bs1.length = n1) (h_n2 : bs2.length = n2) (h_len : n1 + n2 ≤ 2 ^ w) :
+    Eq ((bs1 ++ bs2).At a) = Eq (bs1.At a) ⋆ Eq (bs2.At (a + .ofNat _ n1)) := by
+  subst h_n1
+  subst h_n2
+  exact At_append_sep bs1 bs2 a h_len
+
 theorem At_take_drop_sep {w : Nat} (bs : List UInt8) (n : Nat) (a : BitVec w)
     (h_n : n ≤ bs.length) (h_len : bs.length ≤ 2 ^ w) :
     Eq (bs.At a) = Eq ((bs.take n).At a) ⋆ Eq ((bs.drop n).At (a + BitVec.ofNat w n)) := by

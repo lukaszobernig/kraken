@@ -433,3 +433,19 @@ theorem BitVec.ofInt_ofBytes_uInt64ToBytes (val : UInt64) :
 
 theorem UInt64.toBytes_ofBytes (bs : List UInt8) (h : 8 ≤ bs.length) : (UInt64.ofBytes bs).toBytes = bs.take 8 := by
   exact BitVec.toBytes_ofBytes 64 8 rfl bs h
+
+theorem Int.ofBytes_toNat_ofInt_64 (bs : List UInt8) (h : bs.length = 8) :
+    ((BitVec.ofInt 64 (Int.ofBytes bs)).toNat : Int) = Int.ofBytes bs := by
+  have h_ge : 0 ≤ Int.ofBytes bs := Int.ofBytes_ge_zero bs
+  have h_lt : Int.ofBytes bs < 256 ^ 8 := h ▸ Int.ofBytes_lt bs
+  have h_eq : BitVec.ofInt 64 (Int.ofBytes bs) = BitVec.ofNat 64 (Int.ofBytes bs).toNat := by
+    rw [← BitVec.ofInt_natCast, Int.toNat_of_nonneg h_ge]
+  rw [h_eq, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega), Int.toNat_of_nonneg h_ge]
+
+@[simp, grind =]
+theorem Int.ofBytes_toBytes_8_toInt (v : BitVec 64) :
+    Int.ofBytes (Int.toBytes 8 v.toInt) = (v.toNat : Int) := by
+  rw [ofBytes_toBytes 8 v.toInt]
+  dsimp [Int.take, BitVec.toInt]
+  split <;> omega
+

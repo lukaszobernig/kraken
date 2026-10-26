@@ -21,8 +21,10 @@ namespace Width
 @[kstep, simp, reducible] def bytes : Width → Nat | W8 => 1 | W16 => 2 | W32 => 4 | W64 => 8
 @[kstep] abbrev bytesv (w : Width) {n} : BitVec n := BitVec.ofNat n w.bytes
 @[kstep] abbrev type (w : Width) : Type := BitVec w.bits
-instance {w : Width} : Coe Bool w.type where coe := fun b : Bool => BitVec.ofNat _ b.toNat
+@[kstep] instance {w : Width} : Coe Bool w.type where coe := fun b : Bool => BitVec.ofNat _ b.toNat
 end Width
+
+attribute [kstep] CoeT.coe CoeHTCT.coe CoeOTC.coe CoeTC.coe Coe.coe
 
 unif_hint (w : Width) where
   w =?= Width.W8 |- Width.type w =?= BitVec 8
