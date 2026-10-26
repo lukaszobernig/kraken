@@ -903,6 +903,22 @@ theorem sub320_val_of_ge (b0 b1 b2 b3 b4 a0 a1 a2 a3 a4 : UInt64)
   simp only [h_c, ↓reduceIte] at h_step
   omega
 
+/-! ## Block Frame (facts preserved by every block of the main loop region) -/
+
+/-- Machine-state facts preserved by every block of the main loop region of
+`beeu_mod_inverse_vartime`: stack pointer, frame pointer, the modulus `N`, and data memory. -/
+structure BlockFrame (s st : MachineData) : Prop where
+  sp : st.regs.SP = s.regs.SP
+  x29 : st.regs.X29 = s.regs.X29
+  N : st.regs.beeuN = s.regs.beeuN
+  dmem : st.dmem = s.dmem
+
+theorem BlockFrame.refl (s : MachineData) : BlockFrame s s := ⟨rfl, rfl, rfl, rfl⟩
+
+theorem BlockFrame.trans {s₁ s₂ s₃ : MachineData} (h₁ : BlockFrame s₁ s₂) (h₂ : BlockFrame s₂ s₃) :
+    BlockFrame s₁ s₃ :=
+  ⟨h₂.sp.trans h₁.sp, h₂.x29.trans h₁.x29, h₂.N.trans h₁.N, h₂.dmem.trans h₁.dmem⟩
+
 /-! ## 2. Loop Exit Verification (`.Lbeeu_loop` to `.Lbeeu_loop_end` when `B = 0`) -/
 
 theorem beeu_loop_exit_when_B_zero [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
@@ -912,20 +928,16 @@ theorem beeu_loop_exit_when_B_zero [layout : Layout] [Layout.Valid beeu_mod_inve
       (pre := s₀.regs.beeuB = 0)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop_end" ∧
-        st.data.regs.SP = s₀.regs.SP ∧
-        st.data.regs.X29 = s₀.regs.X29 ∧
+        BlockFrame s₀ st.data ∧
         st.data.regs.beeuA = s₀.regs.beeuA ∧
-        st.data.regs.beeuN = s₀.regs.beeuN ∧
         st.data.regs.beeuX = s₀.regs.beeuX ∧
-        st.data.regs.beeuY = s₀.regs.beeuY ∧
-        st.data.dmem = s₀.dmem) := by
+        st.data.regs.beeuY = s₀.regs.beeuY) := by
   intro h_B_zero
   have ⟨h25, h26, h27, h28⟩ := val256_eq_zero_limbs
     s₀.regs.X25 s₀.regs.X26 s₀.regs.X27 s₀.regs.X28 h_B_zero
   kprologue beeu_mod_inverse_vartime at ".Lbeeu_loop" to ".Lbeeu_shift_A_Y" with s₀
   sym => kstep; tactic =>
-  apply Eventually.done
-  refine ⟨by kaddr beeu_mod_inverse_vartime, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  kfinish beeu_mod_inverse_vartime
 
 /-! ## 3. Loop Update Step Verification (`.Lbeeu_update_B_X_or_A_Y` to `.Lbeeu_loop`) -/
 
@@ -935,24 +947,18 @@ theorem beeu_update_step_correct [layout : Layout] [Layout.Valid beeu_mod_invers
       (pc := (layout beeu_mod_inverse_vartime).label ".Lbeeu_update_B_X_or_A_Y")
       (pre := s₀.regs.beeuX + s₀.regs.beeuY < 256 ^ 40)
       (post := fun st =>
-        let B := s₀.regs.beeuB
-        let A := s₀.regs.beeuA
-        let X := s₀.regs.beeuX
-        let Y := s₀.regs.beeuY
-        let B' := st.data.regs.beeuB
-        let A' := st.data.regs.beeuA
-        let X' := st.data.regs.beeuX
-        let Y' := st.data.regs.beeuY
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop" ∧
-        st.data.regs.SP = s₀.regs.SP ∧
-        st.data.regs.X29 = s₀.regs.X29 ∧
-        st.data.regs.beeuN = s₀.regs.beeuN ∧
-        st.data.dmem = s₀.dmem ∧
-        (if B ≥ A then
-          B' = B - A ∧ A' = A ∧ X' = X + Y ∧ Y' = Y
+        BlockFrame s₀ st.data ∧
+        if s₀.regs.beeuB ≥ s₀.regs.beeuA then
+          st.data.regs.beeuB = s₀.regs.beeuB - s₀.regs.beeuA ∧
+          st.data.regs.beeuA = s₀.regs.beeuA ∧
+          st.data.regs.beeuX = s₀.regs.beeuX + s₀.regs.beeuY ∧
+          st.data.regs.beeuY = s₀.regs.beeuY
         else
-          B' = B ∧ A' = A - B ∧ X' = X ∧ Y' = Y + X) ∧
-        B' * Y' + A' * X' = B * Y + A * X) := by
+          st.data.regs.beeuB = s₀.regs.beeuB ∧
+          st.data.regs.beeuA = s₀.regs.beeuA - s₀.regs.beeuB ∧
+          st.data.regs.beeuX = s₀.regs.beeuX ∧
+          st.data.regs.beeuY = s₀.regs.beeuY + s₀.regs.beeuX) := by
   intro h_xy_bound
   kprologue beeu_mod_inverse_vartime at ".Lbeeu_update_B_X_or_A_Y" to ".Lbeeu_B_greater_than_A" with s₀
   by_cases h_ge : val256 X25 X26 X27 X28 ≥ val256 X21 X22 X23 X24
@@ -962,11 +968,8 @@ theorem beeu_update_step_correct [layout : Layout] [Layout.Valid beeu_mod_invers
     sym => kstep; tactic =>
     kprologue beeu_mod_inverse_vartime at ".Lbeeu_B_greater_than_A" to ".Lbeeu_loop_end"
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only [Reg64s.beeuB, Reg64s.beeuA, Reg64s.beeuN, Reg64s.beeuX, Reg64s.beeuY] at hB' hX' ⊢
-    simp only [BitVec.shiftLeft_zero, BitVec.zero_or, UInt64.toNat_toBitVec, h_ge, ↓reduceIte]
-    refine ⟨by kaddr beeu_mod_inverse_vartime, trivial, trivial, trivial, trivial, ⟨hB', trivial, hX', trivial⟩, ?_⟩
-    rw [hB', hX']; grind
+    kfinish beeu_mod_inverse_vartime [Reg64s.beeuB, Reg64s.beeuA, Reg64s.beeuN, Reg64s.beeuX,
+      Reg64s.beeuY, h_ge]
   · have h_lt : val256 X25 X26 X27 X28 < val256 X21 X22 X23 X24 := Int.lt_of_not_ge h_ge
     have h_le : val256 X21 X22 X23 X24 ≥ val256 X25 X26 X27 X28 := Int.le_of_lt h_lt
     have h_carry := sub256_carry_of_lt X25 X26 X27 X28 X21 X22 X23 X24 h_lt
@@ -975,11 +978,8 @@ theorem beeu_update_step_correct [layout : Layout] [Layout.Valid beeu_mod_invers
     have hA' := sub256_val_of_ge X21 X22 X23 X24 X25 X26 X27 X28 h_le
     have hY' := add320_val_of_lt X8 X9 X10 X11 X12 X3 X4 X5 X6 X7 h_yx_bound
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only [Reg64s.beeuB, Reg64s.beeuA, Reg64s.beeuN, Reg64s.beeuX, Reg64s.beeuY] at hA' hY' ⊢
-    simp only [BitVec.shiftLeft_zero, UInt64.toNat_toBitVec, h_ge, ↓reduceIte]
-    refine ⟨by kaddr beeu_mod_inverse_vartime, trivial, trivial, trivial, trivial, ⟨trivial, hA', trivial, hY'⟩, ?_⟩
-    rw [hA', hY']; grind
+    kfinish beeu_mod_inverse_vartime [Reg64s.beeuB, Reg64s.beeuA, Reg64s.beeuN, Reg64s.beeuX,
+      Reg64s.beeuY, h_ge]
 
 /-! ## 4. Epilogue & Modular Negation Verification (`.Lbeeu_err` and `.Lbeeu_reduction_loop` to Return) -/
 
@@ -1092,23 +1092,11 @@ theorem beeu_loop_end_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
       (pc := (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop_end")
       (pre := True)
       (post := fun st =>
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
+        BlockFrame s st.data ∧
         st.data.regs.beeuY = s.regs.beeuY ∧
-        st.data.dmem = s.dmem ∧
         if s.regs.beeuA = 1 then
           st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_reduction_loop" ∧
-          st.data.regs.X14 = 0 ∧
-          st.data.regs.X0 = s.regs.X0 ∧
-          st.data.regs.X1 = s.regs.X1 ∧
-          st.data.regs.X2 = s.regs.X2 ∧
-          st.data.regs.X30 = s.regs.X30 ∧
-          st.data.regs.X8 = s.regs.X8 ∧
-          st.data.regs.X9 = s.regs.X9 ∧
-          st.data.regs.X10 = s.regs.X10 ∧
-          st.data.regs.X11 = s.regs.X11 ∧
-          st.data.regs.X12 = s.regs.X12
+          st.data.regs.X14 = 0
         else
           st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_err") := by
   intro _
@@ -1118,17 +1106,14 @@ theorem beeu_loop_end_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
     kprologue beeu_mod_inverse_vartime at ".Lbeeu_loop_end" to ".Lbeeu_reduction_loop" with s
     have ⟨h21, h22, h23, h24⟩ := val256_eq_one_limbs X21 X22 X23 X24 hA
     sym => kstep; tactic =>
-    apply Eventually.done
-    refine ⟨rfl, rfl, rfl, rfl, rfl, by kaddr beeu_mod_inverse_vartime,
-      by dsimp +zetaDelta only; rw [h21, h22, h23, h24]; decide,
-      rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+    kfinish beeu_mod_inverse_vartime
+    rw [h21, h22, h23, h24]; decide
   · simp only [hA, ↓reduceIte]
     dsimp only [Reg64s.beeuA] at hA
     kprologue beeu_mod_inverse_vartime at ".Lbeeu_loop_end" to ".Lbeeu_reduction_loop" with s
     have h_nz := val256_ne_one_or_ne_zero X21 X22 X23 X24 hA
     sym => kstep; tactic =>
-    apply Eventually.done
-    refine ⟨rfl, rfl, rfl, rfl, rfl, by kaddr beeu_mod_inverse_vartime⟩
+    kfinish beeu_mod_inverse_vartime
 
 theorem beeu_reduction_step_ge_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -1139,16 +1124,9 @@ theorem beeu_reduction_step_ge_correct [layout : Layout] [Layout.Valid beeu_mod_
         s.regs.beeuY ≥ s.regs.beeuN)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_reduction_loop" ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.X14 = 0 ∧
-        st.data.regs.X0 = s.regs.X0 ∧
-        st.data.regs.X1 = s.regs.X1 ∧
-        st.data.regs.X2 = s.regs.X2 ∧
-        st.data.regs.X30 = s.regs.X30 ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
-        st.data.regs.beeuY = s.regs.beeuY - s.regs.beeuN ∧
-        st.data.dmem = s.dmem) := by
+        st.data.regs.beeuY = s.regs.beeuY - s.regs.beeuN) := by
   rintro ⟨h14, h_ge⟩
   dsimp only [Reg64s.beeuY, Reg64s.beeuN] at h_ge ⊢
   kprologue beeu_mod_inverse_vartime at ".Lbeeu_reduction_loop" to ".Lbeeu_err" with s
@@ -1160,10 +1138,7 @@ theorem beeu_reduction_step_ge_correct [layout : Layout] [Layout.Valid beeu_mod_
   have h_carry := sub320_carry_of_ge X8 X9 X10 X11 X12 X0 X1 X2 X30 X14 h_ge320
   have h_sub := sub320_val_of_ge X8 X9 X10 X11 X12 X0 X1 X2 X30 X14 h_ge320
   sym => kstep; tactic =>
-  apply Eventually.done
-  dsimp +zetaDelta only [sub0Carry, sbcCarry, sub0Word, sbcWord] at h_carry h_sub ⊢
-  simp only [BitVec.shiftLeft_zero, UInt64.toNat_toBitVec, h_carry, ↓reduceIte] at h_sub ⊢
-  refine ⟨by kaddr beeu_mod_inverse_vartime, trivial, trivial, h14, trivial, trivial, trivial, trivial, trivial, ?_, trivial⟩
+  kfinish beeu_mod_inverse_vartime [sub0Carry, sbcCarry, sub0Word, sbcWord, h_carry]
   rw [h_sub]
   subst h14
   dsimp only [val320, val256]
@@ -1202,45 +1177,27 @@ theorem beeu_reduction_to_return_correct [layout : Layout] [Layout.Valid beeu_mo
             R)) := by
   rintro ⟨h_sp_align, h_sp, h_x29, h_x14, h_n_pos, h_mem⟩
   let sp' := r₀.SP.toBitVec + 18446744073709551504#64
-  apply tailrec_loop (step1 (layout beeu_mod_inverse_vartime)) _ _
+  apply tailrec_loop_simple (step1 (layout beeu_mod_inverse_vartime)) _ _
     (P := fun (v : Nat) (_ : Unit) st =>
       st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_reduction_loop" ∧
-      st.data.regs.SP = UInt64.ofBitVec sp' ∧
-      st.data.regs.X29 = UInt64.ofBitVec sp' ∧
+      BlockFrame s st.data ∧
       st.data.regs.X14 = 0 ∧
-      st.data.regs.beeuN = s.regs.beeuN ∧
       st.data.regs.beeuY % s.regs.beeuN = s.regs.beeuY % s.regs.beeuN ∧
-      st.data.regs.beeuY.toNat = v ∧
-      st.data.dmem = s.dmem)
-    (Q := fun (_ : Nat) (_ : Unit) st =>
-      st.pc = Int64.ofInt r₀.X30.toBitVec.toInt ∧
-      st.data.regs.X0 = 1 ∧
-      st.data.regs.SP = r₀.SP ∧
-      st.data.regs.X30 = r₀.X30 ∧
-      st.data.regs.CalleeSavedEq r₀ ∧
-      ∃ w0 w1 w2 w3 : UInt64,
-        val256 w0 w1 w2 w3 = s.regs.beeuN - (s.regs.beeuY % s.regs.beeuN) ∧
-        (st.data.dmem =⋆
-          BeeuStackFrame r₀ sp' ⋆
-          Words256At w0 w1 w2 w3 r₀.X0.toBitVec ⋆
-          R))
-    (lt := (· < ·))
-    (Hwf := Nat.lt_wfRel.wf)
-    (v0 := s.regs.beeuY.toNat)
-    (g0 := ())
-  · exact ⟨rfl, h_sp, h_x29, h_x14, rfl, rfl, rfl, rfl⟩
-  · rintro v _ ⟨st_data, st_pc⟩ ⟨rfl, hst_sp, hst_x29, hst_x14, hst_N, hst_Y_mod, hst_v, hst_dmem⟩
-    dsimp only at hst_sp hst_x29 hst_x14 hst_N hst_Y_mod hst_v hst_dmem
+      st.data.regs.beeuY.toNat = v)
+    (lt := (· < ·)) (Hwf := Nat.lt_wfRel.wf) (v0 := s.regs.beeuY.toNat) (g0 := ())
+  · exact ⟨rfl, BlockFrame.refl s, h_x14, rfl, rfl⟩
+  · rintro v _ ⟨st_data, st_pc⟩ ⟨rfl, hst_fr, hst_x14, hst_Y_mod, hst_v⟩
+    dsimp only at hst_fr hst_x14 hst_Y_mod hst_v
     by_cases h_ge : st_data.regs.beeuY ≥ st_data.regs.beeuN
     · apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
         ?_ (beeu_reduction_step_ge_correct st_data ⟨hst_x14, h_ge⟩)
-      intro mid ⟨h_pc, h_sp', h_x29', h_x14', _, _, _, _, h_N', h_Y', h_dmem'⟩
+      intro mid ⟨h_pc, h_fr', h_x14', h_Y'⟩
       right
-      refine ⟨mid.data.regs.beeuY.toNat, (), ⟨h_pc, h_sp'.trans hst_sp, h_x29'.trans hst_x29,
-        h_x14', h_N'.trans hst_N, ?_, rfl, h_dmem'.trans hst_dmem⟩, ?_, fun _ hQ => hQ⟩
-      · rw [h_Y', hst_N, Int.sub_emod, Int.emod_self, Int.sub_zero, Int.emod_emod, hst_Y_mod]
+      refine ⟨mid.data.regs.beeuY.toNat, (), ⟨h_pc, hst_fr.trans h_fr', h_x14', ?_, rfl⟩, ?_⟩
+      · rw [h_Y', hst_fr.N, Int.sub_emod, Int.emod_self, Int.sub_zero, Int.emod_emod, hst_Y_mod]
       · have hY_nonneg : 0 ≤ st_data.regs.beeuY := val320_nonneg _ _ _ _ _
-        rw [h_Y', hst_N, ← hst_v]
+        have hst_N := hst_fr.N
+        rw [h_Y', hst_fr.N, ← hst_v]
         omega
     · have h_lt : st_data.regs.beeuY < st_data.regs.beeuN := Int.lt_of_not_ge h_ge
       have h_N_lt : st_data.regs.beeuN < 256 ^ 32 := val256_lt _ _ _ _
@@ -1256,11 +1213,11 @@ theorem beeu_reduction_to_return_correct [layout : Layout] [Layout.Valid beeu_mo
           Words256At o0 o1 o2 o3 r₀.X0.toBitVec ⋆
           (BeeuSavedRegs r₀ sp' ⋆
            (Int.toBytes 8 r₀.X2.toBitVec.toInt) @ (sp' + 104#64) ⋆ R)) := by
-        rw [hst_dmem]
+        rw [hst_fr.dmem]
         dsimp only [BeeuStackFrame] at h_mem ⊢
         ecancel
       apply (beeu_reduction_and_store_correct st_data sp' r₀.X0.toBitVec o0 o1 o2 o3 _
-        ⟨h_sp_align', hst_sp, h_x12, hst_x14, h_y256_lt, h_mem_st⟩).bind
+        ⟨h_sp_align', hst_fr.sp.trans h_sp, h_x12, hst_x14, h_y256_lt, h_mem_st⟩).bind
       rintro ⟨mid_data, mid_pc⟩ ⟨rfl, h_mid_x0, h_mid_sp, h_mid_x29, w0, w1, w2, w3, h_mid_val, h_mid_mem⟩
       dsimp only at h_mid_x0 h_mid_sp h_mid_x29 h_mid_val h_mid_mem
       have h_mid_mem' : (mid_data.dmem =⋆
@@ -1270,18 +1227,16 @@ theorem beeu_reduction_to_return_correct [layout : Layout] [Layout.Valid beeu_mo
         ecancel
       apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
         ?_ (beeu_finish_correct mid_data r₀ (Words256At w0 w1 w2 w3 r₀.X0.toBitVec ⋆ R)
-          ⟨h_sp_align, h_mid_x29.trans hst_x29, h_mid_mem'⟩)
+          ⟨h_sp_align, h_mid_x29.trans (hst_fr.x29.trans h_x29), h_mid_mem'⟩)
       rintro fin ⟨h_fin_pc, h_fin_x0, h_fin_sp, h_fin_x30, h_fin_cs, h_fin_mem⟩
       left
       refine ⟨h_fin_pc, h_fin_x0.trans h_mid_x0, h_fin_sp, h_fin_x30, h_fin_cs,
         w0, w1, w2, w3, ?_, by ecancel⟩
       have hY_nonneg : 0 ≤ st_data.regs.beeuY := val320_nonneg _ _ _ _ _
       have hY_mod_eq : st_data.regs.beeuY % s.regs.beeuN = st_data.regs.beeuY :=
-        Int.emod_eq_of_lt hY_nonneg (hst_N ▸ h_lt)
+        Int.emod_eq_of_lt hY_nonneg (hst_fr.N ▸ h_lt)
       dsimp only [Reg64s.beeuY256] at h_mid_val
-      rw [h_mid_val, h_y256, hst_N, ← hst_Y_mod, hY_mod_eq]
-  · intro st hQ
-    exact hQ
+      rw [h_mid_val, h_y256, hst_fr.N, ← hst_Y_mod, hY_mod_eq]
 
 /-- Complete verification from `.Lbeeu_loop_end` to function return:
     if `A = 1`, reduces `Y` modulo `N`, writes `N - (Y % N)` to `out`, and returns `1`;
@@ -1322,27 +1277,27 @@ theorem beeu_loop_end_to_return_correct [layout : Layout] [Layout.Valid beeu_mod
             R)) := by
   rintro ⟨h_sp_align, h_sp, h_x29, h_n_pos, h_mem⟩
   apply (beeu_loop_end_correct s trivial).bind
-  rintro ⟨mid_data, mid_pc⟩ ⟨h_mid_sp, h_mid_x29, h_mid_N, h_mid_Y, h_mid_dmem, h_branch⟩
-  dsimp only at h_mid_sp h_mid_x29 h_mid_N h_mid_Y h_mid_dmem h_branch
+  rintro ⟨mid_data, mid_pc⟩ ⟨h_mid_fr, h_mid_Y, h_branch⟩
+  dsimp only at h_mid_fr h_mid_Y h_branch
   by_cases hA : s.regs.beeuA = 1
   · simp only [hA, ↓reduceIte] at h_branch ⊢
-    rcases h_branch with ⟨rfl, h_mid_x14, _⟩
+    rcases h_branch with ⟨rfl, h_mid_x14⟩
     apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
       ?_ (beeu_reduction_to_return_correct mid_data r₀ o0 o1 o2 o3 R
-        ⟨h_sp_align, h_mid_sp.trans h_sp, h_mid_x29.trans h_x29, h_mid_x14,
-         h_mid_N.symm ▸ h_n_pos, h_mid_dmem ▸ h_mem⟩)
+        ⟨h_sp_align, h_mid_fr.sp.trans h_sp, h_mid_fr.x29.trans h_x29, h_mid_x14,
+         h_mid_fr.N.symm ▸ h_n_pos, h_mid_fr.dmem ▸ h_mem⟩)
     rintro fin ⟨h_pc, h_x0, h_sp', h_x30', h_cs', w0, w1, w2, w3, h_val, h_mem'⟩
-    rw [h_mid_N, h_mid_Y] at h_val
+    rw [h_mid_fr.N, h_mid_Y] at h_val
     exact ⟨h_pc, h_sp', h_x30', h_cs', h_x0, w0, w1, w2, w3, h_val, h_mem'⟩
   · simp only [hA, ↓reduceIte] at h_branch ⊢
     subst h_branch
     have h_mem_mid : (mid_data.dmem =⋆
         BeeuStackFrame r₀ (r₀.SP.toBitVec + 18446744073709551504#64) ⋆
         (Words256At o0 o1 o2 o3 r₀.X0.toBitVec ⋆ R)) := by
-      rw [h_mid_dmem]; ecancel
+      rw [h_mid_fr.dmem]; ecancel
     apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
       ?_ (beeu_epilogue_err_correct mid_data r₀ (Words256At o0 o1 o2 o3 r₀.X0.toBitVec ⋆ R)
-        ⟨h_sp_align, h_mid_x29.trans h_x29, h_mem_mid⟩)
+        ⟨h_sp_align, h_mid_fr.x29.trans h_x29, h_mem_mid⟩)
     rintro fin ⟨h_pc, h_x0, h_sp', h_x30', h_cs', h_mem'⟩
     exact ⟨h_pc, h_sp', h_x30', h_cs', h_x0, by ecancel⟩
 
@@ -1635,15 +1590,12 @@ theorem beeu_shift_loop_X_pre_correct [layout : Layout] [Layout.Valid beeu_mod_i
         s.regs.beeuX + s.regs.beeuN < 256 ^ 40)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lshift1_0" ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.X13 = s.regs.X13 ∧
         st.data.regs.X14 = 0 ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuY = s.regs.beeuY ∧
-        st.data.dmem = s.dmem ∧
         st.data.regs.beeuX % 2 = 0 ∧
         st.data.regs.beeuX % s.regs.beeuN = s.regs.beeuX % s.regs.beeuN ∧
         st.data.regs.beeuX ≤ s.regs.beeuX + s.regs.beeuN) := by
@@ -1652,12 +1604,10 @@ theorem beeu_shift_loop_X_pre_correct [layout : Layout] [Layout.Valid beeu_mod_i
   kprologue beeu_mod_inverse_vartime at ".Lbeeu_shift_loop_X" to ".Lshift1_0" with s
   cases h_lsb : X3.toBitVec.getLsbD 0
   · have h_mod2 := getLsbD_zero_eq_false_mod2 X3 h_lsb
+    have := val256_nonneg X0 X1 X2 X30
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only
-    refine ⟨by kaddr beeu_mod_inverse_vartime, rfl, rfl, rfl, h14, rfl, rfl, rfl, rfl, rfl, ?_, rfl, ?_⟩
-    · rw [val320_emod_two]; omega
-    · have := val256_nonneg X0 X1 X2 X30; omega
+    kfinish beeu_mod_inverse_vartime
+    rw [val320_emod_two]; omega
   · have h_mod2 := getLsbD_zero_eq_true_mod2 X3 h_lsb
     have h0 : (0 : UInt64).toNat = 0 := rfl
     have h_lt320 : val320 X3 X4 X5 X6 X7 + val320 X0 X1 X2 X30 X14 < 256 ^ 40 := by
@@ -1666,17 +1616,11 @@ theorem beeu_shift_loop_X_pre_correct [layout : Layout] [Layout.Valid beeu_mod_i
     have h_n320 : val320 X0 X1 X2 X30 X14 = val256 X0 X1 X2 X30 := by
       subst h14; dsimp only [val320, val256]; omega
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only [add0Carry, adcCarry, add0Word, adcWord] at h_add ⊢
-    simp only [BitVec.shiftLeft_zero, UInt64.toNat_toBitVec] at h_add ⊢
-    refine ⟨by kaddr beeu_mod_inverse_vartime, trivial, trivial, trivial, h14,
-      trivial, trivial, trivial, trivial, trivial, ?_, ?_, ?_⟩
+    kfinish beeu_mod_inverse_vartime [add0Carry, adcCarry, add0Word, adcWord]
     · rw [h_add, h_n320]
       have hx := val320_emod_two X3 X4 X5 X6 X7
       omega
     · rw [h_add, h_n320, Int.add_emod, Int.emod_self, Int.add_zero, Int.emod_emod]
-    · rw [h_add, h_n320]
-      omega
 
 theorem beeu_shift1_0_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -1690,35 +1634,27 @@ theorem beeu_shift1_0_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
           (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_A_Y"
         else
           (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_X") ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.X13.toNat = s.regs.X13.toNat - 1 ∧
         st.data.regs.X14 = s.regs.X14 ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuY = s.regs.beeuY ∧
-        st.data.dmem = s.dmem ∧
         2 * st.data.regs.beeuX = s.regs.beeuX) := by
   rintro ⟨h_x13_pos, h_x_even⟩
+  dsimp only [Reg64s.beeuX] at h_x_even ⊢
   by_cases h1 : s.regs.X13.toNat = 1
   · simp only [h1, ↓reduceIte]
-    dsimp only [Reg64s.beeuX] at h_x_even ⊢
     kprologue beeu_mod_inverse_vartime at ".Lshift1_0" to ".Lbeeu_shift_A_Y" with s
     have h_x13_bv : X13.toBitVec = 1#64 := BitVec.eq_of_toNat_eq h1
     have h_shift := shift1_val320 X3 X4 X5 X6 X7
     have h_x3_mod : (X3.toNat % 2 : Int) = 0 := by
       rw [← val320_emod_two X3 X4 X5 X6 X7]; exact h_x_even
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only at h_shift ⊢
-    simp only [extr_sem_eq, ubfm_lsr1_sem_eq]
-    refine ⟨by kaddr beeu_mod_inverse_vartime, trivial, trivial, ?_,
-      trivial, trivial, trivial, trivial, trivial, trivial, by omega⟩
+    kfinish beeu_mod_inverse_vartime [extr_sem_eq, ubfm_lsr1_sem_eq]
     rw [UInt64.toNat_ofBitVec, h_x13_bv]; rfl
   · simp only [h1, ↓reduceIte]
     have h_gt1 : 1 < s.regs.X13.toNat := by omega
-    dsimp only [Reg64s.beeuX] at h_x_even ⊢
     kprologue beeu_mod_inverse_vartime at ".Lshift1_0" to ".Lbeeu_shift_A_Y" with s
     have h_nz := sub_one_beq_zero_false_of_gt_one X13 h_gt1
     have h_dec := toNat_sub_one_of_pos X13 h_x13_pos
@@ -1726,11 +1662,7 @@ theorem beeu_shift1_0_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
     have h_x3_mod : (X3.toNat % 2 : Int) = 0 := by
       rw [← val320_emod_two X3 X4 X5 X6 X7]; exact h_x_even
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only at h_shift h_dec ⊢
-    simp only [extr_sem_eq, ubfm_lsr1_sem_eq]
-    refine ⟨by kaddr beeu_mod_inverse_vartime, trivial, trivial, h_dec,
-      trivial, trivial, trivial, trivial, trivial, trivial, by omega⟩
+    kfinish beeu_mod_inverse_vartime [extr_sem_eq, ubfm_lsr1_sem_eq]
 
 theorem beeu_shift_loop_X_step_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -1746,27 +1678,24 @@ theorem beeu_shift_loop_X_step_correct [layout : Layout] [Layout.Valid beeu_mod_
           (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_A_Y"
         else
           (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_X") ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.X13.toNat = s.regs.X13.toNat - 1 ∧
         st.data.regs.X14 = 0 ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuY = s.regs.beeuY ∧
-        st.data.dmem = s.dmem ∧
         (2 * st.data.regs.beeuX) % s.regs.beeuN = s.regs.beeuX % s.regs.beeuN ∧
         2 * st.data.regs.beeuX ≤ s.regs.beeuX + s.regs.beeuN) := by
   rintro ⟨h_x13_pos, h14, hN_odd, h_xn_lt⟩
   apply (beeu_shift_loop_X_pre_correct s ⟨h14, hN_odd, h_xn_lt⟩).bind
-  rintro ⟨mid, mid_pc⟩ ⟨rfl, h_sp, h_x29, h_x13, h_x14, h_B, h_A, h_N, h_Y, h_dmem, h_even, h_mod, h_le⟩
-  dsimp only at h_sp h_x29 h_x13 h_x14 h_B h_A h_N h_Y h_dmem h_even h_mod h_le
+  rintro ⟨mid, mid_pc⟩ ⟨rfl, h_fr, h_x13, h_x14, h_B, h_A, h_Y, h_even, h_mod, h_le⟩
+  dsimp only at h_fr h_x13 h_x14 h_B h_A h_Y h_even h_mod h_le
   apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
     ?_ (beeu_shift1_0_correct mid ⟨h_x13.symm ▸ h_x13_pos, h_even⟩)
-  rintro fin ⟨h_pc, h_sp', h_x29', h_x13', h_x14', h_B', h_A', h_N', h_Y', h_dmem', h_2x⟩
+  rintro fin ⟨h_pc, h_fr', h_x13', h_x14', h_B', h_A', h_Y', h_2x⟩
   rw [h_x13] at h_pc h_x13'
-  refine ⟨h_pc, h_sp'.trans h_sp, h_x29'.trans h_x29, h_x13', h_x14'.trans h_x14,
-    h_B'.trans h_B, h_A'.trans h_A, h_N'.trans h_N, h_Y'.trans h_Y, h_dmem'.trans h_dmem, ?_, ?_⟩
+  refine ⟨h_pc, h_fr.trans h_fr', h_x13', h_x14'.trans h_x14, h_B'.trans h_B, h_A'.trans h_A,
+    h_Y'.trans h_Y, ?_, ?_⟩
   · rw [h_2x, h_mod]
   · omega
 
@@ -1781,13 +1710,10 @@ theorem beeu_shift_loop_X_correct [layout : Layout] [Layout.Valid beeu_mod_inver
         s.regs.beeuX + s.regs.beeuN < 256 ^ 40)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_A_Y" ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuY = s.regs.beeuY ∧
-        st.data.dmem = s.dmem ∧
         (((2 ^ s.regs.X13.toNat : Nat) : Int) * st.data.regs.beeuX) % s.regs.beeuN =
           s.regs.beeuX % s.regs.beeuN ∧
         st.data.regs.beeuX < 256 ^ 40 / 2 ∧
@@ -1795,81 +1721,47 @@ theorem beeu_shift_loop_X_correct [layout : Layout] [Layout.Valid beeu_mod_inver
           s.regs.beeuX + (((2 ^ s.regs.X13.toNat : Nat) : Int) - 1) * s.regs.beeuN) := by
   rintro ⟨h_x13_pos, h14, hN_odd, h_xn_lt⟩
   let k₀ := s.regs.X13.toNat
-  apply tailrec_loop (step1 (layout beeu_mod_inverse_vartime)) _ _
+  have h_N_lt : s.regs.beeuN < 256 ^ 32 := val256_lt _ _ _ _
+  apply tailrec_loop_simple (step1 (layout beeu_mod_inverse_vartime)) _ _
     (P := fun (v : Nat) (_ : Unit) st =>
       st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_X" ∧
       0 < v ∧ v ≤ k₀ ∧
       st.data.regs.X13.toNat = v ∧
       st.data.regs.X14 = 0 ∧
-      st.data.regs.SP = s.regs.SP ∧
-      st.data.regs.X29 = s.regs.X29 ∧
+      BlockFrame s st.data ∧
       st.data.regs.beeuB = s.regs.beeuB ∧
       st.data.regs.beeuA = s.regs.beeuA ∧
-      st.data.regs.beeuN = s.regs.beeuN ∧
       st.data.regs.beeuY = s.regs.beeuY ∧
-      st.data.dmem = s.dmem ∧
       st.data.regs.beeuX + s.regs.beeuN < 256 ^ 40 ∧
       (((2 ^ (k₀ - v) : Nat) : Int) * st.data.regs.beeuX) % s.regs.beeuN =
         s.regs.beeuX % s.regs.beeuN ∧
       ((2 ^ (k₀ - v) : Nat) : Int) * st.data.regs.beeuX ≤
         s.regs.beeuX + (((2 ^ (k₀ - v) : Nat) : Int) - 1) * s.regs.beeuN)
-    (Q := fun (_ : Nat) (_ : Unit) st =>
-      st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_A_Y" ∧
-      st.data.regs.SP = s.regs.SP ∧
-      st.data.regs.X29 = s.regs.X29 ∧
-      st.data.regs.beeuB = s.regs.beeuB ∧
-      st.data.regs.beeuA = s.regs.beeuA ∧
-      st.data.regs.beeuN = s.regs.beeuN ∧
-      st.data.regs.beeuY = s.regs.beeuY ∧
-      st.data.dmem = s.dmem ∧
-      (((2 ^ k₀ : Nat) : Int) * st.data.regs.beeuX) % s.regs.beeuN =
-        s.regs.beeuX % s.regs.beeuN ∧
-      st.data.regs.beeuX < 256 ^ 40 / 2 ∧
-      ((2 ^ k₀ : Nat) : Int) * st.data.regs.beeuX ≤
-        s.regs.beeuX + (((2 ^ k₀ : Nat) : Int) - 1) * s.regs.beeuN)
-    (lt := (· < ·))
-    (Hwf := Nat.lt_wfRel.wf)
-    (v0 := k₀)
-    (g0 := ())
-  · refine ⟨rfl, h_x13_pos, Nat.le_refl _, rfl, h14, rfl, rfl, rfl, rfl, rfl, rfl, rfl, h_xn_lt, ?_, ?_⟩
+    (lt := (· < ·)) (Hwf := Nat.lt_wfRel.wf) (v0 := k₀) (g0 := ())
+  · refine ⟨rfl, h_x13_pos, Nat.le_refl _, rfl, h14, BlockFrame.refl s, rfl, rfl, rfl, h_xn_lt, ?_, ?_⟩
     · simp
     · simp
-  · rintro v _ ⟨st, st_pc⟩ ⟨rfl, hv_pos, hv_le, h_x13, h_x14, h_sp, h_x29, h_B, h_A, h_N, h_Y, h_dmem,
-      h_xn, h_inv, h_bnd⟩
-    dsimp only at h_x13 h_x14 h_sp h_x29 h_B h_A h_N h_Y h_dmem h_xn h_inv h_bnd
-    have h_N_lt : s.regs.beeuN < 256 ^ 32 := val256_lt _ _ _ _
+  · rintro v _ ⟨st, st_pc⟩ ⟨rfl, hv_pos, hv_le, h_x13, h_x14, h_fr, h_B, h_A, h_Y, h_xn, h_inv, h_bnd⟩
+    dsimp only at h_x13 h_x14 h_fr h_B h_A h_Y h_xn h_inv h_bnd
     apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
       ?_ (beeu_shift_loop_X_step_correct st
-        ⟨h_x13 ▸ hv_pos, h_x14, h_N.symm ▸ hN_odd, h_N.symm ▸ h_xn⟩)
-    rintro mid ⟨h_pc, h_sp', h_x29', h_x13', h_x14', h_B', h_A', h_N', h_Y', h_dmem', h_mod', h_2x'⟩
+        ⟨h_x13 ▸ hv_pos, h_x14, h_fr.N.symm ▸ hN_odd, h_fr.N.symm ▸ h_xn⟩)
+    rintro mid ⟨h_pc, h_fr', h_x13', h_x14', h_B', h_A', h_Y', h_mod', h_2x'⟩
     rw [h_x13] at h_pc h_x13'
-    rw [h_N] at h_mod' h_2x'
+    rw [h_fr.N] at h_mod' h_2x'
     have h_step := pow2_mul_emod_step (k₀ - v) _ _ _ _ h_inv h_mod'
     have h_bstep := pow2_mul_bound_step (k₀ - v) _ _ _ _ h_bnd h_2x'
     by_cases hv1 : v = 1
     · simp only [hv1, ↓reduceIte] at h_pc
-      left
-      refine ⟨h_pc, h_sp'.trans h_sp, h_x29'.trans h_x29, h_B'.trans h_B, h_A'.trans h_A,
-        h_N'.trans h_N, h_Y'.trans h_Y, h_dmem'.trans h_dmem, ?_, by omega, ?_⟩
-      · have h_k : k₀ - v + 1 = k₀ := by omega
-        rw [h_k] at h_step
-        exact h_step
-      · have h_k : k₀ - v + 1 = k₀ := by omega
-        rw [h_k] at h_bstep
-        exact h_bstep
+      have h_k : k₀ - v + 1 = k₀ := by omega
+      rw [h_k] at h_step h_bstep
+      exact Or.inl ⟨h_pc, h_fr.trans h_fr', h_B'.trans h_B, h_A'.trans h_A, h_Y'.trans h_Y,
+        h_step, by omega, h_bstep⟩
     · simp only [hv1, ↓reduceIte] at h_pc
-      right
-      refine ⟨v - 1, (), ⟨h_pc, by omega, by omega, h_x13', h_x14', h_sp'.trans h_sp, h_x29'.trans h_x29,
-        h_B'.trans h_B, h_A'.trans h_A, h_N'.trans h_N, h_Y'.trans h_Y, h_dmem'.trans h_dmem,
-        by omega, ?_, ?_⟩, by omega, fun _ hQ => hQ⟩
-      · have h_k : k₀ - v + 1 = k₀ - (v - 1) := by omega
-        rw [← h_k]
-        exact h_step
-      · have h_k : k₀ - v + 1 = k₀ - (v - 1) := by omega
-        rw [← h_k]
-        exact h_bstep
-  · intro st hQ
-    exact hQ
+      have h_k : k₀ - v + 1 = k₀ - (v - 1) := by omega
+      rw [h_k] at h_step h_bstep
+      exact Or.inr ⟨v - 1, (), ⟨h_pc, by omega, by omega, h_x13', h_x14', h_fr.trans h_fr',
+        h_B'.trans h_B, h_A'.trans h_A, h_Y'.trans h_Y, by omega, h_step, h_bstep⟩, by omega⟩
 
 theorem beeu_shift_loop_Y_pre_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -1881,15 +1773,12 @@ theorem beeu_shift_loop_Y_pre_correct [layout : Layout] [Layout.Valid beeu_mod_i
         s.regs.beeuY + s.regs.beeuN < 256 ^ 40)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lshift1_1" ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.X13 = s.regs.X13 ∧
         st.data.regs.X14 = 0 ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuX = s.regs.beeuX ∧
-        st.data.dmem = s.dmem ∧
         st.data.regs.beeuY % 2 = 0 ∧
         st.data.regs.beeuY % s.regs.beeuN = s.regs.beeuY % s.regs.beeuN ∧
         st.data.regs.beeuY ≤ s.regs.beeuY + s.regs.beeuN) := by
@@ -1898,12 +1787,10 @@ theorem beeu_shift_loop_Y_pre_correct [layout : Layout] [Layout.Valid beeu_mod_i
   kprologue beeu_mod_inverse_vartime at ".Lbeeu_shift_loop_Y" to ".Lshift1_1" with s
   cases h_lsb : X8.toBitVec.getLsbD 0
   · have h_mod2 := getLsbD_zero_eq_false_mod2 X8 h_lsb
+    have := val256_nonneg X0 X1 X2 X30
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only
-    refine ⟨by kaddr beeu_mod_inverse_vartime, rfl, rfl, rfl, h14, rfl, rfl, rfl, rfl, rfl, ?_, rfl, ?_⟩
-    · rw [val320_emod_two]; omega
-    · have := val256_nonneg X0 X1 X2 X30; omega
+    kfinish beeu_mod_inverse_vartime
+    rw [val320_emod_two]; omega
   · have h_mod2 := getLsbD_zero_eq_true_mod2 X8 h_lsb
     have h0 : (0 : UInt64).toNat = 0 := rfl
     have h_lt320 : val320 X8 X9 X10 X11 X12 + val320 X0 X1 X2 X30 X14 < 256 ^ 40 := by
@@ -1912,17 +1799,11 @@ theorem beeu_shift_loop_Y_pre_correct [layout : Layout] [Layout.Valid beeu_mod_i
     have h_n320 : val320 X0 X1 X2 X30 X14 = val256 X0 X1 X2 X30 := by
       subst h14; dsimp only [val320, val256]; omega
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only [add0Carry, adcCarry, add0Word, adcWord] at h_add ⊢
-    simp only [BitVec.shiftLeft_zero, UInt64.toNat_toBitVec] at h_add ⊢
-    refine ⟨by kaddr beeu_mod_inverse_vartime, trivial, trivial, trivial, h14,
-      trivial, trivial, trivial, trivial, trivial, ?_, ?_, ?_⟩
+    kfinish beeu_mod_inverse_vartime [add0Carry, adcCarry, add0Word, adcWord]
     · rw [h_add, h_n320]
       have hy := val320_emod_two X8 X9 X10 X11 X12
       omega
     · rw [h_add, h_n320, Int.add_emod, Int.emod_self, Int.add_zero, Int.emod_emod]
-    · rw [h_add, h_n320]
-      omega
 
 theorem beeu_shift1_1_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -1936,35 +1817,27 @@ theorem beeu_shift1_1_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
           (layout beeu_mod_inverse_vartime).label ".Lbeeu_update_B_X_or_A_Y"
         else
           (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_Y") ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.X13.toNat = s.regs.X13.toNat - 1 ∧
         st.data.regs.X14 = s.regs.X14 ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuX = s.regs.beeuX ∧
-        st.data.dmem = s.dmem ∧
         2 * st.data.regs.beeuY = s.regs.beeuY) := by
   rintro ⟨h_x13_pos, h_y_even⟩
+  dsimp only [Reg64s.beeuY] at h_y_even ⊢
   by_cases h1 : s.regs.X13.toNat = 1
   · simp only [h1, ↓reduceIte]
-    dsimp only [Reg64s.beeuY] at h_y_even ⊢
     kprologue beeu_mod_inverse_vartime at ".Lshift1_1" to ".Lbeeu_update_B_X_or_A_Y" with s
     have h_x13_bv : X13.toBitVec = 1#64 := BitVec.eq_of_toNat_eq h1
     have h_shift := shift1_val320 X8 X9 X10 X11 X12
     have h_x8_mod : (X8.toNat % 2 : Int) = 0 := by
       rw [← val320_emod_two X8 X9 X10 X11 X12]; exact h_y_even
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only at h_shift ⊢
-    simp only [extr_sem_eq, ubfm_lsr1_sem_eq]
-    refine ⟨by kaddr beeu_mod_inverse_vartime, trivial, trivial, ?_,
-      trivial, trivial, trivial, trivial, trivial, trivial, by omega⟩
+    kfinish beeu_mod_inverse_vartime [extr_sem_eq, ubfm_lsr1_sem_eq]
     rw [UInt64.toNat_ofBitVec, h_x13_bv]; rfl
   · simp only [h1, ↓reduceIte]
     have h_gt1 : 1 < s.regs.X13.toNat := by omega
-    dsimp only [Reg64s.beeuY] at h_y_even ⊢
     kprologue beeu_mod_inverse_vartime at ".Lshift1_1" to ".Lbeeu_update_B_X_or_A_Y" with s
     have h_nz := sub_one_beq_zero_false_of_gt_one X13 h_gt1
     have h_dec := toNat_sub_one_of_pos X13 h_x13_pos
@@ -1972,11 +1845,7 @@ theorem beeu_shift1_1_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
     have h_x8_mod : (X8.toNat % 2 : Int) = 0 := by
       rw [← val320_emod_two X8 X9 X10 X11 X12]; exact h_y_even
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only at h_shift h_dec ⊢
-    simp only [extr_sem_eq, ubfm_lsr1_sem_eq]
-    refine ⟨by kaddr beeu_mod_inverse_vartime, trivial, trivial, h_dec,
-      trivial, trivial, trivial, trivial, trivial, trivial, by omega⟩
+    kfinish beeu_mod_inverse_vartime [extr_sem_eq, ubfm_lsr1_sem_eq]
 
 theorem beeu_shift_loop_Y_step_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -1992,27 +1861,24 @@ theorem beeu_shift_loop_Y_step_correct [layout : Layout] [Layout.Valid beeu_mod_
           (layout beeu_mod_inverse_vartime).label ".Lbeeu_update_B_X_or_A_Y"
         else
           (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_Y") ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.X13.toNat = s.regs.X13.toNat - 1 ∧
         st.data.regs.X14 = 0 ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuX = s.regs.beeuX ∧
-        st.data.dmem = s.dmem ∧
         (2 * st.data.regs.beeuY) % s.regs.beeuN = s.regs.beeuY % s.regs.beeuN ∧
         2 * st.data.regs.beeuY ≤ s.regs.beeuY + s.regs.beeuN) := by
   rintro ⟨h_x13_pos, h14, hN_odd, h_yn_lt⟩
   apply (beeu_shift_loop_Y_pre_correct s ⟨h14, hN_odd, h_yn_lt⟩).bind
-  rintro ⟨mid, mid_pc⟩ ⟨rfl, h_sp, h_x29, h_x13, h_x14, h_B, h_A, h_N, h_X, h_dmem, h_even, h_mod, h_le⟩
-  dsimp only at h_sp h_x29 h_x13 h_x14 h_B h_A h_N h_X h_dmem h_even h_mod h_le
+  rintro ⟨mid, mid_pc⟩ ⟨rfl, h_fr, h_x13, h_x14, h_B, h_A, h_X, h_even, h_mod, h_le⟩
+  dsimp only at h_fr h_x13 h_x14 h_B h_A h_X h_even h_mod h_le
   apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
     ?_ (beeu_shift1_1_correct mid ⟨h_x13.symm ▸ h_x13_pos, h_even⟩)
-  rintro fin ⟨h_pc, h_sp', h_x29', h_x13', h_x14', h_B', h_A', h_N', h_X', h_dmem', h_2y⟩
+  rintro fin ⟨h_pc, h_fr', h_x13', h_x14', h_B', h_A', h_X', h_2y⟩
   rw [h_x13] at h_pc h_x13'
-  refine ⟨h_pc, h_sp'.trans h_sp, h_x29'.trans h_x29, h_x13', h_x14'.trans h_x14,
-    h_B'.trans h_B, h_A'.trans h_A, h_N'.trans h_N, h_X'.trans h_X, h_dmem'.trans h_dmem, ?_, ?_⟩
+  refine ⟨h_pc, h_fr.trans h_fr', h_x13', h_x14'.trans h_x14, h_B'.trans h_B, h_A'.trans h_A,
+    h_X'.trans h_X, ?_, ?_⟩
   · rw [h_2y, h_mod]
   · omega
 
@@ -2027,13 +1893,10 @@ theorem beeu_shift_loop_Y_correct [layout : Layout] [Layout.Valid beeu_mod_inver
         s.regs.beeuY + s.regs.beeuN < 256 ^ 40)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_update_B_X_or_A_Y" ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuX = s.regs.beeuX ∧
-        st.data.dmem = s.dmem ∧
         (((2 ^ s.regs.X13.toNat : Nat) : Int) * st.data.regs.beeuY) % s.regs.beeuN =
           s.regs.beeuY % s.regs.beeuN ∧
         st.data.regs.beeuY < 256 ^ 40 / 2 ∧
@@ -2041,81 +1904,47 @@ theorem beeu_shift_loop_Y_correct [layout : Layout] [Layout.Valid beeu_mod_inver
           s.regs.beeuY + (((2 ^ s.regs.X13.toNat : Nat) : Int) - 1) * s.regs.beeuN) := by
   rintro ⟨h_x13_pos, h14, hN_odd, h_yn_lt⟩
   let k₀ := s.regs.X13.toNat
-  apply tailrec_loop (step1 (layout beeu_mod_inverse_vartime)) _ _
+  have h_N_lt : s.regs.beeuN < 256 ^ 32 := val256_lt _ _ _ _
+  apply tailrec_loop_simple (step1 (layout beeu_mod_inverse_vartime)) _ _
     (P := fun (v : Nat) (_ : Unit) st =>
       st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_Y" ∧
       0 < v ∧ v ≤ k₀ ∧
       st.data.regs.X13.toNat = v ∧
       st.data.regs.X14 = 0 ∧
-      st.data.regs.SP = s.regs.SP ∧
-      st.data.regs.X29 = s.regs.X29 ∧
+      BlockFrame s st.data ∧
       st.data.regs.beeuB = s.regs.beeuB ∧
       st.data.regs.beeuA = s.regs.beeuA ∧
-      st.data.regs.beeuN = s.regs.beeuN ∧
       st.data.regs.beeuX = s.regs.beeuX ∧
-      st.data.dmem = s.dmem ∧
       st.data.regs.beeuY + s.regs.beeuN < 256 ^ 40 ∧
       (((2 ^ (k₀ - v) : Nat) : Int) * st.data.regs.beeuY) % s.regs.beeuN =
         s.regs.beeuY % s.regs.beeuN ∧
       ((2 ^ (k₀ - v) : Nat) : Int) * st.data.regs.beeuY ≤
         s.regs.beeuY + (((2 ^ (k₀ - v) : Nat) : Int) - 1) * s.regs.beeuN)
-    (Q := fun (_ : Nat) (_ : Unit) st =>
-      st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_update_B_X_or_A_Y" ∧
-      st.data.regs.SP = s.regs.SP ∧
-      st.data.regs.X29 = s.regs.X29 ∧
-      st.data.regs.beeuB = s.regs.beeuB ∧
-      st.data.regs.beeuA = s.regs.beeuA ∧
-      st.data.regs.beeuN = s.regs.beeuN ∧
-      st.data.regs.beeuX = s.regs.beeuX ∧
-      st.data.dmem = s.dmem ∧
-      (((2 ^ k₀ : Nat) : Int) * st.data.regs.beeuY) % s.regs.beeuN =
-        s.regs.beeuY % s.regs.beeuN ∧
-      st.data.regs.beeuY < 256 ^ 40 / 2 ∧
-      ((2 ^ k₀ : Nat) : Int) * st.data.regs.beeuY ≤
-        s.regs.beeuY + (((2 ^ k₀ : Nat) : Int) - 1) * s.regs.beeuN)
-    (lt := (· < ·))
-    (Hwf := Nat.lt_wfRel.wf)
-    (v0 := k₀)
-    (g0 := ())
-  · refine ⟨rfl, h_x13_pos, Nat.le_refl _, rfl, h14, rfl, rfl, rfl, rfl, rfl, rfl, rfl, h_yn_lt, ?_, ?_⟩
+    (lt := (· < ·)) (Hwf := Nat.lt_wfRel.wf) (v0 := k₀) (g0 := ())
+  · refine ⟨rfl, h_x13_pos, Nat.le_refl _, rfl, h14, BlockFrame.refl s, rfl, rfl, rfl, h_yn_lt, ?_, ?_⟩
     · simp
     · simp
-  · rintro v _ ⟨st, st_pc⟩ ⟨rfl, hv_pos, hv_le, h_x13, h_x14, h_sp, h_x29, h_B, h_A, h_N, h_X, h_dmem,
-      h_yn, h_inv, h_bnd⟩
-    dsimp only at h_x13 h_x14 h_sp h_x29 h_B h_A h_N h_X h_dmem h_yn h_inv h_bnd
-    have h_N_lt : s.regs.beeuN < 256 ^ 32 := val256_lt _ _ _ _
+  · rintro v _ ⟨st, st_pc⟩ ⟨rfl, hv_pos, hv_le, h_x13, h_x14, h_fr, h_B, h_A, h_X, h_yn, h_inv, h_bnd⟩
+    dsimp only at h_x13 h_x14 h_fr h_B h_A h_X h_yn h_inv h_bnd
     apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
       ?_ (beeu_shift_loop_Y_step_correct st
-        ⟨h_x13 ▸ hv_pos, h_x14, h_N.symm ▸ hN_odd, h_N.symm ▸ h_yn⟩)
-    rintro mid ⟨h_pc, h_sp', h_x29', h_x13', h_x14', h_B', h_A', h_N', h_X', h_dmem', h_mod', h_2y'⟩
+        ⟨h_x13 ▸ hv_pos, h_x14, h_fr.N.symm ▸ hN_odd, h_fr.N.symm ▸ h_yn⟩)
+    rintro mid ⟨h_pc, h_fr', h_x13', h_x14', h_B', h_A', h_X', h_mod', h_2y'⟩
     rw [h_x13] at h_pc h_x13'
-    rw [h_N] at h_mod' h_2y'
+    rw [h_fr.N] at h_mod' h_2y'
     have h_step := pow2_mul_emod_step (k₀ - v) _ _ _ _ h_inv h_mod'
     have h_bstep := pow2_mul_bound_step (k₀ - v) _ _ _ _ h_bnd h_2y'
     by_cases hv1 : v = 1
     · simp only [hv1, ↓reduceIte] at h_pc
-      left
-      refine ⟨h_pc, h_sp'.trans h_sp, h_x29'.trans h_x29, h_B'.trans h_B, h_A'.trans h_A,
-        h_N'.trans h_N, h_X'.trans h_X, h_dmem'.trans h_dmem, ?_, by omega, ?_⟩
-      · have h_k : k₀ - v + 1 = k₀ := by omega
-        rw [h_k] at h_step
-        exact h_step
-      · have h_k : k₀ - v + 1 = k₀ := by omega
-        rw [h_k] at h_bstep
-        exact h_bstep
+      have h_k : k₀ - v + 1 = k₀ := by omega
+      rw [h_k] at h_step h_bstep
+      exact Or.inl ⟨h_pc, h_fr.trans h_fr', h_B'.trans h_B, h_A'.trans h_A, h_X'.trans h_X,
+        h_step, by omega, h_bstep⟩
     · simp only [hv1, ↓reduceIte] at h_pc
-      right
-      refine ⟨v - 1, (), ⟨h_pc, by omega, by omega, h_x13', h_x14', h_sp'.trans h_sp, h_x29'.trans h_x29,
-        h_B'.trans h_B, h_A'.trans h_A, h_N'.trans h_N, h_X'.trans h_X, h_dmem'.trans h_dmem,
-        by omega, ?_, ?_⟩, by omega, fun _ hQ => hQ⟩
-      · have h_k : k₀ - v + 1 = k₀ - (v - 1) := by omega
-        rw [← h_k]
-        exact h_step
-      · have h_k : k₀ - v + 1 = k₀ - (v - 1) := by omega
-        rw [← h_k]
-        exact h_bstep
-  · intro st hQ
-    exact hQ
+      have h_k : k₀ - v + 1 = k₀ - (v - 1) := by omega
+      rw [h_k] at h_step h_bstep
+      exact Or.inr ⟨v - 1, (), ⟨h_pc, by omega, by omega, h_x13', h_x14', h_fr.trans h_fr',
+        h_B'.trans h_B, h_A'.trans h_A, h_X'.trans h_X, by omega, h_step, h_bstep⟩, by omega⟩
 
 theorem beeu_shift_B_header_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -2124,13 +1953,10 @@ theorem beeu_shift_B_header_correct [layout : Layout] [Layout.Valid beeu_mod_inv
       (pre := 0 < s.regs.beeuB)
       (post := fun st =>
         let k := ctzClamped s.regs.X25
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuX = s.regs.beeuX ∧
         st.data.regs.beeuY = s.regs.beeuY ∧
-        st.data.dmem = s.dmem ∧
         if k = 0#64 then
           st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_A_Y" ∧
           st.data.regs.beeuB = s.regs.beeuB ∧
@@ -2150,8 +1976,7 @@ theorem beeu_shift_B_header_correct [layout : Layout] [Layout.Valid beeu_mod_inv
     kprologue beeu_mod_inverse_vartime at ".Lbeeu_loop" to ".Lbeeu_shift_loop_X" with s
     have h_nz := val256_pos_or_ne_zero X25 X26 X27 X28 hB_pos
     sym => kstep; tactic =>
-    apply Eventually.done
-    refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, by kaddr beeu_mod_inverse_vartime, rfl, h_odd⟩
+    kfinish beeu_mod_inverse_vartime
   · simp only [hk, ↓reduceIte]
     have h_par := shift256_val256_even_imp_clamped s.regs.X25 s.regs.X26 s.regs.X27 s.regs.X28
     dsimp only [Reg64s.beeuB, ctzClamped] at hB_pos hk ⊢
@@ -2165,11 +1990,7 @@ theorem beeu_shift_B_header_correct [layout : Layout] [Layout.Valid beeu_mod_inv
         fun h0 => hk (BitVec.eq_of_toNat_eq h0)
       omega
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only [ctzClamped, shift256Word, shift256TopWord] at h_shift h_par ⊢
-    simp only [BitVec.shiftLeft_zero, BitVec.xor_self] at h_shift h_par ⊢
-    exact ⟨trivial, trivial, trivial, trivial, trivial, trivial, trivial,
-      by kaddr beeu_mod_inverse_vartime, rfl, hk_pos, rfl, h_shift, h_par⟩
+    kfinish beeu_mod_inverse_vartime [ctzClamped, shift256Word, shift256TopWord]
 
 theorem beeu_shift_A_header_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -2178,13 +1999,10 @@ theorem beeu_shift_A_header_correct [layout : Layout] [Layout.Valid beeu_mod_inv
       (pre := True)
       (post := fun st =>
         let k := ctzClamped s.regs.X21
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuX = s.regs.beeuX ∧
         st.data.regs.beeuY = s.regs.beeuY ∧
-        st.data.dmem = s.dmem ∧
         if k = 0#64 then
           st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_update_B_X_or_A_Y" ∧
           st.data.regs.beeuA = s.regs.beeuA ∧
@@ -2203,8 +2021,7 @@ theorem beeu_shift_A_header_correct [layout : Layout] [Layout.Valid beeu_mod_inv
     dsimp only [Reg64s.beeuA, ctzClamped] at hk h_odd ⊢
     kprologue beeu_mod_inverse_vartime at ".Lbeeu_shift_A_Y" to ".Lbeeu_shift_loop_Y" with s
     sym => kstep; tactic =>
-    apply Eventually.done
-    refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, by kaddr beeu_mod_inverse_vartime, rfl, h_odd⟩
+    kfinish beeu_mod_inverse_vartime
   · simp only [hk, ↓reduceIte]
     have h_par := shift256_val256_even_imp_clamped s.regs.X21 s.regs.X22 s.regs.X23 s.regs.X24
     dsimp only [Reg64s.beeuA, ctzClamped] at hk ⊢
@@ -2217,11 +2034,7 @@ theorem beeu_shift_A_header_correct [layout : Layout] [Layout.Valid beeu_mod_inv
         fun h0 => hk (BitVec.eq_of_toNat_eq h0)
       omega
     sym => kstep; tactic =>
-    apply Eventually.done
-    dsimp +zetaDelta only [ctzClamped, shift256Word, shift256TopWord] at h_shift h_par ⊢
-    simp only [BitVec.shiftLeft_zero, BitVec.xor_self] at h_shift h_par ⊢
-    exact ⟨trivial, trivial, trivial, trivial, trivial, trivial, trivial,
-      by kaddr beeu_mod_inverse_vartime, rfl, hk_pos, rfl, h_shift, h_par⟩
+    kfinish beeu_mod_inverse_vartime [ctzClamped, shift256Word, shift256TopWord]
 
 theorem two_mul_emod_eq_zero_of_odd (z n : Int) (hn_odd : n % 2 = 1)
     (h : (2 * z) % n = 0) : z % n = 0 := by
@@ -2300,12 +2113,9 @@ theorem beeu_shift_B_X_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
         (a * s.regs.beeuX - s.regs.beeuB) % s.regs.beeuN = 0)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_A_Y" ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.beeuA = s.regs.beeuA ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuY = s.regs.beeuY ∧
-        st.data.dmem = s.dmem ∧
         0 < st.data.regs.beeuB ∧
         st.data.regs.beeuB ≤ s.regs.beeuB ∧
         st.data.regs.beeuX < 256 ^ 40 / 2 ∧
@@ -2318,46 +2128,41 @@ theorem beeu_shift_B_X_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
           (st.data.regs.beeuB % 2 = 0 → k = 63)) := by
   rintro ⟨hB_pos, hN_odd, hX_lt, h_inv⟩
   apply (beeu_shift_B_header_correct s hB_pos).bind
-  rintro ⟨mid, mid_pc⟩ ⟨h_sp, h_x29, h_A, h_N, h_X, h_Y, h_dmem, h_branch⟩
-  dsimp only at h_sp h_x29 h_A h_N h_X h_Y h_dmem h_branch
+  rintro ⟨mid, mid_pc⟩ ⟨h_fr, h_A, h_X, h_Y, h_branch⟩
+  dsimp only at h_fr h_A h_X h_Y h_branch
   by_cases hk : ctzClamped s.regs.X25 = 0#64
   · simp only [hk, ↓reduceIte] at h_branch
     rcases h_branch with ⟨h_pc, h_B, h_odd⟩
     apply Eventually.done
     dsimp only
-    refine ⟨h_pc, h_sp, h_x29, h_A, h_N, h_Y, h_dmem,
-      h_B.symm ▸ hB_pos, by omega, h_X.symm ▸ hX_lt, by rw [h_X, h_B]; exact h_inv,
+    refine ⟨h_pc, h_fr, h_A, h_Y, h_B.symm ▸ hB_pos, by omega, h_X.symm ▸ hX_lt,
+      by rw [h_X, h_B]; exact h_inv,
       0, by omega, by rw [h_B]; simp, by rw [h_X]; simp, by intro h; omega, by rw [h_B]; intro h; omega⟩
   · simp only [hk, ↓reduceIte] at h_branch
     rcases h_branch with ⟨h_pc, h_x13, hk_pos, h_x14, h_B_shift, h_par⟩
     have h_N_lt : s.regs.beeuN < 256 ^ 32 := val256_lt _ _ _ _
-    have h_xn_lt : mid.regs.beeuX + mid.regs.beeuN < 256 ^ 40 := by omega
+    have h_xn_lt : mid.regs.beeuX + mid.regs.beeuN < 256 ^ 40 := by rw [h_X, h_fr.N]; omega
     subst h_pc
     apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
       ?_ (beeu_shift_loop_X_correct mid
-        ⟨h_x13 ▸ hk_pos, h_x14, h_N.symm ▸ hN_odd, h_xn_lt⟩)
-    rintro fin ⟨h_fin_pc, h_fin_sp, h_fin_x29, h_fin_B, h_fin_A, h_fin_N, h_fin_Y,
-      h_fin_dmem, h_fin_X_mod, h_fin_X_lt, h_fin_X_bnd⟩
+        ⟨h_x13 ▸ hk_pos, h_x14, h_fr.N.symm ▸ hN_odd, h_xn_lt⟩)
+    rintro fin ⟨h_fin_pc, h_fin_fr, h_fin_B, h_fin_A, h_fin_Y, h_fin_X_mod, h_fin_X_lt, h_fin_X_bnd⟩
     have hB_nonneg : 0 ≤ fin.data.regs.beeuB := val256_nonneg _ _ _ _
     have ⟨hB'_pos, hB'_le⟩ := pos_and_le_of_pow2_mul
       (ctzClamped s.regs.X25).toNat s.regs.beeuB fin.data.regs.beeuB
       hB_pos hB_nonneg (h_fin_B.symm ▸ h_B_shift)
     have hk63 : (ctzClamped s.regs.X25).toNat ≤ 63 :=
       BitVec.le_def.mp (clz_reverse_or_one_le_63 s.regs.X25.toBitVec)
-    refine ⟨h_fin_pc, h_fin_sp.trans h_sp, h_fin_x29.trans h_x29,
-      h_fin_A.trans h_A, h_fin_N.trans h_N, h_fin_Y.trans h_Y, h_fin_dmem.trans h_dmem,
+    rw [h_x13, h_fr.N, h_X] at h_fin_X_mod h_fin_X_bnd
+    refine ⟨h_fin_pc, h_fr.trans h_fin_fr, h_fin_A.trans h_A, h_fin_Y.trans h_Y,
       hB'_pos, hB'_le, h_fin_X_lt, ?_, (ctzClamped s.regs.X25).toNat, hk63,
-      h_fin_B.symm ▸ h_B_shift, ?_, fun _ => hk_pos, ?_⟩
-    · rw [h_x13, h_N, h_X] at h_fin_X_mod
-      exact shift_B_X_mod_inv (ctzClamped s.regs.X25).toNat a
+      h_fin_B.symm ▸ h_B_shift, h_fin_X_bnd, fun _ => hk_pos, ?_⟩
+    · exact shift_B_X_mod_inv (ctzClamped s.regs.X25).toNat a
         s.regs.beeuB fin.data.regs.beeuB s.regs.beeuX fin.data.regs.beeuX s.regs.beeuN
         hN_odd (h_fin_B.symm ▸ h_B_shift) h_fin_X_mod h_inv
-    · rw [h_x13, h_N, h_X] at h_fin_X_bnd
-      exact h_fin_X_bnd
     · intro h_even
       rw [h_fin_B] at h_even
-      have := h_par h_even
-      exact congrArg BitVec.toNat this
+      exact congrArg BitVec.toNat (h_par h_even)
 
 /-- Full verification of the `A`/`Y` shift phase (`.Lbeeu_shift_A_Y` to `.Lbeeu_update_B_X_or_A_Y`):
     shifts `A` right by `k = ctzClamped(a0)` bits and divides `Y` by `2^k` modulo `N`. -/
@@ -2372,12 +2177,9 @@ theorem beeu_shift_A_Y_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
         (a * s.regs.beeuY + s.regs.beeuA) % s.regs.beeuN = 0)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_update_B_X_or_A_Y" ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
+        BlockFrame s st.data ∧
         st.data.regs.beeuB = s.regs.beeuB ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
         st.data.regs.beeuX = s.regs.beeuX ∧
-        st.data.dmem = s.dmem ∧
         0 < st.data.regs.beeuA ∧
         st.data.regs.beeuA ≤ s.regs.beeuA ∧
         st.data.regs.beeuY < 256 ^ 40 / 2 ∧
@@ -2390,46 +2192,41 @@ theorem beeu_shift_A_Y_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
           (st.data.regs.beeuA % 2 = 0 → k = 63)) := by
   rintro ⟨hA_pos, hN_odd, hY_lt, h_inv⟩
   apply (beeu_shift_A_header_correct s trivial).bind
-  rintro ⟨mid, mid_pc⟩ ⟨h_sp, h_x29, h_B, h_N, h_X, h_Y, h_dmem, h_branch⟩
-  dsimp only at h_sp h_x29 h_B h_N h_X h_Y h_dmem h_branch
+  rintro ⟨mid, mid_pc⟩ ⟨h_fr, h_B, h_X, h_Y, h_branch⟩
+  dsimp only at h_fr h_B h_X h_Y h_branch
   by_cases hk : ctzClamped s.regs.X21 = 0#64
   · simp only [hk, ↓reduceIte] at h_branch
     rcases h_branch with ⟨h_pc, h_A, h_odd⟩
     apply Eventually.done
     dsimp only
-    refine ⟨h_pc, h_sp, h_x29, h_B, h_N, h_X, h_dmem,
-      h_A.symm ▸ hA_pos, by omega, h_Y.symm ▸ hY_lt, by rw [h_Y, h_A]; exact h_inv,
+    refine ⟨h_pc, h_fr, h_B, h_X, h_A.symm ▸ hA_pos, by omega, h_Y.symm ▸ hY_lt,
+      by rw [h_Y, h_A]; exact h_inv,
       0, by omega, by rw [h_A]; simp, by rw [h_Y]; simp, by intro h; omega, by rw [h_A]; intro h; omega⟩
   · simp only [hk, ↓reduceIte] at h_branch
     rcases h_branch with ⟨h_pc, h_x13, hk_pos, h_x14, h_A_shift, h_par⟩
     have h_N_lt : s.regs.beeuN < 256 ^ 32 := val256_lt _ _ _ _
-    have h_yn_lt : mid.regs.beeuY + mid.regs.beeuN < 256 ^ 40 := by omega
+    have h_yn_lt : mid.regs.beeuY + mid.regs.beeuN < 256 ^ 40 := by rw [h_Y, h_fr.N]; omega
     subst h_pc
     apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
       ?_ (beeu_shift_loop_Y_correct mid
-        ⟨h_x13 ▸ hk_pos, h_x14, h_N.symm ▸ hN_odd, h_yn_lt⟩)
-    rintro fin ⟨h_fin_pc, h_fin_sp, h_fin_x29, h_fin_B, h_fin_A, h_fin_N, h_fin_X,
-      h_fin_dmem, h_fin_Y_mod, h_fin_Y_lt, h_fin_Y_bnd⟩
+        ⟨h_x13 ▸ hk_pos, h_x14, h_fr.N.symm ▸ hN_odd, h_yn_lt⟩)
+    rintro fin ⟨h_fin_pc, h_fin_fr, h_fin_B, h_fin_A, h_fin_X, h_fin_Y_mod, h_fin_Y_lt, h_fin_Y_bnd⟩
     have hA_nonneg : 0 ≤ fin.data.regs.beeuA := val256_nonneg _ _ _ _
     have ⟨hA'_pos, hA'_le⟩ := pos_and_le_of_pow2_mul
       (ctzClamped s.regs.X21).toNat s.regs.beeuA fin.data.regs.beeuA
       hA_pos hA_nonneg (h_fin_A.symm ▸ h_A_shift)
     have hk63 : (ctzClamped s.regs.X21).toNat ≤ 63 :=
       BitVec.le_def.mp (clz_reverse_or_one_le_63 s.regs.X21.toBitVec)
-    refine ⟨h_fin_pc, h_fin_sp.trans h_sp, h_fin_x29.trans h_x29,
-      h_fin_B.trans h_B, h_fin_N.trans h_N, h_fin_X.trans h_X, h_fin_dmem.trans h_dmem,
+    rw [h_x13, h_fr.N, h_Y] at h_fin_Y_mod h_fin_Y_bnd
+    refine ⟨h_fin_pc, h_fr.trans h_fin_fr, h_fin_B.trans h_B, h_fin_X.trans h_X,
       hA'_pos, hA'_le, h_fin_Y_lt, ?_, (ctzClamped s.regs.X21).toNat, hk63,
-      h_fin_A.symm ▸ h_A_shift, ?_, fun _ => hk_pos, ?_⟩
-    · rw [h_x13, h_N, h_Y] at h_fin_Y_mod
-      exact shift_A_Y_mod_inv (ctzClamped s.regs.X21).toNat a
+      h_fin_A.symm ▸ h_A_shift, h_fin_Y_bnd, fun _ => hk_pos, ?_⟩
+    · exact shift_A_Y_mod_inv (ctzClamped s.regs.X21).toNat a
         s.regs.beeuA fin.data.regs.beeuA s.regs.beeuY fin.data.regs.beeuY s.regs.beeuN
         hN_odd (h_fin_A.symm ▸ h_A_shift) h_fin_Y_mod h_inv
-    · rw [h_x13, h_N, h_Y] at h_fin_Y_bnd
-      exact h_fin_Y_bnd
     · intro h_even
       rw [h_fin_A] at h_even
-      have := h_par h_even
-      exact congrArg BitVec.toNat this
+      exact congrArg BitVec.toNat (h_par h_even)
 
 /-! ## 6. Outer Loop & Top-Level `beeu_mod_inverse_vartime` Specification -/
 
@@ -2446,10 +2243,7 @@ theorem beeu_loop_body_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
         BeeuInv a s.regs.beeuN σ τ c s.regs.beeuB s.regs.beeuA s.regs.beeuX s.regs.beeuY)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop" ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
-        st.data.dmem = s.dmem ∧
+        BlockFrame s st.data ∧
         st.data.regs.beeuA ≤ s.regs.beeuA ∧
         (st.data.regs.beeuB + st.data.regs.beeuA).toNat <
           (s.regs.beeuB + s.regs.beeuA).toNat ∧
@@ -2464,23 +2258,23 @@ theorem beeu_loop_body_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
   obtain ⟨hX_lt, hY_lt⟩ := hI.bounds hB_pos hN_lt
   -- Phase 1: shift B and X.
   apply (beeu_shift_B_X_correct s a ⟨hB_pos, hI.N_odd, hX_lt, hI.X_inv⟩).bind
-  rintro ⟨st1, st1_pc⟩ ⟨h1_pc, h1_sp, h1_x29, h1_A, h1_N, h1_Y, h1_dmem,
-    h1_B_pos, h1_B_le, h1_X_lt, h1_X_inv, k₁, hk₁_le, h1_B_shift, h1_X_bnd, h1_k₁_pos, h1_clamp⟩
-  dsimp only at h1_pc h1_sp h1_x29 h1_A h1_N h1_Y h1_dmem h1_B_pos h1_B_le h1_X_lt h1_X_inv
+  rintro ⟨st1, st1_pc⟩ ⟨h1_pc, h1_fr, h1_A, h1_Y, h1_B_pos, h1_B_le, h1_X_lt, h1_X_inv,
+    k₁, hk₁_le, h1_B_shift, h1_X_bnd, h1_k₁_pos, h1_clamp⟩
+  dsimp only at h1_pc h1_fr h1_A h1_Y h1_B_pos h1_B_le h1_X_lt h1_X_inv
   dsimp only at h1_B_shift h1_X_bnd h1_k₁_pos h1_clamp
   subst h1_pc
   -- Phase 2: shift A and Y.
   apply (beeu_shift_A_Y_correct st1 a
-    ⟨h1_A.symm ▸ hI.A_pos, h1_N.symm ▸ hI.N_odd, h1_Y.symm ▸ hY_lt, by
-      rw [h1_Y, h1_A, h1_N]; exact hI.Y_inv⟩).bind
-  rintro ⟨st2, st2_pc⟩ ⟨h2_pc, h2_sp, h2_x29, h2_B, h2_N, h2_X, h2_dmem,
-    h2_A_pos, h2_A_le, h2_Y_lt, h2_Y_inv, k₂, hk₂_le, h2_A_shift, h2_Y_bnd, h2_k₂_pos, h2_clamp⟩
-  dsimp only at h2_pc h2_sp h2_x29 h2_B h2_N h2_X h2_dmem h2_A_pos h2_A_le h2_Y_lt h2_Y_inv
+    ⟨h1_A.symm ▸ hI.A_pos, h1_fr.N.symm ▸ hI.N_odd, h1_Y.symm ▸ hY_lt, by
+      rw [h1_Y, h1_A, h1_fr.N]; exact hI.Y_inv⟩).bind
+  rintro ⟨st2, st2_pc⟩ ⟨h2_pc, h2_fr, h2_B, h2_X, h2_A_pos, h2_A_le, h2_Y_lt, h2_Y_inv,
+    k₂, hk₂_le, h2_A_shift, h2_Y_bnd, h2_k₂_pos, h2_clamp⟩
+  dsimp only at h2_pc h2_fr h2_B h2_X h2_A_pos h2_A_le h2_Y_lt h2_Y_inv
   dsimp only at h2_A_shift h2_Y_bnd h2_k₂_pos h2_clamp
   subst h2_pc
   rw [h1_A] at h2_A_shift h2_k₂_pos h2_A_le
-  rw [h1_Y, h1_N] at h2_Y_bnd
-  rw [h1_N] at h2_Y_inv
+  rw [h1_Y, h1_fr.N] at h2_Y_bnd
+  rw [h1_fr.N] at h2_Y_inv
   -- Quantitative bounds after the shift phases, relative to the loop-top multiplier `M`.
   have hX₂ : st2.regs.beeuX < s.regs.beeuN * (beeuBound σ τ c + k₁) := by
     rw [h2_X]
@@ -2491,7 +2285,7 @@ theorem beeu_loop_body_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
   have h_xy_lt : st2.regs.beeuX + st2.regs.beeuY < 256 ^ 40 := by omega
   apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
     ?_ (beeu_update_step_correct st2 h_xy_lt)
-  rintro fin ⟨h3_pc, h3_sp, h3_x29, h3_N, h3_dmem, h3_branch, _⟩
+  rintro fin ⟨h3_pc, h3_fr, h3_branch⟩
   have h2_B_pos : 0 < st2.regs.beeuB := h2_B.symm ▸ h1_B_pos
   have h2_B_le : st2.regs.beeuB ≤ s.regs.beeuB := h2_B.symm ▸ h1_B_le
   have h2_X_inv : (a * st2.regs.beeuX - st2.regs.beeuB) % s.regs.beeuN = 0 := by
@@ -2583,9 +2377,7 @@ theorem beeu_loop_body_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
       _ ≤ s.regs.beeuN := hI.A_shifted
   have hM'0 : 0 ≤ s.regs.beeuN * beeuBound (σ + k₁) (τ + k₂) (c + dB + dA) :=
     Int.mul_nonneg hN0 (Int.le_of_lt (beeuBound_pos _ _ _))
-  refine ⟨h3_pc, h3_sp.trans (h2_sp.trans h1_sp), h3_x29.trans (h2_x29.trans h1_x29),
-    h3_N.trans (h2_N.trans h1_N), h3_dmem.trans (h2_dmem.trans h1_dmem), ?_, ?_,
-    σ + k₁, τ + k₂, c + dB + dA, ?_⟩
+  refine ⟨h3_pc, h1_fr.trans (h2_fr.trans h3_fr), ?_, ?_, σ + k₁, τ + k₂, c + dB + dA, ?_⟩
   all_goals by_cases h_ge : st2.regs.beeuB ≥ st2.regs.beeuA
   all_goals simp only [h_ge, ↓reduceIte] at h3_branch
   all_goals rcases h3_branch with ⟨hB', hA', hX', hY'⟩
@@ -2647,7 +2439,7 @@ theorem beeu_loop_body_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_
 /-- Full verification of the outer binary extended Euclidean loop (`.Lbeeu_loop` to `.Lbeeu_loop_end`):
     terminates by well-founded induction on `(B + A).toNat`, carrying the ghost invariant `BeeuInv`
     (which keeps `X, Y < 2^319` in every reachable state), exiting with `B = 0`, `0 < A ≤ A₀`,
-    and `(a * Y + A) % N = 0`. -/
+    `(a * Y + A) % N = 0`, and `A = 1 ↔ gcd a N = 1`. -/
 theorem beeu_loop_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) (a : Int) :
     (layout beeu_mod_inverse_vartime).Spec s
@@ -2655,51 +2447,31 @@ theorem beeu_loop_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_varti
       (pre := BeeuInv a s.regs.beeuN 0 0 0 s.regs.beeuB s.regs.beeuA s.regs.beeuX s.regs.beeuY)
       (post := fun st =>
         st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop_end" ∧
-        st.data.regs.SP = s.regs.SP ∧
-        st.data.regs.X29 = s.regs.X29 ∧
-        st.data.regs.beeuN = s.regs.beeuN ∧
-        st.data.dmem = s.dmem ∧
+        BlockFrame s st.data ∧
         0 < st.data.regs.beeuA ∧
         st.data.regs.beeuA ≤ s.regs.beeuA ∧
         (a * st.data.regs.beeuY + st.data.regs.beeuA) % s.regs.beeuN = 0 ∧
         (st.data.regs.beeuA = 1 ↔ Int.gcd a s.regs.beeuN = 1)) := by
   intro hI
-  apply tailrec_loop (step1 (layout beeu_mod_inverse_vartime)) _ _
+  apply tailrec_loop_simple (step1 (layout beeu_mod_inverse_vartime)) _ _
     (P := fun (v : Nat) (g : Nat × Nat × Nat) st =>
       st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop" ∧
-      st.data.regs.SP = s.regs.SP ∧
-      st.data.regs.X29 = s.regs.X29 ∧
-      st.data.regs.beeuN = s.regs.beeuN ∧
-      st.data.dmem = s.dmem ∧
+      BlockFrame s st.data ∧
       st.data.regs.beeuA ≤ s.regs.beeuA ∧
       (st.data.regs.beeuB + st.data.regs.beeuA).toNat = v ∧
       BeeuInv a s.regs.beeuN g.1 g.2.1 g.2.2 st.data.regs.beeuB st.data.regs.beeuA
         st.data.regs.beeuX st.data.regs.beeuY)
-    (Q := fun (_ : Nat) (_ : Nat × Nat × Nat) st =>
-      st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop_end" ∧
-      st.data.regs.SP = s.regs.SP ∧
-      st.data.regs.X29 = s.regs.X29 ∧
-      st.data.regs.beeuN = s.regs.beeuN ∧
-      st.data.dmem = s.dmem ∧
-      0 < st.data.regs.beeuA ∧
-      st.data.regs.beeuA ≤ s.regs.beeuA ∧
-      (a * st.data.regs.beeuY + st.data.regs.beeuA) % s.regs.beeuN = 0 ∧
-      (st.data.regs.beeuA = 1 ↔ Int.gcd a s.regs.beeuN = 1))
-    (lt := (· < ·))
-    (Hwf := Nat.lt_wfRel.wf)
-    (v0 := (s.regs.beeuB + s.regs.beeuA).toNat)
-    (g0 := (0, 0, 0))
-  · exact ⟨rfl, rfl, rfl, rfl, rfl, Int.le_refl _, rfl, hI⟩
-  · rintro v ⟨σ, τ, c⟩ ⟨st_data, st_pc⟩ ⟨rfl, hst_sp, hst_x29, hst_N, hst_dmem, hst_A_le, hst_v, hst_I⟩
-    dsimp only at hst_sp hst_x29 hst_N hst_dmem hst_A_le hst_v hst_I
+    (lt := (· < ·)) (Hwf := Nat.lt_wfRel.wf)
+    (v0 := (s.regs.beeuB + s.regs.beeuA).toNat) (g0 := (0, 0, 0))
+  · exact ⟨rfl, BlockFrame.refl s, Int.le_refl _, rfl, hI⟩
+  · rintro v ⟨σ, τ, c⟩ ⟨st_data, st_pc⟩ ⟨rfl, hst_fr, hst_A_le, hst_v, hst_I⟩
+    dsimp only at hst_fr hst_A_le hst_v hst_I
     by_cases hB0 : st_data.regs.beeuB = 0
     · apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
         ?_ (beeu_loop_exit_when_B_zero st_data hB0)
-      rintro fin ⟨h_pc, h_sp', h_x29', h_A', h_N', _, h_Y', h_dmem'⟩
+      rintro fin ⟨h_pc, h_fr', h_A', _, h_Y'⟩
       left
-      refine ⟨h_pc, h_sp'.trans hst_sp, h_x29'.trans hst_x29,
-        h_N'.trans hst_N, h_dmem'.trans hst_dmem,
-        h_A'.symm ▸ hst_I.A_pos, h_A'.symm ▸ hst_A_le, ?_, ?_⟩
+      refine ⟨h_pc, hst_fr.trans h_fr', h_A'.symm ▸ hst_I.A_pos, h_A'.symm ▸ hst_A_le, ?_, ?_⟩
       · rw [h_Y', h_A']
         exact hst_I.Y_inv
       · -- `B = 0`, so `A = gcd A 0 = gcd a N`.
@@ -2713,20 +2485,15 @@ theorem beeu_loop_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_varti
     · have hst_B_pos : 0 < st_data.regs.beeuB := by have := hst_I.B_nonneg; omega
       have hst_I' : BeeuInv a st_data.regs.beeuN σ τ c st_data.regs.beeuB st_data.regs.beeuA
           st_data.regs.beeuX st_data.regs.beeuY := by
-        rw [hst_N]; exact hst_I
+        rw [hst_fr.N]; exact hst_I
       apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
         ?_ (beeu_loop_body_correct st_data a σ τ c ⟨hst_B_pos, hst_I'⟩)
-      rintro mid ⟨h_pc, h_sp', h_x29', h_N', h_dmem', h_A_le', h_lt', σ', τ', c', hI'⟩
+      rintro mid ⟨h_pc, h_fr', h_A_le', h_lt', σ', τ', c', hI'⟩
       right
       refine ⟨(mid.data.regs.beeuB + mid.data.regs.beeuA).toNat, (σ', τ', c'),
-        ⟨h_pc, h_sp'.trans hst_sp, h_x29'.trans hst_x29,
-         h_N'.trans hst_N, h_dmem'.trans hst_dmem,
-         Int.le_trans h_A_le' hst_A_le, rfl, ?_⟩,
-        by omega, fun _ hQ => hQ⟩
-      rw [← hst_N]
+        ⟨h_pc, hst_fr.trans h_fr', Int.le_trans h_A_le' hst_A_le, rfl, ?_⟩, by omega⟩
+      rw [← hst_fr.N]
       exact hI'
-  · intro st hQ
-    exact hQ
 
 theorem mod_inv_of_beeu_end (a y out n : Int)
     (hn_pos : 0 < n)
@@ -2835,23 +2602,23 @@ theorem beeu_mod_inverse_vartime_correct [layout : Layout] [Layout.Valid beeu_mo
     · rw [beeuBound_zero]; omega
     · intro _; rw [beeuBound_zero]; omega
   apply (beeu_loop_correct st1 a h1_I).bind
-  rintro ⟨st2, st2_pc⟩ ⟨h2_pc, h2_sp, h2_x29, h2_N, h2_dmem, h2_A_pos, h2_A_le, h2_Y_inv, h2_gcd⟩
-  dsimp only at h2_pc h2_sp h2_x29 h2_N h2_dmem h2_A_pos h2_A_le h2_Y_inv h2_gcd
+  rintro ⟨st2, st2_pc⟩ ⟨h2_pc, h2_fr, h2_A_pos, h2_A_le, h2_Y_inv, h2_gcd⟩
+  dsimp only at h2_pc h2_fr h2_A_pos h2_A_le h2_Y_inv h2_gcd
   rw [h1_N] at h2_gcd
   subst h2_pc
   have h2_sp_eq : st2.regs.SP = UInt64.ofBitVec sp' :=
-    UInt64.eq_of_toBitVec_eq (by rw [h2_sp]; exact h1_sp)
+    UInt64.eq_of_toBitVec_eq (by rw [h2_fr.sp]; exact h1_sp)
   have h2_x29_eq : st2.regs.X29 = UInt64.ofBitVec sp' :=
-    UInt64.eq_of_toBitVec_eq (by rw [h2_x29]; exact h1_x29)
+    UInt64.eq_of_toBitVec_eq (by rw [h2_fr.x29]; exact h1_x29)
   have h2_mem : (st2.dmem =⋆
       BeeuStackFrame s₀.regs sp' ⋆
       Words256At o0 o1 o2 o3 s₀.regs.X0.toBitVec ⋆
       (a_bs @ s₀.regs.X1 ⋆ n_bs @ s₀.regs.X2 ⋆ R)) := by
-    rw [h2_dmem]; ecancel
+    rw [h2_fr.dmem]; ecancel
   apply eventually_weaken (step1 (layout beeu_mod_inverse_vartime)) _ _ _
     ?_ (beeu_loop_end_to_return_correct st2 s₀.regs o0 o1 o2 o3
       (a_bs @ s₀.regs.X1 ⋆ n_bs @ s₀.regs.X2 ⋆ R)
-      ⟨h_sp_align, h2_sp_eq, h2_x29_eq, by omega, h2_mem⟩)
+      ⟨h_sp_align, h2_sp_eq, h2_x29_eq, by rw [h2_fr.N, h1_N]; exact h_n_pos, h2_mem⟩)
   rintro fin ⟨h_fin_pc, h_fin_sp, h_fin_x30, h_fin_cs, h_fin_branch⟩
   refine ⟨h_fin_pc, h_fin_sp, h_fin_x30, h_fin_cs, ?_⟩
   split
@@ -2862,7 +2629,7 @@ theorem beeu_mod_inverse_vartime_correct [layout : Layout] [Layout.Valid beeu_mo
     have h_inv1 : (a * st2.regs.beeuY + 1) % n = 0 := by
       rw [hA1, h1_N] at h2_Y_inv; exact h2_Y_inv
     have h_val_n : val256 w0 w1 w2 w3 = n - (st2.regs.beeuY % n) := by
-      rw [h2_N, h1_N] at h_val; exact h_val
+      rw [h2_fr.N, h1_N] at h_val; exact h_val
     have ⟨h_out_pos, h_out_le, h_out_inv⟩ :=
       mod_inv_of_beeu_end a st2.regs.beeuY (val256 w0 w1 w2 w3) n h_n_pos h_inv1 h_val_n
     exact ⟨h_x0, w0, w1, w2, w3, h_out_pos, h_out_le, h_out_inv, by ecancel⟩
