@@ -383,19 +383,11 @@ theorem beeu_prologue_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
   dsimp only [BeeuStackFrame, BeeuSavedRegs]
   kprologue beeu_mod_inverse_vartime to ".Lbeeu_loop" with s₀
   sym => kstep; tactic =>
-  apply Eventually.done
-  refine ⟨by kaddr beeu_mod_inverse_vartime, ?_, ?_, ?_, ?_, ?_, ?_, ?_, by ecancel⟩
-  · dsimp +zetaDelta only; simp
-  · dsimp +zetaDelta only; simp
-  · dsimp +zetaDelta only [Reg64s.beeuB]
-    exact val256_of_limbs a_bs h_a_len
-  · dsimp +zetaDelta only [Reg64s.beeuA]
-    simp only [BitVec.shiftLeft_zero, BitVec.zero_or]
-    exact val256_of_limbs n_bs h_n_len
-  · dsimp +zetaDelta only [Reg64s.beeuN]
-    exact val256_of_limbs n_bs h_n_len
-  · dsimp +zetaDelta only [Reg64s.beeuX, val320]; simp; decide
-  · dsimp +zetaDelta only [Reg64s.beeuY, val320]; simp
+  kfinish beeu_mod_inverse_vartime [Reg64s.beeuB, Reg64s.beeuA, Reg64s.beeuN, Reg64s.beeuX,
+    Reg64s.beeuY, sp_sub_112_add_zero]
+  · exact val256_of_limbs a_bs h_a_len
+  · exact val256_of_limbs n_bs h_n_len
+  · exact val256_of_limbs n_bs h_n_len
 
 /-! ## Multi-Limb Arithmetic Lemmas for Loop Steps -/
 
@@ -1005,10 +997,7 @@ theorem beeu_epilogue_err_correct [layout : Layout] [Layout.Valid beeu_mod_inver
   kprologue beeu_mod_inverse_vartime at ".Lbeeu_err" with s
   subst h_x29
   sym => kstep; tactic =>
-  apply Eventually.done
-  dsimp +zetaDelta only
-  simp only [BitVec.ofInt_ofBytes_toBytes_64, BitVec.shiftLeft_zero, BitVec.xor_self]
-  refine ⟨trivial, rfl, ?_, trivial, ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩, by ecancel⟩
+  kfinish beeu_mod_inverse_vartime [BitVec.ofInt_ofBytes_toBytes_64, Reg64s.CalleeSavedEq]
   apply UInt64.eq_of_toBitVec_eq
   change (r₀.SP.toBitVec + 18446744073709551504#64 + 0#64) + 112#64 = r₀.SP.toBitVec
   grind
@@ -1078,10 +1067,7 @@ theorem beeu_finish_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_var
   kprologue beeu_mod_inverse_vartime at ".Lbeeu_finish" with s
   subst h_x29
   sym => kstep; tactic =>
-  apply Eventually.done
-  dsimp +zetaDelta only
-  simp only [BitVec.ofInt_ofBytes_toBytes_64]
-  refine ⟨trivial, trivial, ?_, trivial, ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩, by ecancel⟩
+  kfinish beeu_mod_inverse_vartime [BitVec.ofInt_ofBytes_toBytes_64, Reg64s.CalleeSavedEq]
   apply UInt64.eq_of_toBitVec_eq
   change (r₀.SP.toBitVec + 18446744073709551504#64 + 0#64) + 112#64 = r₀.SP.toBitVec
   grind
