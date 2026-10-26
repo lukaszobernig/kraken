@@ -6,6 +6,7 @@ public import Kraken.SeparationMem
 public meta import Lean.Elab.Tactic
 public meta import Lean.Meta.Tactic.AC
 public meta import Lean.Meta.Tactic.Grind
+public meta import Lean.Elab.Tactic.Omega
 
 public meta section
 
@@ -235,9 +236,174 @@ private def isCalleeSavedEqType (t : Expr) : Bool :=
   | some n => (`Reg64s.CalleeSavedEq).isSuffixOf n
   | none => false
 
+/-- Simp lemmas normalising byte-list lengths (`List.length_drop`, `Int.toBytes_length`, …). -/
+def lengthSimpLemmas : List Name :=
+  [``List.length_drop, ``List.length_take, ``List.length_append, ``List.length_replicate,
+   ``List.length_cons, ``List.length_nil, ``List.length_map, ``List.length_reverse,
+   ``Int.toBytes_length, ``Nat.toBytes_length, ``UInt8.toBytes_length, ``UInt16.toBytes_length,
+   ``UInt32.toBytes_length, ``UInt64.toBytes_length]
+
+/-- The lemmas `simp only` always includes (`eq_self`, `iff_self`), so that goals reduced to
+`a = a` are closed. -/
+def simpOnlyBuiltinThms (s : SimpTheorems) : MetaM SimpTheorems := do
+  let mut s := s
+  for n in Lean.Elab.Tactic.simpOnlyBuiltins do
+    s ← s.addConst n
+  return s
+
+/-- Is `t` a linear-arithmetic proposition over `Nat`/`Int` (an (in)equality, possibly a
+conjunction of them) that `omega` could decide? -/
+partial def isArithProp (t : Expr) : MetaM Bool := do
+  let t := t.consumeMData
+  if t.isAppOfArity ``And 2 then
+    return (← isArithProp (t.getArg! 0)) && (← isArithProp (t.getArg! 1))
+  if t.isAppOfArity ``Not 1 then return ← isArithProp (t.getArg! 0)
+  let isNatInt (ty : Expr) : MetaM Bool := do
+    let ty ← whnfR ty
+    return ty.isConstOf ``Nat || ty.isConstOf ``Int
+  if let some (ty, _, _) := t.eq? then return ← isNatInt ty
+  if t.isAppOfArity ``LE.le 4 || t.isAppOfArity ``LT.lt 4 || t.isAppOfArity ``GE.ge 4 ||
+      t.isAppOfArity ``GT.gt 4 || t.isAppOfArity ``Ne 3 then
+    return ← isNatInt (t.getArg! 0)
+  return false
+
+/-- Try to close an arithmetic side goal (typically a byte-length condition such as
+`(List.drop 8 bs).length = 8` or `k ≤ bs.length`) by normalising lengths with
+`lengthSimpLemmas` and running `omega` on the result with the hypotheses of the context.
+Much cheaper than `grind`, and complete for the linear length arithmetic `kstep` generates. -/
+def solveArithGoal (g : MVarId) : MetaM Bool := g.withContext do
+  -- `commitWhen`: leave the metavariable context untouched unless the goal was closed.
+  commitWhen do
+    try
+      let simpThms ← lengthSimpLemmas.foldlM (fun (s : SimpTheorems) n => s.addConst n) {}
+      let simpThms ← simpOnlyBuiltinThms simpThms
+      let ctx ← Simp.mkContext {} (simpTheorems := #[simpThms]) (congrTheorems := ← getSimpCongrTheorems)
+      let (r, _) ← simpGoal g ctx (simprocs := #[← Simp.getSimprocs])
+      let some (_, g) := r | return true
+      let some g ← g.falseOrByContra | return true
+      g.withContext do
+        let hyps := (← getLocalHyps).toList
+        Lean.Elab.Tactic.Omega.omega hyps g {}
+      return true
+    catch _ => return false
+
+/-- `some true` if `prop` holds by `solveArithGoal`, `some false` if its negation does, `none`
+otherwise. Used to avoid expensive `grind` calls on side goals that are simply false. -/
+def decideArithProp (prop : Expr) : MetaM (Option Bool) := withoutModifyingState do
+  let g ← mkFreshExprMVar prop
+  if ← solveArithGoal g.mvarId! then return some true
+  let gNot ← mkFreshExprMVar (mkNot prop)
+  if ← solveArithGoal gNot.mvarId! then return some false
+  return none
+
+initialize registerTraceClass `Kraken.sep
+
+/-- Normalise a goal `lhs = rhs` of `BitVec` sums: right-associate and fold literal offsets
+(`a + 16#64 + 8#64 ↦ a + 24#64`). Returns `none` if the goal was closed, else the new goal. -/
+def normBitVecEqGoal (g : MVarId) : MetaM (Option MVarId) := g.withContext do
+  let thms ← ([``BitVec.add_assoc] : List Name).foldlM (fun (s : SimpTheorems) n => s.addConst n) {}
+  let thms ← thms.addConst ``BitVec.ofNat_add (inv := true)
+  let thms ← simpOnlyBuiltinThms thms
+  let ctx ← Simp.mkContext {} (simpTheorems := #[thms]) (congrTheorems := ← getSimpCongrTheorems)
+  let (r, _) ← simpGoal g ctx (simprocs := #[← Simp.getSimprocs])
+  return r.map (·.2)
+
+/-- Prove an equality of `BitVec` sums by right-associating and folding literals
+(`a + 16#64 + 8#64 = a + 24#64`). -/
+def proveBitVecEqByNorm (g : MVarId) : MetaM Bool := g.withContext do
+  commitWhen do
+    try
+      return (← normBitVecEqGoal g).isNone
+    catch _ => return false
+
+/-- `base + offset` decomposition of a normalised `BitVec` sum (`offset := 0` if absent). -/
+private def bvBaseOffset? (e : Expr) : Option (Expr × Nat) :=
+  if e.isAppOfArity ``HAdd.hAdd 6 then
+    let b := e.getArg! 4
+    let o := e.getArg! 5
+    if o.isAppOfArity ``BitVec.ofNat 2 then
+      match (o.getArg! 1).nat? with
+      | some n => some (b, n)
+      | none => some (e, 0)
+    else some (e, 0)
+  else some (e, 0)
+
+/-- Decide an equality of `BitVec 64` address sums: `some true` if it holds after normalisation,
+`some false` if both sides are the same base with different literal offsets, `none` otherwise. -/
+def decideBitVecAddEq (prop : Expr) : MetaM (Option Bool) := withoutModifyingState do
+  let some (ty, _, _) := prop.consumeMData.eq? | return none
+  unless (← whnfR ty).isAppOfArity ``BitVec 1 do return none
+  let g ← mkFreshExprMVar prop
+  try
+    let some g' ← normBitVecEqGoal g.mvarId! | return some true
+    let t ← instantiateMVars (← g'.getType)
+    let some (_, lhs, rhs) := t.consumeMData.eq? | return none
+    let some (b₁, o₁) := bvBaseOffset? lhs | return none
+    let some (b₂, o₂) := bvBaseOffset? rhs | return none
+    if b₁ == b₂ && o₁ < 2 ^ 64 && o₂ < 2 ^ 64 && o₁ != o₂ then return some false
+    return none
+  catch _ => return none
+
+inductive SimpWithHypsResult where
+  | closed
+  | refuted
+  | goal (g : MVarId)
+
+/-- Simplify the goal using the equational hypotheses of the context as rewrite rules (plus
+`Bool`/`decide` normalisation). Reports whether the goal was closed, reduced to `False`, or
+replaced by a simplified goal. -/
+def simpWithHyps (g : MVarId) : MetaM SimpWithHypsResult := g.withContext do
+  try
+    let mut thms : SimpTheorems := {}
+    for decl in (← getLCtx) do
+      if decl.isImplementationDetail then continue
+      let t ← instantiateMVars decl.type
+      if t.hasExprMVar then continue
+      if t.consumeMData.isAppOfArity ``Eq 3 || t.consumeMData.isAppOfArity ``Ne 3 ||
+          t.consumeMData.isAppOfArity ``Not 1 then
+        thms ← thms.add (.fvar decl.fvarId) #[] decl.toExpr
+    for n in [``bne_self_eq_false, ``beq_self_eq_true, ``Bool.false_eq_true, ``Bool.true_eq_false,
+        ``Bool.not_false, ``Bool.not_true, ``decide_eq_true_eq, ``bne_iff_ne, ``beq_iff_eq,
+        ``ne_eq, ``not_true_eq_false, ``not_false_eq_true] do
+      if (← getEnv).contains n then thms ← thms.addConst n
+    thms ← simpOnlyBuiltinThms thms
+    let ctx ← Simp.mkContext {} (simpTheorems := #[thms]) (congrTheorems := ← getSimpCongrTheorems)
+    let (r, _) ← simpGoal g ctx (simprocs := #[← Simp.getSimprocs])
+    match r with
+    | none => return .closed
+    | some (_, g') =>
+      if (← instantiateMVars (← g'.getType)).consumeMData.isConstOf ``False then
+        return .refuted
+      return .goal g'
+  catch _ => return .goal g
+
 def provePropGoal (prop : Expr) : MetaM (Option Expr) :=
   commitWhenSomeNoEx? do
     let prop ← instantiateMVars prop
+    -- Cheap path: address equalities of `BitVec` sums.
+    match ← decideBitVecAddEq prop with
+    | some true =>
+      let goal ← mkFreshExprMVar prop
+      if ← proveBitVecEqByNorm goal.mvarId! then
+        trace[Kraken.sep] "provePropGoal by BitVec normalisation: {prop}"
+        return some (← instantiateMVars goal)
+    | some false =>
+      trace[Kraken.sep] "provePropGoal refuted by BitVec normalisation: {prop}"
+      return none
+    | none => pure ()
+    -- Cheap path: linear length arithmetic (and no `grind` on refutable side conditions).
+    if ← isArithProp prop then
+      match ← decideArithProp prop with
+      | some true =>
+        let goal ← mkFreshExprMVar prop
+        if ← solveArithGoal goal.mvarId! then
+          trace[Kraken.sep] "provePropGoal by omega: {prop}"
+          return some (← instantiateMVars goal)
+      | some false =>
+        trace[Kraken.sep] "provePropGoal refuted by omega: {prop}"
+        return none
+      | none => pure ()
+    trace[Kraken.sep] "provePropGoal by grind: {prop}"
     let hasBytesInProp :=
       (prop.find? (fun e => e.isConstOf ``Int.ofBytes || e.isConstOf ``Int.toBytes)).isSome
     let goal ← mkFreshExprMVar prop

@@ -2049,6 +2049,16 @@ partial def evalSymKStep : Grind.GrindTactic :=
               return (true, subGoal)
             catch _ => pure ()
 
+            -- Linear length arithmetic: decide with `omega` instead of `grind`, and do not run
+            -- `grind` at all when the side goal is refutable (a wrong candidate clause).
+            if ← subGoal.mvarId.withContext (Kraken.Tactic.isArithProp t) then
+              if ← subGoal.mvarId.withContext (Kraken.Tactic.solveArithGoal subGoal.mvarId) then
+                trace[Kraken.kstep] "Solved by omega: {t}"
+                return (true, subGoal)
+              if (← subGoal.mvarId.withContext (Kraken.Tactic.decideArithProp t)) == some false then
+                trace[Kraken.kstep] "Refuted by omega (skipping grind): {t}"
+                return (false, subGoal)
+
             -- Try solving with grind, roll back state otherwise (we don't want to
             -- return the failed Grind state).
             let saved ← Grind.saveState
@@ -2118,8 +2128,8 @@ partial def evalSymKStep : Grind.GrindTactic :=
                 try
                   withReducible lenGoal.mvarId.refl
                   return true
-                catch _ =>
-                  return false
+                catch _ => pure ()
+                lenGoal.mvarId.withContext (Kraken.Tactic.solveArithGoal lenGoal.mvarId)
               let tryAssignAndCancel (cand : Kraken.Tactic.SepAtCandidate) (hEq : Expr) : Grind.GrindTacticM Bool := do
                 withConfig (fun c => { c with assignSyntheticOpaque := true }) do
                   if config.debug then
@@ -2263,6 +2273,9 @@ partial def evalSymKStep : Grind.GrindTactic :=
                         if ← withReducible (isDefEq lhs rhs) then
                           eqGoalS.mvarId.assign (← mkEqRefl lhs)
                   unless ← eqGoalS.mvarId.isAssigned do
+                    discard <| Kraken.Tactic.proveBitVecEqByNorm eqGoalS.mvarId
+                  unless ← eqGoalS.mvarId.isAssigned do
+                    trace[Kraken.kstep] "slice grind on address equality: {← eqGoalS.mvarId.getType}"
                     let cleanMVarId ← clearSepAndLets eqGoalS.mvarId
                     let gS ← Grind.liftGrindM (Grind.mkGoal cleanMVarId)
                     let gS ← Grind.liftGrindM gS.internalizeAll
@@ -2369,6 +2382,8 @@ partial def evalSymKStep : Grind.GrindTactic :=
                             let rhs := eqT.appArg!
                             if let some prf ← tryProveBitVecAddEq lhs rhs then
                               eqGoal.mvarId.assign prf
+                      if !(← eqGoal.mvarId.isAssigned) then
+                        discard <| Kraken.Tactic.proveBitVecEqByNorm eqGoal.mvarId
                       if ← eqGoal.mvarId.isAssigned then
                         let hEq ← instantiateMVars eqMVar
                         if ← tryAssignAndCancel cand hEq then
@@ -2396,7 +2411,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
                         if let some off := sliceOffset? then
                           let canSlice :=
                             if cand.bs.isAppOfArity ``Int.toBytes 2 || cand.bs.isAppOfArity ``Nat.toBytes 2 then
-                              match (cand.bs.getArg! 0).rawNatLit? with
+                              match (cand.bs.getArg! 0).nat? with
                               | some k => off < k
                               | none => true
                             else
@@ -2419,6 +2434,9 @@ partial def evalSymKStep : Grind.GrindTactic :=
                     try
                       let (eqMVar, eqGoal) ← simplifyAddrEq cand.addr
                       unless ← eqGoal.mvarId.isAssigned do
+                        discard <| Kraken.Tactic.proveBitVecEqByNorm eqGoal.mvarId
+                      unless ← eqGoal.mvarId.isAssigned do
+                        trace[Kraken.kstep] "Pass 3 grind on address equality: {← eqGoal.mvarId.getType}"
                         let cleanMVarId ← clearSepAndLets eqGoal.mvarId
                         let g ← Grind.liftGrindM (Grind.mkGoal cleanMVarId)
                         let g ← Grind.liftGrindM g.internalizeAll
@@ -2501,7 +2519,16 @@ partial def evalSymKStep : Grind.GrindTactic :=
                 try
                   withReducible mvarId.refl
                 catch _ => pure ()
+              -- Rewrite with the hypotheses of the context (e.g. alignment facts) and decide;
+              -- a condition that reduces to `False` is not worth a `grind` call.
+              let mvarId ← do
+                if ← mvarId.isAssigned then pure mvarId else
+                match ← mvarId.withContext (Kraken.Tactic.simpWithHyps mvarId) with
+                | .closed => pure mvarId
+                | .refuted => failure
+                | .goal m => pure m
               unless ← mvarId.isAssigned do
+                trace[Kraken.kstep] "ite grind on: {← mvarId.getType}"
                 let cleanMVarId ← mvarId.withContext do
                   let mut toClear : Array FVarId := #[]
                   for localDecl? in (← getLCtx).decls do
