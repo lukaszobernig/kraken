@@ -686,7 +686,19 @@ elab_rules : tactic
     evalTactic (← `(tactic| (try dsimp +zetaDelta only at *)))
     evalTactic (← `(tactic| (try simp only [BitVec.shiftLeft_zero, BitVec.zero_or, BitVec.or_zero,
       BitVec.xor_self, UInt64.toNat_toBitVec, UInt64.toBitVec_ofBitVec] at *)))
-    evalTactic (← `(tactic| (try simp only [$lemmas,*, ↓reduceIte])))
+    -- Apply the extra lemmas to the goal and to every hypothesis that is not itself one of them.
+    let lemmaNames : Array Name := lemmas.filterMap fun l =>
+      match l.raw.find? (·.isIdent) with
+      | some id => some id.getId
+      | none => none
+    let hyps : Array Ident ← withMainContext do
+      let mut acc := #[]
+      for decl in (← getLCtx) do
+        if decl.isImplementationDetail || decl.userName.hasMacroScopes then continue
+        if lemmaNames.contains decl.userName then continue
+        if ← isProp decl.type then acc := acc.push (mkIdent decl.userName)
+      pure acc
+    evalTactic (← `(tactic| (try simp only [$lemmas,*, ↓reduceIte] at $hyps* ⊢)))
     if (← getUnsolvedGoals).isEmpty then return
     let leaves ← splitConjGoals (← getMainGoal)
     let mut remaining : List MVarId := []
@@ -702,7 +714,7 @@ elab_rules : tactic
           pure [← `(tactic| ecancel)]
         else
           pure [← `(tactic| assumption), ← `(tactic| rfl), ← `(tactic| exact True.intro),
-            ← `(tactic| omega)]
+            ← `(tactic| omega), ← `(tactic| simp)]
       let mut closed := false
       for tac in closers do
         if !closed then
