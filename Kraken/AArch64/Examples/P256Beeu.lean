@@ -354,40 +354,56 @@ theorem val256_of_limbs (bs : List UInt8) (h : bs.length = 32) :
       Int.ofBytes_toNat_ofInt_64 _ (by simp [h]),
       Int.ofBytes_32_split bs h]
 
-/-! ## 1. Prologue Verification (`beeu_mod_inverse_vartime` to `.Lbeeu_loop`) -/
+/-! ## Invariant Records (block frame, accumulator bound, loop invariant)
 
-theorem beeu_prologue_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
-    (s₀ : MachineData) (stack a_bs n_bs : List UInt8) (R : DataMem → Prop) :
-    (layout beeu_mod_inverse_vartime).Spec s₀
-      (pre :=
-        let sp' := s₀.regs.SP.toBitVec + 18446744073709551504#64
-        s₀.regs.SP.toBitVec % 16#64 = 0#64 ∧
-        stack.length = 112 ∧
-        a_bs.length = 32 ∧
-        n_bs.length = 32 ∧
-        (s₀.dmem =⋆ stack @ sp' ⋆ a_bs @ s₀.regs.X1 ⋆ n_bs @ s₀.regs.X2 ⋆ R))
-      (post := fun st =>
-        let sp' := s₀.regs.SP.toBitVec + 18446744073709551504#64
-        st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop" ∧
-        st.data.regs.SP.toBitVec = sp' ∧
-        st.data.regs.X29.toBitVec = sp' ∧
-        st.data.regs.beeuB = Int.ofBytes a_bs ∧
-        st.data.regs.beeuA = Int.ofBytes n_bs ∧
-        st.data.regs.beeuN = Int.ofBytes n_bs ∧
-        st.data.regs.beeuX = 1 ∧
-        st.data.regs.beeuY = 0 ∧
-        (st.data.dmem =⋆
-          BeeuStackFrame s₀.regs sp' ⋆
-          a_bs @ s₀.regs.X1 ⋆ n_bs @ s₀.regs.X2 ⋆ R)) := by
-  rintro ⟨h_sp_align, h_stack_len, h_a_len, h_n_len, h_mem⟩
-  dsimp only [BeeuStackFrame, BeeuSavedRegs]
-  kprologue beeu_mod_inverse_vartime to ".Lbeeu_loop" with s₀
-  sym => kstep; tactic =>
-  kfinish beeu_mod_inverse_vartime [Reg64s.beeuB, Reg64s.beeuA, Reg64s.beeuN, Reg64s.beeuX,
-    Reg64s.beeuY, sp_sub_112_add_zero]
-  · exact val256_of_limbs a_bs h_a_len
-  · exact val256_of_limbs n_bs h_n_len
-  · exact val256_of_limbs n_bs h_n_len
+`structure` declarations are added to the kernel synchronously and therefore wait for every
+pending proof above them to be checked; they are kept here, ahead of all heavy proofs, so that
+they never stall parallel elaboration of the rest of the file. -/
+
+/-- Machine-state facts preserved by every block of the main loop region of
+`beeu_mod_inverse_vartime`: stack pointer, frame pointer, the modulus `N`, and data memory. -/
+structure BlockFrame (s st : MachineData) : Prop where
+  sp : st.regs.SP = s.regs.SP
+  x29 : st.regs.X29 = s.regs.X29
+  N : st.regs.beeuN = s.regs.beeuN
+  dmem : st.dmem = s.dmem
+
+theorem BlockFrame.refl (s : MachineData) : BlockFrame s s := ⟨rfl, rfl, rfl, rfl⟩
+
+theorem BlockFrame.trans {s₁ s₂ s₃ : MachineData} (h₁ : BlockFrame s₁ s₂) (h₂ : BlockFrame s₂ s₃) :
+    BlockFrame s₁ s₃ :=
+  ⟨h₂.sp.trans h₁.sp, h₂.x29.trans h₁.x29, h₂.N.trans h₁.N, h₂.dmem.trans h₁.dmem⟩
+
+/-- Multiplier bounding the accumulators at the top of `.Lbeeu_loop`: `X, Y < 2 · N · beeuBound σ τ c`,
+where `σ`/`τ` count the halvings of `X`/`Y` performed so far and `c` counts clamped 63-bit shifts
+(`63 · c ≤ σ + τ`). -/
+def beeuBound (σ τ c : Nat) : Int := ((σ + τ + 2) * 2 ^ c : Nat)
+
+/-- Loop invariant at the top of `.Lbeeu_loop`, with ghost counters `σ`/`τ` (total halvings of
+`X`/`Y` performed so far) and `c` (number of clamped 63-bit shifts). Besides the range and modular
+facts, it bounds the 320-bit accumulators in every reachable state:
+- `2^σ · B ≤ N` and `2^τ · A ≤ N` give `σ, τ ≤ 255` while `B, A > 0`, and `63 · c ≤ σ + τ`
+  gives `c ≤ 8`, so `beeuBound σ τ c ≤ 2^17`;
+- `X < 2 · N · beeuBound σ τ c` (and `X < N · beeuBound σ τ c` when `B` is odd, i.e. when `X` has
+  already been halved since its last update), symmetrically for `Y`/`A`.
+Hence `X, Y < 2^18 · N < 2^274`, so `X + N` and `X + Y` never overflow five limbs.
+Finally `gcd A B = gcd a N` (Euclid's invariant), so the loop exits with `A = gcd a N`. -/
+structure BeeuInv (a N : Int) (σ τ c : Nat) (B A X Y : Int) : Prop where
+  N_odd : N % 2 = 1
+  gcd_eq : Int.gcd A B = Int.gcd a N
+  B_nonneg : 0 ≤ B
+  B_le : B ≤ N
+  A_pos : 0 < A
+  A_le : A ≤ N
+  X_inv : (a * X - B) % N = 0
+  Y_inv : (a * Y + A) % N = 0
+  B_shifted : ((2 ^ σ : Nat) : Int) * B ≤ N
+  A_shifted : ((2 ^ τ : Nat) : Int) * A ≤ N
+  clamps : 63 * c ≤ σ + τ
+  X_lt : X < 2 * (N * beeuBound σ τ c)
+  X_lt_odd : B % 2 = 1 → X < N * beeuBound σ τ c
+  Y_lt : Y < 2 * (N * beeuBound σ τ c)
+  Y_lt_odd : A % 2 = 1 → Y < N * beeuBound σ τ c
 
 /-! ## Multi-Limb Arithmetic Lemmas for Loop Steps -/
 
@@ -574,6 +590,15 @@ theorem shift256_top_bv128 (hi k : BitVec 64) (hk63 : k ≤ 63#64) :
     ((1#64 <<< (k % 64#64)).setWidth 128) * ((hi >>> (k % 64#64)).setWidth 128) +
       (hi &&& ((1#64 <<< (k % 64#64)) - 1#64)).setWidth 128 =
       hi.setWidth 128 := by
+  bv_decide
+
+theorem ctzClamped_eq_zero_imp_odd (b0 : BitVec 64) (h : (b0.reverse ||| 1#64).clz = 0#64) :
+    b0.getLsbD 0 = true := by
+  revert h; bv_decide
+
+theorem shift256Word_lsb_or_clamped (b0 b1 : BitVec 64) :
+    let k := (b0.reverse ||| 1#64).clz
+    ((b0 >>> (k % 64#64)) ||| (b1 <<< ((0#64 - k) % 64#64))).getLsbD 0 = true ∨ k = 63#64 := by
   bv_decide
 
 theorem one_shiftLeft_toNat (k : BitVec 64) (hk63 : k ≤ 63#64) :
@@ -894,22 +919,6 @@ theorem sub320_val_of_ge (b0 b1 b2 b3 b4 a0 a1 a2 a3 a4 : UInt64)
   have h_c := sub320_carry_of_ge b0 b1 b2 b3 b4 a0 a1 a2 a3 a4 h
   simp only [h_c, ↓reduceIte] at h_step
   omega
-
-/-! ## Block Frame (facts preserved by every block of the main loop region) -/
-
-/-- Machine-state facts preserved by every block of the main loop region of
-`beeu_mod_inverse_vartime`: stack pointer, frame pointer, the modulus `N`, and data memory. -/
-structure BlockFrame (s st : MachineData) : Prop where
-  sp : st.regs.SP = s.regs.SP
-  x29 : st.regs.X29 = s.regs.X29
-  N : st.regs.beeuN = s.regs.beeuN
-  dmem : st.dmem = s.dmem
-
-theorem BlockFrame.refl (s : MachineData) : BlockFrame s s := ⟨rfl, rfl, rfl, rfl⟩
-
-theorem BlockFrame.trans {s₁ s₂ s₃ : MachineData} (h₁ : BlockFrame s₁ s₂) (h₂ : BlockFrame s₂ s₃) :
-    BlockFrame s₁ s₃ :=
-  ⟨h₂.sp.trans h₁.sp, h₂.x29.trans h₁.x29, h₂.N.trans h₁.N, h₂.dmem.trans h₁.dmem⟩
 
 /-! ## 2. Loop Exit Verification (`.Lbeeu_loop` to `.Lbeeu_loop_end` when `B = 0`) -/
 
@@ -1289,11 +1298,6 @@ theorem beeu_loop_end_to_return_correct [layout : Layout] [Layout.Valid beeu_mod
 
 /-! ## Accumulator Bound Invariant (reachable-state bound on `X` and `Y`) -/
 
-/-- Multiplier bounding the accumulators at the top of `.Lbeeu_loop`: `X, Y < 2 · N · beeuBound σ τ c`,
-where `σ`/`τ` count the halvings of `X`/`Y` performed so far and `c` counts clamped 63-bit shifts
-(`63 · c ≤ σ + τ`). -/
-def beeuBound (σ τ c : Nat) : Int := ((σ + τ + 2) * 2 ^ c : Nat)
-
 theorem beeuBound_pos (σ τ c : Nat) : 0 < beeuBound σ τ c := by
   unfold beeuBound
   have := Nat.two_pow_pos c
@@ -1368,15 +1372,6 @@ theorem bound_mono_right (N M M' Z : Int) (hN : 0 ≤ N) (h : Z < N * M) (hM : M
   have := Int.mul_le_mul_of_nonneg_left hM hN
   omega
 
-theorem ctzClamped_eq_zero_imp_odd (b0 : BitVec 64) (h : (b0.reverse ||| 1#64).clz = 0#64) :
-    b0.getLsbD 0 = true := by
-  revert h; bv_decide
-
-theorem shift256Word_lsb_or_clamped (b0 b1 : BitVec 64) :
-    let k := (b0.reverse ||| 1#64).clz
-    ((b0 >>> (k % 64#64)) ||| (b1 <<< ((0#64 - k) % 64#64))).getLsbD 0 = true ∨ k = 63#64 := by
-  bv_decide
-
 /-- If the (clamped) shift amount is zero then `B` is odd. -/
 theorem val256_odd_of_ctzClamped_eq_zero (b0 b1 b2 b3 : UInt64)
     (h : ctzClamped b0 = 0#64) : val256 b0 b1 b2 b3 % 2 = 1 := by
@@ -1444,32 +1439,6 @@ theorem Int.gcd_of_two_pow_mul_odd (A B B' : Int) (k : Nat) (h : ((2 ^ k : Nat) 
     have hcg : c ∣ (Int.gcd A B : Int) := Int.dvd_coe_gcd hcA hcB
     have hc_odd : c % 2 = 1 := odd_of_dvd_odd c _ hodd hcg
     exact odd_dvd_of_dvd_two_pow_mul c hc_odd k B' (h ▸ hcB)
-
-/-- Loop invariant at the top of `.Lbeeu_loop`, with ghost counters `σ`/`τ` (total halvings of
-`X`/`Y` performed so far) and `c` (number of clamped 63-bit shifts). Besides the range and modular
-facts, it bounds the 320-bit accumulators in every reachable state:
-- `2^σ · B ≤ N` and `2^τ · A ≤ N` give `σ, τ ≤ 255` while `B, A > 0`, and `63 · c ≤ σ + τ`
-  gives `c ≤ 8`, so `beeuBound σ τ c ≤ 2^17`;
-- `X < 2 · N · beeuBound σ τ c` (and `X < N · beeuBound σ τ c` when `B` is odd, i.e. when `X` has
-  already been halved since its last update), symmetrically for `Y`/`A`.
-Hence `X, Y < 2^18 · N < 2^274`, so `X + N` and `X + Y` never overflow five limbs.
-Finally `gcd A B = gcd a N` (Euclid's invariant), so the loop exits with `A = gcd a N`. -/
-structure BeeuInv (a N : Int) (σ τ c : Nat) (B A X Y : Int) : Prop where
-  N_odd : N % 2 = 1
-  gcd_eq : Int.gcd A B = Int.gcd a N
-  B_nonneg : 0 ≤ B
-  B_le : B ≤ N
-  A_pos : 0 < A
-  A_le : A ≤ N
-  X_inv : (a * X - B) % N = 0
-  Y_inv : (a * Y + A) % N = 0
-  B_shifted : ((2 ^ σ : Nat) : Int) * B ≤ N
-  A_shifted : ((2 ^ τ : Nat) : Int) * A ≤ N
-  clamps : 63 * c ≤ σ + τ
-  X_lt : X < 2 * (N * beeuBound σ τ c)
-  X_lt_odd : B % 2 = 1 → X < N * beeuBound σ τ c
-  Y_lt : Y < 2 * (N * beeuBound σ τ c)
-  Y_lt_odd : A % 2 = 1 → Y < N * beeuBound σ τ c
 
 theorem two_pow_le_imp_le_255 (σ : Nat) (N : Int) (h : ((2 ^ σ : Nat) : Int) ≤ N)
     (hN : N < 256 ^ 32) : σ ≤ 255 := by
@@ -2497,6 +2466,46 @@ theorem mod_inv_of_beeu_end (a y out n : Int)
     rw [h_out]; grind
   rw [h_eq, Int.add_emod, Int.mul_emod, Int.emod_self, Int.mul_zero,
     Int.zero_emod, Int.add_zero, Int.emod_emod]
+
+/-! ## 1. Prologue Verification (`beeu_mod_inverse_vartime` to `.Lbeeu_loop`)
+
+Placed after sections 2-6 on purpose: this is by far the most expensive proof in the file
+(~17 s of elaboration), and Lean kernel-checks declarations sequentially in file order, so every
+declaration below it would otherwise have to wait for it. It is only used by the top-level
+theorem. -/
+
+theorem beeu_prologue_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
+    (s₀ : MachineData) (stack a_bs n_bs : List UInt8) (R : DataMem → Prop) :
+    (layout beeu_mod_inverse_vartime).Spec s₀
+      (pre :=
+        let sp' := s₀.regs.SP.toBitVec + 18446744073709551504#64
+        s₀.regs.SP.toBitVec % 16#64 = 0#64 ∧
+        stack.length = 112 ∧
+        a_bs.length = 32 ∧
+        n_bs.length = 32 ∧
+        (s₀.dmem =⋆ stack @ sp' ⋆ a_bs @ s₀.regs.X1 ⋆ n_bs @ s₀.regs.X2 ⋆ R))
+      (post := fun st =>
+        let sp' := s₀.regs.SP.toBitVec + 18446744073709551504#64
+        st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop" ∧
+        st.data.regs.SP.toBitVec = sp' ∧
+        st.data.regs.X29.toBitVec = sp' ∧
+        st.data.regs.beeuB = Int.ofBytes a_bs ∧
+        st.data.regs.beeuA = Int.ofBytes n_bs ∧
+        st.data.regs.beeuN = Int.ofBytes n_bs ∧
+        st.data.regs.beeuX = 1 ∧
+        st.data.regs.beeuY = 0 ∧
+        (st.data.dmem =⋆
+          BeeuStackFrame s₀.regs sp' ⋆
+          a_bs @ s₀.regs.X1 ⋆ n_bs @ s₀.regs.X2 ⋆ R)) := by
+  rintro ⟨h_sp_align, h_stack_len, h_a_len, h_n_len, h_mem⟩
+  dsimp only [BeeuStackFrame, BeeuSavedRegs]
+  kprologue beeu_mod_inverse_vartime to ".Lbeeu_loop" with s₀
+  sym => kstep; tactic =>
+  kfinish beeu_mod_inverse_vartime [Reg64s.beeuB, Reg64s.beeuA, Reg64s.beeuN, Reg64s.beeuX,
+    Reg64s.beeuY, sp_sub_112_add_zero]
+  · exact val256_of_limbs a_bs h_a_len
+  · exact val256_of_limbs n_bs h_n_len
+  · exact val256_of_limbs n_bs h_n_len
 
 /-- Top-level end-to-end functional correctness of BoringSSL's `beeu_mod_inverse_vartime`:
     Given a 16-byte-aligned stack with 112 bytes of frame space, 32-byte input buffers `a_bs` at `x1`
