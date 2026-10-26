@@ -6,10 +6,12 @@ module
   Root module that re-exports all AArch64 Kraken components.
 -/
 
+import Kraken.AArch64.Examples.Bignum
 import Kraken.AArch64.Examples.Examples
 import Kraken.AArch64.Examples.Memcmp
 import Kraken.AArch64.Examples.Memcpy
 import Kraken.AArch64.Examples.Memmove
+import Kraken.AArch64.Examples.P256Beeu
 public import Kraken.AArch64.OmniSemantics
 public import Kraken.AArch64.Parser
 public import Kraken.AArch64.Semantics

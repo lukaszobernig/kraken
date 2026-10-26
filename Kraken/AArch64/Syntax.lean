@@ -26,7 +26,7 @@ instance : Coe RegWidth Width where coe := fun w : RegWidth =>
 @[kstep, simp, reducible] def bytes (w : RegWidth) : Nat := (w : Width).bytes
 @[kstep] abbrev bytesv (w : RegWidth) {n} : BitVec n := (w : Width).bytesv
 @[kstep] abbrev type (w : RegWidth) : Type := (w : Width).type
-instance {w : RegWidth} : Coe Bool w.type where coe := fun b : Bool => BitVec.ofNat _ b.toNat
+@[kstep, simp] instance {w : RegWidth} : Coe Bool w.type where coe := fun b : Bool => BitVec.ofNat _ b.toNat
 end RegWidth
 
 unif_hint (w : RegWidth) where

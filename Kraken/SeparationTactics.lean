@@ -27,6 +27,8 @@ private partial def reduceProjectionApp (e : Expr) : MetaM Expr := do
   let some declName := e.getAppFn.constName? | return e
   let some info ← getProjectionFnInfo? declName | return e
   if info.fromClass then
+    unless declName == ``HasDataMem.dmem || declName == ``HasDataMem.withDmem do
+      return e
     let some unfolded ← withTransparency .instances (unfoldProjInst? e) | return e
     return ← reduceProjectionApp unfolded.headBeta
   let args := e.getAppArgs
@@ -157,6 +159,17 @@ private partial def rebuildSepTree (t : SepTree) (clauses : List (Expr × Option
     | (c, eqProof?) :: rest => return some (← instantiateMVars c, eqProof?, rest)
     | [] => return none
 
+private def shouldNotUnfoldInMatchClosed (fn : Expr) : Bool :=
+  match fn.constName? with
+  | some n =>
+    n == ``Int.toBytes || n == ``Int.ofBytes ||
+    n == ``Nat.toBytes || n == ``Nat.ofBytes ||
+    (`BitVec).isPrefixOf n || (`List).isPrefixOf n ||
+    (`HAdd).isPrefixOf n || (`Add).isPrefixOf n ||
+    (`HSub).isPrefixOf n || (`Sub).isPrefixOf n ||
+    (`HAppend).isPrefixOf n || (`Append).isPrefixOf n
+  | none => false
+
 -- fuel: bound definitional unfolding to avoid expensive general reduction.
 private partial def matchClosed (lhs rhs : Expr) (fuel : Nat := 2) : MetaM Bool := do
   let lhs ← instantiateMVars lhs
@@ -166,6 +179,14 @@ private partial def matchClosed (lhs rhs : Expr) (fuel : Nat := 2) : MetaM Bool 
   let lhs ← reduceProjectionApp lhs
   let rhs ← reduceProjectionApp rhs
   if lhs == rhs then return true
+  if !lhs.hasFVar && !rhs.hasFVar && !lhs.hasExprMVar && !rhs.hasExprMVar then
+    return ← isDefEq lhs rhs
+  if lhs.isFVar then
+    if let some val ← lhs.fvarId!.getValue? then
+      return ← matchClosed val rhs fuel
+  if rhs.isFVar then
+    if let some val ← rhs.fvarId!.getValue? then
+      return ← matchClosed lhs val fuel
   if lhs.getAppFn == rhs.getAppFn then
     let lhsArgs := lhs.getAppArgs
     let rhsArgs := rhs.getAppArgs
@@ -174,13 +195,13 @@ private partial def matchClosed (lhs rhs : Expr) (fuel : Nat := 2) : MetaM Bool 
       unless ← matchClosed lhsArg rhsArg fuel do return false
     return true
   if fuel == 0 then
-    if !lhs.hasFVar && !rhs.hasFVar && !lhs.hasExprMVar && !rhs.hasExprMVar then
-      return ← isDefEq lhs rhs
     return false
-  if let some lhs ← unfoldDefinition? lhs then
-    if ← matchClosed lhs rhs (fuel - 1) then return true
-  if let some rhs ← unfoldDefinition? rhs then
-    if ← matchClosed lhs rhs (fuel - 1) then return true
+  unless shouldNotUnfoldInMatchClosed lhs.getAppFn do
+    if let some lhs ← unfoldDefinition? lhs then
+      if ← matchClosed lhs rhs (fuel - 1) then return true
+  unless shouldNotUnfoldInMatchClosed rhs.getAppFn do
+    if let some rhs ← unfoldDefinition? rhs then
+      if ← matchClosed lhs rhs (fuel - 1) then return true
   return false
 
 private def matchAtom (lhs rhs : Expr) : MetaM Bool := do
@@ -189,7 +210,7 @@ private def matchAtom (lhs rhs : Expr) : MetaM Bool := do
   else
     matchClosed lhs rhs
 
-private def extractAtBytesAndAddr? (clause : Expr) : MetaM (Option (Expr × Expr)) := do
+def extractAtBytesAndAddr? (clause : Expr) : MetaM (Option (Expr × Expr)) := do
   let clause ← instantiateMVars clause
   unless clause.isAppOfArity ``Eq 2 do return none
   let rhs ← reduceProjectionApp clause.appArg!
@@ -216,13 +237,17 @@ private def isCalleeSavedEqType (t : Expr) : Bool :=
 
 def provePropGoal (prop : Expr) : MetaM (Option Expr) :=
   commitWhenSomeNoEx? do
+    let prop ← instantiateMVars prop
+    let hasBytesInProp :=
+      (prop.find? (fun e => e.isConstOf ``Int.ofBytes || e.isConstOf ``Int.toBytes)).isSome
     let goal ← mkFreshExprMVar prop
     let mut toClear : Array FVarId := #[]
     for localDecl? in (← getLCtx).decls do
       if let some localDecl := localDecl? then
         if localDecl.hasValue ||
            (localDecl.type.find? (·.isConstOf ``Std.ExtHashMap)).isSome ||
-           isCalleeSavedEqType localDecl.type then
+           isCalleeSavedEqType localDecl.type ||
+           (!hasBytesInProp && (localDecl.type.find? (fun e => e.isConstOf ``Int.ofBytes || e.isConstOf ``Int.toBytes)).isSome) then
           toClear := toClear.push localDecl.fvarId
     let goalId ← goal.mvarId!.tryClearMany toClear
     let params ← Lean.Meta.Grind.mkDefaultParams {}
@@ -387,6 +412,96 @@ private partial def cancelAndAlign (predType : Expr) (lhs rhs : ClauseSlots) :
     return some (lhsCan, rhsCan)
   tryAssignNakedSlot predType lhs rhs
 
+private def extractListAppendArgs? (e : Expr) : Option (Expr × Expr) :=
+  if e.isAppOfArity ``HAppend.hAppend 6 then
+    let args := e.getAppArgs
+    some (args[4]!, args[5]!)
+  else if e.isAppOfArity ``List.append 3 then
+    let args := e.getAppArgs
+    some (args[1]!, args[2]!)
+  else
+    none
+
+private def inferKnownByteLength? (bs : Expr) : MetaM (Option (Expr × Expr)) := do
+  let bs ← instantiateMVars bs
+  if bs.isAppOfArity ``Int.toBytes 2 then
+    let n := bs.appFn!.appArg!
+    let v := bs.appArg!
+    return some (n, ← mkAppM ``Int.toBytes_length #[n, v])
+  if bs.isAppOfArity ``Nat.toBytes 2 then
+    let n := bs.appFn!.appArg!
+    let v := bs.appArg!
+    return some (n, ← mkAppM ``Nat.toBytes_length #[n, v])
+  for localDecl? in (← getLCtx).decls.toArray.reverse do
+    if let some localDecl := localDecl? then
+      let t ← instantiateMVars localDecl.type
+      if t.isAppOfArity ``Eq 3 then
+        let lhs := t.appFn!.appArg!
+        let rhs := t.appArg!
+        if lhs.isAppOfArity ``List.length 2 && lhs.appArg! == bs then
+          return some (rhs, localDecl.toExpr)
+  return none
+
+private partial def expandAppendsInSepExpr (e : Expr) (fuel : Nat := 4) : MetaM (Expr × Option Expr) := do
+  if fuel == 0 then
+    return (e, none)
+  let e ← reduceProjectionApp (← instantiateMVars e)
+  if e.getAppFn.constName? == some ``Std.ExtHashMap.sep then
+    let args := e.getAppArgs
+    let p := args[args.size - 2]!
+    let q := args[args.size - 1]!
+    let (p', hp?) ← expandAppendsInSepExpr p fuel
+    let (q', hq?) ← expandAppendsInSepExpr q fuel
+    if hp?.isNone && hq?.isNone then
+      return (e, none)
+    let sep' ← mkAppM ``Std.ExtHashMap.sep #[p', q']
+    let hSep? ← match hp?, hq? with
+      | none, none => pure none
+      | some hp, none =>
+        let h1 ← mkCongrArg sep'.appFn!.appFn! hp
+        some <$> mkCongrFun h1 q'
+      | none, some hq =>
+        some <$> mkCongrArg sep'.appFn! hq
+      | some hp, some hq =>
+        let h1 ← mkCongrArg sep'.appFn!.appFn! hp
+        some <$> mkCongr h1 hq
+    return (sep', hSep?)
+  let some (bs, a) ← extractAtBytesAndAddr? e | return (e, none)
+  if bs.hasExprMVar || a.hasExprMVar then
+    return (e, none)
+  let some (bs1, bs2) := extractListAppendArgs? bs | return (e, none)
+  let splitRes? ← commitWhenSomeNoEx? do
+    let len1? ← inferKnownByteLength? bs1
+    let len2? ← inferKnownByteLength? bs2
+    let hSplit ← match len1?, len2? with
+      | some (n1, hN1), some (n2, hN2) =>
+        let splitFn ← mkAppM ``Mem.At_append_sep_len2 #[bs1, bs2, n1, n2, a, hN1, hN2]
+        let lenBoundType := (← inferType splitFn).bindingDomain!
+        let some hLen ← provePropGoal lenBoundType | return none
+        pure (mkApp splitFn hLen)
+      | some (n1, hN1), none =>
+        let splitFn ← mkAppM ``Mem.At_append_sep_len #[bs1, bs2, n1, a, hN1]
+        let lenBoundType := (← inferType splitFn).bindingDomain!
+        let some hLen ← provePropGoal lenBoundType | return none
+        pure (mkApp splitFn hLen)
+      | none, _ =>
+        let splitFn ← mkAppM ``Mem.At_append_sep #[bs1, bs2, a]
+        let lenBoundType := (← inferType splitFn).bindingDomain!
+        let some hLen ← provePropGoal lenBoundType | return none
+        pure (mkApp splitFn hLen)
+    let actualLhs := (← inferType hSplit).appFn!.appArg!
+    if e == actualLhs then
+      return some hSplit
+    else
+      return some (← mkExpectedTypeHint hSplit (← mkEq e (← inferType hSplit).appArg!))
+  let some hSplit := splitRes? | return (e, none)
+  let splitRhs := (← inferType hSplit).appArg!
+  let (splitRhs', hMore?) ← expandAppendsInSepExpr splitRhs (fuel - 1)
+  let hTotal ← match hMore? with
+    | none => pure hSplit
+    | some hMore => mkEqTrans hSplit hMore
+  return (splitRhs', some hTotal)
+
 private def collectTakeTargets (clauses : List Expr) : MetaM (Array (Expr × Expr)) := do
   let mut res := #[]
   for clause in clauses do
@@ -478,6 +593,8 @@ private def solveSepEqCore (lhs rhs : Expr) : MetaM (Option Expr) :=
     let rhsTree ← parseSepTree rhs
     let lhsSlots := lhsTree.clauses.toArray.map ClauseSlot.unmatched
     let rhsSlots := rhsTree.clauses.toArray.map ClauseSlot.unmatched
+    if !lhs.hasExprMVar && !rhs.hasExprMVar && lhsSlots.size != rhsSlots.size then
+      return none
     let some (lhsCan, rhsCan) ← cancelAndAlign predType lhsSlots rhsSlots | return none
     let some (lhs', _, []) ← rebuildSepTree lhsTree lhsCan | return none
     let some (rhs', rhsEq?, []) ← rebuildSepTree rhsTree rhsCan | return none
@@ -488,23 +605,32 @@ private def solveSepEqCore (lhs rhs : Expr) : MetaM (Option Expr) :=
     | some rhsEq => return some (← mkEqTrans acProof rhsEq)
     | none => return some acProof
 
+private def chainOptEq (h1? h2? : Option Expr) : MetaM (Option Expr) := do
+  match h1?, h2? with
+  | none, none => return none
+  | some h1, none => return some h1
+  | none, some h2 => return some h2
+  | some h1, some h2 => return some (← mkEqTrans h1 h2)
+
 private def solveSepEq (lhs rhs : Expr) : MetaM (Option Expr) := do
   if let some prf ← solveSepEqCore lhs rhs then
     return some prf
   commitWhenSomeNoEx? do
     let lhs ← instantiateMVars lhs
     let rhs ← instantiateMVars rhs
-    let lhsTree ← parseSepTree lhs
-    let rhsTree ← parseSepTree rhs
+    let (lhs1, hLhs1?) ← expandAppendsInSepExpr lhs
+    let (rhs1, hRhs1?) ← expandAppendsInSepExpr rhs
+    let lhsTree ← parseSepTree lhs1
+    let rhsTree ← parseSepTree rhs1
     let rhsTakes ← collectTakeTargets rhsTree.clauses
     let lhsTakes ← collectTakeTargets lhsTree.clauses
-    if rhsTakes.isEmpty && lhsTakes.isEmpty then
-      return none
-    let (lhs', hLhs?) ← expandSlicesInSepExpr lhs rhsTakes
-    let (rhs', hRhs?) ← expandSlicesInSepExpr rhs lhsTakes
+    let (lhs2, hLhs2?) ← expandSlicesInSepExpr lhs1 rhsTakes
+    let (rhs2, hRhs2?) ← expandSlicesInSepExpr rhs1 lhsTakes
+    let hLhs? ← chainOptEq hLhs1? hLhs2?
+    let hRhs? ← chainOptEq hRhs1? hRhs2?
     if hLhs?.isNone && hRhs?.isNone then
       return none
-    let some hMid ← solveSepEqCore lhs' rhs' | return none
+    let some hMid ← solveSepEqCore lhs2 rhs2 | return none
     let hMid ← match hLhs? with
       | some hLhs => mkEqTrans hLhs hMid
       | none => pure hMid
