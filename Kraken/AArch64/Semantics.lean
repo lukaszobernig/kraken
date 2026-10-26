@@ -301,13 +301,11 @@ def RegOrZr.interp {w} (r : RegOrZr w) (s : MachineData) (_ : Std.Rco Int64)
     | .S12 => BitVec.ofInt w.bits (imm <<< 12)
 
 @[kstep] def ShiftRegExpr.interp {w} (expr : ShiftRegExpr w) (s : Reg64s) (_ : Std.Rco Int64) : w.type :=
-  let base := s.getRegOrZr expr.reg
-  let amount := (Int64.toInt expr.amount).toNat
   match expr.shift with
-  | .LSL => base <<< amount
-  | .LSR => base.ushiftRight amount
-  | .ASR => base.sshiftRight amount
-  | .ROR => base.rotateRight amount
+  | .LSL => (s.getRegOrZr expr.reg) <<< (Int64.toInt expr.amount).toNat
+  | .LSR => (s.getRegOrZr expr.reg).ushiftRight (Int64.toInt expr.amount).toNat
+  | .ASR => (s.getRegOrZr expr.reg).sshiftRight (Int64.toInt expr.amount).toNat
+  | .ROR => (s.getRegOrZr expr.reg).rotateRight (Int64.toInt expr.amount).toNat
 
 @[kstep] def AddrExpr.eval [Labels] (mem : AddrExpr) (s : MachineData) (p : Std.Rco Int64) : BitVec 64 × MachineData :=
   let base := (s.regs.getRegOrSp mem.base).signed
@@ -446,45 +444,24 @@ def StatusFlags.ofNat (nzcv : Nat) : StatusFlags :=
     ((1 : w.type) <<< len) - 1
 
 @[kstep, simp] def evalUBFM {w : RegWidth} (src : w.type) (immr imms : Nat) : w.type :=
-  let immr := immr % w.bits
-  let imms := imms % w.bits
-  if imms >= immr then
-    let len := imms - immr + 1
-    let field := (src >>> immr).take len
-    field.zeroExtend w.bits
+  if imms % w.bits >= immr % w.bits then
+    ((src >>> (immr % w.bits)).take (imms % w.bits - immr % w.bits + 1)).zeroExtend w.bits
   else
-    let len := imms + 1
-    let pos := w.bits - immr
-    let field := src.take len
-    (field.zeroExtend w.bits) <<< pos
+    ((src.take (imms % w.bits + 1)).zeroExtend w.bits) <<< (w.bits - immr % w.bits)
 
 @[kstep, simp] def evalSBFM {w : RegWidth} (src : w.type) (immr imms : Nat) : w.type :=
-  let immr := immr % w.bits
-  let imms := imms % w.bits
-  if imms >= immr then
-    let len := imms - immr + 1
-    let field := (src >>> immr).take len
-    field.signExtend w.bits
+  if imms % w.bits >= immr % w.bits then
+    ((src >>> (immr % w.bits)).take (imms % w.bits - immr % w.bits + 1)).signExtend w.bits
   else
-    let len := imms + 1
-    let pos := w.bits - immr
-    let field := src.take len
-    (field.signExtend (w.bits - pos)).zeroExtend w.bits <<< pos
+    ((src.take (imms % w.bits + 1)).signExtend (w.bits - (w.bits - immr % w.bits))).zeroExtend w.bits <<< (w.bits - immr % w.bits)
 
 @[kstep, simp] def evalBFM {w : RegWidth} (dst src : w.type) (immr imms : Nat) : w.type :=
-  let immr := immr % w.bits
-  let imms := imms % w.bits
-  if imms >= immr then
-    let len := imms - immr + 1
-    let mask : w.type := maskOfLen (w := w) len
-    let field := (src >>> immr) &&& mask
-    (dst &&& ~~~mask) ||| field
+  if imms % w.bits >= immr % w.bits then
+    (dst &&& ~~~(maskOfLen (w := w) (imms % w.bits - immr % w.bits + 1))) |||
+      ((src >>> (immr % w.bits)) &&& maskOfLen (w := w) (imms % w.bits - immr % w.bits + 1))
   else
-    let len := imms + 1
-    let pos := w.bits - immr
-    let mask : w.type := (maskOfLen (w := w) len) <<< pos
-    let field : w.type := (src &&& maskOfLen (w := w) len) <<< pos
-    (dst &&& ~~~mask) ||| field
+    (dst &&& ~~~((maskOfLen (w := w) (imms % w.bits + 1)) <<< (w.bits - immr % w.bits))) |||
+      ((src &&& maskOfLen (w := w) (imms % w.bits + 1)) <<< (w.bits - immr % w.bits))
 
 set_option maxHeartbeats 1000000
 @[kstep] def Operation.interp [Labels]
@@ -628,7 +605,7 @@ set_option maxHeartbeats 1000000
     let res := val1 - val2 - borrow
     let borrow_int : Int := if s.status.c then 0 else 1
     let status := StatusFlags.from_result res {
-      c := val1.unsigned >= val2.unsigned + borrow_int
+      c := res.unsigned == val1.unsigned - val2.unsigned - borrow_int
       v := res.signed != val1.signed - val2.signed - borrow_int }
     { s with status }.setRegOrZr dst res next
   | .MADD dst src1 src2 src3 =>
@@ -1017,3 +994,122 @@ def Program.fakeLayout (prog : Program) : Executable :=
     | some v => .ok (v, s.1.regs.SP)
     | none => .error "Memory store failed"
   )
+
+/-! ## 64-Bit Carry/Borrow Arithmetic Helpers (`adds`/`adcs`/`subs`/`sbcs`) -/
+
+theorem adcs_bv (a b : BitVec 64) (c : Bool) :
+    let carry : BitVec 64 := BitVec.ofNat 64 c.toNat
+    let res : BitVec 64 := a + b + carry
+    let carry_int : Int := if c then 1 else 0
+    let c' : Bool := (res.toNat : Int) != (a.toNat : Int) + (b.toNat : Int) + carry_int
+    (res.toNat : Int) + (if c' then 1 else 0) * 256 ^ 8 =
+      (a.toNat : Int) + (b.toNat : Int) + carry_int := by
+  have ha_lt : a.toNat < 2 ^ 64 := a.isLt
+  have hb_lt : b.toNat < 2 ^ 64 := b.isLt
+  dsimp only
+  cases c <;> simp [BitVec.toNat_add] <;> split <;> omega
+
+theorem sbcs_bv (a b : BitVec 64) (c : Bool) :
+    let borrow : BitVec 64 := BitVec.ofNat 64 (!c).toNat
+    let res : BitVec 64 := a - b - borrow
+    let borrow_int : Int := if c then 0 else 1
+    let c' : Bool := (res.toNat : Int) == (a.toNat : Int) - (b.toNat : Int) - borrow_int
+    (res.toNat : Int) - (if c' then 0 else 1) * 256 ^ 8 =
+      (a.toNat : Int) - (b.toNat : Int) - borrow_int := by
+  have ha_lt : a.toNat < 2 ^ 64 := a.isLt
+  have hb_lt : b.toNat < 2 ^ 64 := b.isLt
+  have h_res : ((a - b - BitVec.ofNat 64 (!c).toNat).toNat : Int) =
+      if (a.toNat : Int) ≥ (b.toNat : Int) + (if c then 0 else 1) then
+        (a.toNat : Int) - (b.toNat : Int) - (if c then 0 else 1)
+      else
+        (a.toNat : Int) - (b.toNat : Int) - (if c then 0 else 1) + 2 ^ 64 := by
+    cases c <;> simp [BitVec.toNat_sub] <;> omega
+  dsimp only
+  rw [h_res]
+  by_cases h : (a.toNat : Int) ≥ (b.toNat : Int) + (if c then 0 else 1)
+  · simp [h]
+  · simp [h]; omega
+
+abbrev sub0Word (b a : UInt64) : BitVec 64 := b.toBitVec - a.toBitVec
+abbrev sub0Carry (b a : UInt64) : Bool :=
+  ((sub0Word b a).toNat : Int) == (b.toNat : Int) - (a.toNat : Int)
+
+abbrev sbcWord (b a : UInt64) (c : Bool) : BitVec 64 :=
+  b.toBitVec - a.toBitVec - BitVec.ofNat 64 (!c).toNat
+abbrev sbcCarry (b a : UInt64) (c : Bool) : Bool :=
+  ((sbcWord b a c).toNat : Int) == (b.toNat : Int) - (a.toNat : Int) - (if c then 0 else 1)
+
+abbrev add0Word (x y : UInt64) : BitVec 64 := x.toBitVec + y.toBitVec
+abbrev add0Carry (x y : UInt64) : Bool :=
+  ((add0Word x y).toNat : Int) != (x.toNat : Int) + (y.toNat : Int)
+
+abbrev adcWord (x y : UInt64) (c : Bool) : BitVec 64 :=
+  x.toBitVec + y.toBitVec + BitVec.ofNat 64 c.toNat
+abbrev adcCarry (x y : UInt64) (c : Bool) : Bool :=
+  ((adcWord x y c).toNat : Int) != (x.toNat : Int) + (y.toNat : Int) + (if c then 1 else 0)
+
+theorem sub0_step (b a : UInt64) :
+    ((UInt64.ofBitVec (sub0Word b a)).toNat : Int) - (if sub0Carry b a then 0 else 1) * 256 ^ 8 =
+      (b.toNat : Int) - (a.toNat : Int) := by
+  have hb : b.toNat < 2 ^ 64 := b.toBitVec.isLt
+  have ha : a.toNat < 2 ^ 64 := a.toBitVec.isLt
+  dsimp only [sub0Word, sub0Carry]
+  rw [UInt64.toNat_ofBitVec]
+  simp [BitVec.toNat_sub]
+  split <;> omega
+
+theorem sbc_step (b a : UInt64) (c : Bool) :
+    ((UInt64.ofBitVec (sbcWord b a c)).toNat : Int) - (if sbcCarry b a c then 0 else 1) * 256 ^ 8 =
+      (b.toNat : Int) - (a.toNat : Int) - (if c then 0 else 1) := by
+  dsimp only [sbcWord, sbcCarry]
+  rw [UInt64.toNat_ofBitVec]
+  exact sbcs_bv b.toBitVec a.toBitVec c
+
+theorem add0_step (x y : UInt64) :
+    ((UInt64.ofBitVec (add0Word x y)).toNat : Int) + (if add0Carry x y then 1 else 0) * 256 ^ 8 =
+      (x.toNat : Int) + (y.toNat : Int) := by
+  have hx : x.toNat < 2 ^ 64 := x.toBitVec.isLt
+  have hy : y.toNat < 2 ^ 64 := y.toBitVec.isLt
+  dsimp only [add0Word, add0Carry]
+  rw [UInt64.toNat_ofBitVec]
+  simp [BitVec.toNat_add]
+  split <;> omega
+
+theorem adc_step (x y : UInt64) (c : Bool) :
+    ((UInt64.ofBitVec (adcWord x y c)).toNat : Int) + (if adcCarry x y c then 1 else 0) * 256 ^ 8 =
+      (x.toNat : Int) + (y.toNat : Int) + (if c then 1 else 0) := by
+  dsimp only [adcWord, adcCarry]
+  rw [UInt64.toNat_ofBitVec]
+  exact adcs_bv x.toBitVec y.toBitVec c
+
+@[simp, ksimp, grind =]
+theorem BitVec.zeroExtend_64_extractLsb'_63_ushiftRight_1 (v : BitVec 64) :
+    ((v >>> 1).extractLsb' 0 63).zeroExtend 64 = v >>> 1 := by
+  ext i hi
+  simp
+  intro h_bit
+  have := BitVec.lt_of_getLsbD h_bit
+  omega
+
+@[simp, grind =]
+theorem UInt64.toNat_ofBitVec_ushiftRight_one (x : UInt64) :
+    (UInt64.ofBitVec (x.toBitVec >>> 1)).toNat = x.toNat / 2 := by
+  rw [UInt64.toNat_ofBitVec, BitVec.toNat_ushiftRight, UInt64.toNat_toBitVec, Nat.shiftRight_eq_div_pow]
+
+@[simp, grind =]
+theorem UInt64.toNat_ofBitVec_and_one (x : UInt64) :
+    (UInt64.ofBitVec (x.toBitVec &&& 1#64)).toNat = x.toNat % 2 := by
+  rw [UInt64.toNat_ofBitVec, BitVec.toNat_and, UInt64.toNat_toBitVec]
+  exact Nat.and_one_is_mod x.toNat
+
+theorem UInt64.ushiftRight_one_eq_zero_iff (x : UInt64) :
+    (x.toBitVec >>> 1 = 0#64) ↔ x.toNat / 2 = 0 := by
+  rw [← BitVec.toNat_inj, BitVec.toNat_ushiftRight, UInt64.toNat_toBitVec, Nat.shiftRight_eq_div_pow]
+  rfl
+
+theorem UInt64.and_one_eq_zero_iff (x : UInt64) :
+    (x.toBitVec &&& 1#64 = 0#64) ↔ x.toNat % 2 = 0 := by
+  rw [← BitVec.toNat_inj, BitVec.toNat_and, UInt64.toNat_toBitVec]
+  exact Iff.of_eq (congrArg (· = 0) (Nat.and_one_is_mod x.toNat))
+
+
