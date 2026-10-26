@@ -7,6 +7,7 @@ Core tactics and theorems for stepping through Kraken assembly proofs.
 -/
 
 public import Kraken.Attribute
+public import Kraken.Frame
 public import Kraken.Layout
 public import Kraken.OmniSemantics
 import Kraken.Separation
@@ -668,6 +669,164 @@ private def tryClose (tac : TSyntax `tactic) : TacticM Bool := do
       s.restore; return false)
     (fun _ => do s.restore; return false)
 
+--------------------------------------------------------------------------------
+-- Register frames: `kframe`, `kframe_eqs` (see `Kraken.RegFile.EqExcept`)
+
+/-- The list elements of a literal list expression (after `whnf` of the spine). -/
+private partial def literalListElems (l : Expr) : MetaM (Array Expr) := do
+  let mut acc := #[]
+  let mut cur ← whnfD l
+  while cur.isAppOfArity ``List.cons 3 do
+    acc := acc.push (cur.getArg! 1)
+    cur ← whnfD (cur.getArg! 2)
+  unless cur.isAppOfArity ``List.nil 1 do
+    throwError "expected a literal list of register names, got{indentExpr l}"
+  return acc
+
+/-- Index of `n` in `elems` up to reducible defeq. -/
+private def findRegIdx? (elems : Array Expr) (n : Expr) : MetaM (Option Nat) := do
+  for h : i in [0:elems.size] do
+    if ← withReducible (isDefEq elems[i] n) then return some i
+  return none
+
+/-- Proof of `n ∈ W` (`W` a literal list, `n` its `i`-th element). -/
+private partial def mkMemProof (α n W : Expr) (i : Nat) : MetaM Expr := do
+  let W ← whnfD W
+  if i == 0 then
+    mkAppOptM ``List.mem_cons_self #[α, n, W.getArg! 2]
+  else
+    let rest ← mkMemProof α n (W.getArg! 2) (i - 1)
+    mkAppM ``List.mem_cons_of_mem #[W.getArg! 1, rest]
+
+/-- Proof of `n ∉ W` for a literal list `W` of register names (by `decide` on each `≠`). -/
+private partial def mkNotMemProof (α n W : Expr) : MetaM Expr := do
+  let W ← whnfD W
+  if W.isAppOfArity ``List.nil 1 then
+    mkAppOptM ``List.not_mem_nil #[α, n]
+  else
+    let hne ← mkDecideProof (← mkAppM ``Ne #[n, W.getArg! 1])
+    let hrest ← mkNotMemProof α n (W.getArg! 2)
+    mkAppM ``List.not_mem_cons_of_ne_of_not_mem #[hne, hrest]
+
+/-- A register name for hypothesis naming: the last constructor name occurring in `n`. -/
+private def regNameString (n : Expr) : String :=
+  match n.getAppFn.constName? with
+  | some c =>
+    if n.getAppNumArgs > 0 then
+      match (n.getArg! (n.getAppNumArgs - 1)).getAppFn.constName? with
+      | some c' => c'.getString!
+      | none => c.getString!
+    else c.getString!
+  | none => "reg"
+
+/-- For `h : RegFile.EqExcept W r' r`, the field equations `r'.f = r.f` (types in reduced,
+projection form) for every register `f ∉ W`, paired with the register's name. -/
+def frameEqsOf (h : Expr) : MetaM (Array (String × Expr)) := do
+  let hType := (← instantiateMVars (← inferType h)).consumeMData
+  unless hType.isAppOfArity ``Kraken.RegFile.EqExcept 5 do return #[]
+  let args := hType.getAppArgs
+  let R := args[0]!; let inst := args[1]!; let W := args[2]!; let r' := args[3]!; let r := args[4]!
+  let nameTy ← whnfD (mkApp2 (mkConst ``Kraken.RegFile.Name) R inst)
+  let names ← literalListElems (mkApp2 (mkConst ``Kraken.RegFile.names) R inst)
+  let wElems ← literalListElems W
+  let mut acc := #[]
+  for n in names do
+    if (← findRegIdx? wElems n).isSome then continue
+    let hn ← mkNotMemProof nameTy n W
+    let lhs ← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r' n)
+    let rhs ← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r n)
+    let prf ← mkExpectedTypeHint (mkApp2 h n hn) (← mkEq lhs rhs)
+    acc := acc.push (regNameString n, prf)
+  return acc
+
+/-- Field equations of all `RegFile.EqExcept` hypotheses in the local context. -/
+def frameEqsInContext : TacticM (Array Expr) := withMainContext do
+  let mut acc := #[]
+  for decl in (← getLCtx) do
+    if decl.isImplementationDetail then continue
+    if decl.type.consumeMData.isAppOf ``Kraken.RegFile.EqExcept then
+      acc := acc ++ (← frameEqsOf decl.toExpr).map (·.2)
+  return acc
+
+/-- `kframe_eqs h`: add the field equations `r'.f = r.f` of `h : r' ≡ r except W` to the context
+(named `h_f`). -/
+elab "kframe_eqs " h:ident : tactic => withMainContext do
+  let some decl := (← getLCtx).findFromUserName? h.getId
+    | throwErrorAt h "unknown hypothesis `{h}`"
+  let eqs ← frameEqsOf decl.toExpr
+  if eqs.isEmpty then throwErrorAt h "`{h}` is not a `≡ … except` hypothesis"
+  let hyps ← eqs.mapM fun (nm, prf) => do
+    pure { userName := h.getId.appendAfter ("_" ++ nm), type := ← inferType prf, value := prf : Hypothesis }
+  let (_, g) ← (← getMainGoal).assertHypotheses hyps
+  replaceMainGoal [g]
+
+/-- Case split a register name variable (one level of nesting, e.g. `XRegOrSp.reg x`). -/
+private partial def casesRegName (g : MVarId) (fvar : FVarId) : MetaM (List MVarId) := do
+  let subgoals ← g.cases fvar
+  subgoals.toList.flatMapM fun sg => do
+    if h : sg.fields.size = 1 then
+      let f := sg.fields[0]
+      if f.isFVar then
+        let ty ← sg.mvarId.withContext do whnfD (← inferType f)
+        if let .const tyName _ := ty.getAppFn then
+          if let some (.inductInfo info) := (← getEnv).find? tyName then
+            if info.numIndices == 0 && !info.isRec then
+              return ← casesRegName sg.mvarId f.fvarId!
+    return [sg.mvarId]
+
+/-- Prove a goal `r' ≡ r except W`: for every register, the two sides are either definitionally
+equal (`rfl`, after rewriting with the frame equations of `≡ … except` hypotheses in the context)
+or the register is in `W`. Leaves the equations it cannot close, which point at registers missing
+from `W`. -/
+elab "kframe" : tactic => withKrakenRecDepth <| withMainContext do
+  let target := (← instantiateMVars (← getMainTarget)).consumeMData
+  unless target.isAppOfArity ``Kraken.RegFile.EqExcept 5 do
+    throwError "kframe: expected a goal `r' ≡ r except W`, got{indentExpr target}"
+  let args := target.getAppArgs
+  let R := args[0]!; let inst := args[1]!; let W := args[2]!
+  let nameTy ← whnfD (mkApp2 (mkConst ``Kraken.RegFile.Name) R inst)
+  let wElems ← literalListElems W
+  let eqs ← frameEqsInContext
+  let eqStx ← eqs.mapM fun e => do
+    let t ← Term.exprToSyntax e
+    `(Lean.Parser.Tactic.simpLemma| $t:term)
+  let g ← getMainGoal
+  -- unfold `EqExcept` to `∀ n, n ∉ W → get r' n = get r n`
+  let g ← g.replaceTargetDefEq (← whnfD target)
+  let (fvars, g) ← g.introN 2 [`n, `hn]
+  let leaves ← casesRegName g fvars[0]!
+  let mut remaining := #[]
+  for leaf in leaves do
+    setGoals [leaf]
+    if ← tryClose (← `(tactic| with_reducible rfl)) then continue
+    if ← tryClose (← `(tactic| rfl)) then continue
+    -- the register name after `cases`: the argument of `get` in the goal
+    let (n, hn, leaf) ← leaf.withContext do
+      let t := (← instantiateMVars (← leaf.getType)).consumeMData
+      let some (_, lhs, rhs) := t.eq? | throwError "kframe: unexpected goal{indentExpr t}"
+      let n := lhs.getArg! 3
+      let hn := (← getLCtx).decls.toList.filterMap id |>.reverse |>.find? fun (d : LocalDecl) =>
+        d.type.consumeMData.isAppOf ``Not
+      -- expose the register projections (`r'.X13 = r.X13`) for rewriting with frame equations
+      let leaf ← leaf.replaceTargetDefEq (← mkEq (← whnfD lhs) (← whnfD rhs))
+      pure (n, hn, leaf)
+    setGoals [leaf]
+    if let some i ← findRegIdx? wElems n then
+      let closed ← leaf.withContext do
+        let some hnDecl := hn | pure false
+        try
+          let mem ← mkMemProof nameTy n W i
+          let prf ← mkAppOptM ``absurd #[none, some (← leaf.getType), some mem, some hnDecl.toExpr]
+          leaf.assign prf
+          pure true
+        catch _ => pure false
+      if closed then continue
+    if !eqStx.isEmpty then
+      if ← tryClose (← `(tactic| (simp only [$eqStx,*]; done))) then continue
+      if ← tryClose (← `(tactic| (simp only [$eqStx,*]; rfl))) then continue
+    remaining := remaining.push leaf
+  setGoals remaining.toList
+
 /-- Finish a post-`kstep` goal: apply `Eventually.done` if needed, zeta-reduce and normalise the
 goal and hypotheses (`dsimp +zetaDelta only [extra lemmas] at *`, the `BitVec`/`UInt64` normal form
 used by `kstep`, then `simp only [extra lemmas, ↓reduceIte]` on the goal), split conjunctions and
@@ -699,7 +858,13 @@ elab_rules : tactic
         if lemmaNames.contains decl.userName then continue
         if ← isProp decl.type then acc := acc.push (mkIdent decl.userName)
       pure acc
-    evalTactic (← `(tactic| (try simp only [$lemmas,*, ↓reduceIte] at $hyps* ⊢)))
+    -- Field equations of `≡ … except` hypotheses normalise registers to the oldest state.
+    let frameEqs ← frameEqsInContext
+    let frameStx ← frameEqs.mapM fun e => do
+      let t ← Term.exprToSyntax e
+      `(Lean.Parser.Tactic.simpLemma| $t:term)
+    let allLemmas := lemmas ++ frameStx ++ #[← `(Lean.Parser.Tactic.simpLemma| ↓reduceIte)]
+    evalTactic (← `(tactic| (try simp only [$allLemmas,*] at $hyps* ⊢)))
     if (← getUnsolvedGoals).isEmpty then return
     let leaves ← splitConjGoals (← getMainGoal)
     let mut remaining : List MVarId := []
@@ -708,7 +873,9 @@ elab_rules : tactic
       setGoals [g]
       let t := (← instantiateMVars (← g.getType)).consumeMData
       let closers : List (TSyntax `tactic) ←
-        if mentionsConst t [``Kraken.Executable.label, ``Labels.label, ``Kraken.Executable.addrOf,
+        if t.isAppOf ``Kraken.RegFile.EqExcept then
+          pure [← `(tactic| kframe)]
+        else if mentionsConst t [``Kraken.Executable.label, ``Labels.label, ``Kraken.Executable.addrOf,
             ``Kraken.Layout.addrOf] then
           pure [← `(tactic| kaddr $p)]
         else if mentionsConst t [``Std.ExtHashMap.sep, ``List.At] then
@@ -747,6 +914,7 @@ private def tryCloseSimple (g : MVarId) : TacticM Bool := do
   setGoals [g]
   let ok ← try
       evalTactic (← `(tactic| (try dsimp only)))
+      if (← getUnsolvedGoals).isEmpty then pure true else
       let g ← getMainGoal
       let leaves ← splitConjGoals g
       let mut all := true

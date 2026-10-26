@@ -7,6 +7,7 @@ public import Kraken.Mem
 meta import Kraken.Mem
 public import Kraken.Semantics
 meta import Kraken.Semantics
+public import Kraken.Frame
 public import Lean.ToExpr
 meta import Lean.Elab.Deriving.ToExpr
 
@@ -166,6 +167,19 @@ structure Reg64s where
 @[kstep] def Reg64s.setRegOrZr (s : Reg64s) {w} (r : RegOrZr w) (v : w.type) : Reg64s := match r with
   | .low r .W64 => s.setRegOrZr64 r v
   | .low r .W32 => s.setRegOrZr64 r (v.zeroExtend _)
+
+/-- Register file view of `Reg64s` for frame ("modifies") clauses: `r' ≡ r except [X13, SP]`. -/
+instance : Kraken.RegFile Reg64s where
+  Name := XRegOrSp
+  get r n := match n with
+    | .reg x => r.getXReg x
+    | .SP => r.SP
+  names := [.SP,
+    .reg .X0, .reg .X1, .reg .X2, .reg .X3, .reg .X4, .reg .X5, .reg .X6, .reg .X7,
+    .reg .X8, .reg .X9, .reg .X10, .reg .X11, .reg .X12, .reg .X13, .reg .X14, .reg .X15,
+    .reg .X16, .reg .X17, .reg .X18, .reg .X19, .reg .X20, .reg .X21, .reg .X22, .reg .X23,
+    .reg .X24, .reg .X25, .reg .X26, .reg .X27, .reg .X28, .reg .X29, .reg .X30]
+  mem_names n := by rcases n with x | _ <;> (try cases x) <;> simp
 
 /-- AAPCS64 callee-saved general-purpose registers (`X19`–`X29`). -/
 @[grind]
