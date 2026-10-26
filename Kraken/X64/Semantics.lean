@@ -9,6 +9,7 @@ public import Kraken.Mem
 meta import Kraken.Mem
 public import Kraken.Semantics
 meta import Kraken.Semantics
+public import Kraken.Frame
 public import Kraken.X64.Syntax
 meta import Kraken.X64.Syntax
 public import Lean.ToExpr
@@ -100,6 +101,18 @@ structure Reg64s where
   | .low r w => s.set64 r ((s.get64 r).replaceLow v)
   | .ah | .bh | .ch | .dh => let old := s.get64 r.base;
     s.set64 r.base (old.replaceLow (BitVec.append v (s.get (.low r.base .W8))))
+
+/-- Register file view of `Reg64s` for frame ("modifies") clauses: `r' ≡ r except [rax, rcx]`. -/
+instance : Kraken.RegFile Reg64s where
+  Name := Reg64
+  get r n := match n with
+    | .rax => r.rax | .rbx => r.rbx | .rcx => r.rcx | .rdx => r.rdx
+    | .rsi => r.rsi | .rdi => r.rdi | .rsp => r.rsp | .rbp => r.rbp
+    | .r8 => r.r8 | .r9 => r.r9 | .r10 => r.r10 | .r11 => r.r11
+    | .r12 => r.r12 | .r13 => r.r13 | .r14 => r.r14 | .r15 => r.r15
+  names := [.rax, .rbx, .rcx, .rdx, .rsi, .rdi, .rsp, .rbp,
+    .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15]
+  mem_names n := by cases n <;> simp
 
 /-- System V AMD64 ABI callee-saved general-purpose registers (`rbx`, `rbp`, `r12`–`r15`). -/
 @[grind]
