@@ -134,15 +134,94 @@ def Directives.interp {D MD : Type} [ArchDirective D MD] [Labels]
 
 namespace Kraken.Executable
 
-@[reducible]
+@[instance_reducible]
 def labels {D MD : Type} [ArchDirective D MD]
     (e : Kraken.Executable D) : Labels :=
   { label l := (e.withAddresses.findSome?
       (fun {directive, addr, ..} => if ArchDirective.label? directive = some l then .some addr else .none)).getD (-1) }
 
+@[reducible]
 def label {D MD : Type} [ArchDirective D MD]
     (e : Kraken.Executable D) (l : Label) : Int64 :=
   (e.labels).label l
+
+private theorem findSome?_eq_of_getElem? {α β : Type _} {xs : List α} (p : α → Prop) [DecidablePred p]
+    (f : α → β) {k : Nat} {x : α} (hget : xs[k]? = some x) (hpk : p x)
+    (hprior : ∀ j < k, ∀ y, xs[j]? = some y → ¬p y) :
+    xs.findSome? (fun a => if p a then some (f a) else none) = some (f x) := by
+  induction xs generalizing k with
+  | nil => simp at hget
+  | cons a xs ih =>
+    cases k with
+    | zero =>
+      simp only [List.getElem?_cons_zero, Option.some.injEq] at hget
+      subst hget
+      simp [hpk]
+    | succ k =>
+      have hp0 := hprior 0 (Nat.zero_lt_succ k) a rfl
+      simp only [List.findSome?_cons, hp0, ↓reduceIte]
+      exact ih hget (fun j hj y hy => hprior (j + 1) (Nat.succ_lt_succ hj) y hy)
+
+private theorem findIdx?_eq_some_elim {α : Type _} {p : α → Bool} {xs : List α} {k : Nat}
+    (h : xs.findIdx? p = some k) :
+    ∃ x, xs[k]? = some x ∧ p x = true ∧ (∀ j < k, ∀ y, xs[j]? = some y → p y = false) ∧ k < xs.length := by
+  induction xs generalizing k with
+  | nil => simp at h
+  | cons a xs ih =>
+    rw [List.findIdx?_cons] at h
+    by_cases hp : p a
+    · simp only [hp, ↓reduceIte, Option.some.injEq] at h
+      subst h
+      exact ⟨a, rfl, hp, fun j hj => by omega, Nat.zero_lt_succ _⟩
+    · simp only [hp, Bool.false_eq_true, ↓reduceIte, Option.map_eq_some_iff] at h
+      obtain ⟨k', hk', rfl⟩ := h
+      obtain ⟨x, hx, hpx, hprior, hlt⟩ := ih hk'
+      refine ⟨x, hx, hpx, fun j hj y hy => ?_, Nat.succ_lt_succ hlt⟩
+      cases j with
+      | zero =>
+        simp only [List.getElem?_cons_zero, Option.some.injEq] at hy
+        subst hy
+        simpa using hp
+      | succ j => exact hprior j (Nat.lt_of_succ_lt_succ hj) y hy
+
+theorem label_eq_layout_addrOf {D MD : Type} [ArchDirective D MD]
+    (prog : List D) (l : Label) (k : Nat)
+    (h : prog.findIdx? (fun d => ArchDirective.label? d == some l) = some k)
+    (layout : Kraken.Layout D) :
+    (layout prog).label l = layout.addrOf k := by
+  obtain ⟨d, hd, hpd, hprior, hlt⟩ := findIdx?_eq_some_elim h
+  have hget : (layout prog).withAddresses[k]? =
+      some {directive := d, size := layout.size k, addr := (layout prog).addrOf k} := by
+    rw [Kraken.Executable.getElem?_withAddresses_eq, Kraken.Layout.apply_getElem?, hd]; rfl
+  have hfind : (layout prog).withAddresses.findSome?
+      (fun {directive, addr, ..} => if ArchDirective.label? directive = some l then some addr else none) =
+      some ((layout prog).addrOf k) := by
+    refine findSome?_eq_of_getElem? (fun x => ArchDirective.label? x.directive = some l)
+      (fun x => x.addr) hget (beq_iff_eq.mp hpd) (fun j hj y hy => ?_)
+    rw [Kraken.Executable.getElem?_withAddresses_eq, Kraken.Layout.apply_getElem?] at hy
+    simp only [Option.map_eq_some_iff] at hy
+    obtain ⟨_, ⟨d', hd', rfl⟩, rfl⟩ := hy
+    exact beq_eq_false_iff_ne.mp (hprior j hj d' hd')
+  change ((layout prog).withAddresses.findSome?
+    (fun {directive, addr, ..} => if ArchDirective.label? directive = some l then some addr else none)).getD (-1) =
+    layout.addrOf k
+  rw [hfind, Option.getD_some, Kraken.Executable.addrOf_apply_eq layout prog k (Nat.le_of_lt hlt)]
+
+theorem labels_label_eq_layout_addrOf {D MD : Type} [ArchDirective D MD]
+    (prog : List D) (l : Label) (k : Nat)
+    (h : prog.findIdx? (fun d => ArchDirective.label? d == some l) = some k)
+    (layout : Kraken.Layout D) :
+    ((layout prog).labels).label l = layout.addrOf k :=
+  label_eq_layout_addrOf prog l k h layout
+
+theorem withAddresses_label_eq_layout_addrOf {D MD : Type} [ArchDirective D MD]
+    (prog : List D) (l : Label) (k : Nat)
+    (h : prog.findIdx? (fun d => ArchDirective.label? d == some l) = some k)
+    (layout : Kraken.Layout D) :
+    ((layout prog).withAddresses.findSome?
+      (fun {directive, addr, ..} => if ArchDirective.label? directive = some l then .some addr else .none)).getD (-1) =
+      layout.addrOf k :=
+  label_eq_layout_addrOf prog l k h layout
 
 def directivesFromLabel {D MD : Type} [ArchDirective D MD]
     (e : Kraken.Executable D) (l : Label) : List (Kraken.Sized D) :=
