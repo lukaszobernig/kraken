@@ -111,6 +111,26 @@ theorem tailrec_loop {State Measure : Type _} {Ghost : Sort _}
   intro t_s hQ_t
   apply hQ_t
 
+/-- `tailrec_loop` specialised to a postcondition that does not depend on the measure or the
+ghost state: the loop body either reaches `post` directly or re-establishes the invariant `P`
+at a smaller measure. This removes the duplicated `Q` and the trivial `∀ t, Q → Q` obligation. -/
+theorem tailrec_loop_simple {State Measure : Type _} {Ghost : Sort _}
+  (trans : State → Post → Prop) (post : Post) (initial : State)
+  (P : Measure → Ghost → Post)
+  (lt : Measure → Measure → Prop)
+  (Hwf : WellFounded lt)
+  (v0 : Measure) (g0 : Ghost)
+  (hinit : P v0 g0 initial)
+  (hbody : ∀ v g state, P v g state →
+    Eventually trans (fun mid_s => post mid_s ∨ ∃ v' g', P v' g' mid_s ∧ lt v' v) state) :
+  Eventually trans post initial :=
+  tailrec_loop trans post initial P (fun _ _ => post) lt Hwf v0 g0 hinit
+    (fun v g state hP =>
+      eventually_weaken trans _ _ state
+        (fun _ h => h.elim Or.inl (fun ⟨v', g', hP', hlt⟩ => Or.inr ⟨v', g', hP', hlt, fun _ h => h⟩))
+        (hbody v g state hP))
+    (fun _ h => h)
+
 theorem tailrec_loop_cps {State Measure : Type _} {Ghost : Sort _}
   (trans : State → Post → Prop) (post : Post) (initial : State)
   (P Q : Measure → Ghost → Post)
