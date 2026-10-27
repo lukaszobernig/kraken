@@ -172,6 +172,7 @@ private def withKrakenRecDepth {α : Type} (x : TacticM α) : TacticM α :=
 
 /-- Discharge program address and label offset equalities for program(s) `ps`. -/
 elab "kaddr" ps:ident+ : tactic => withKrakenRecDepth <| withMainContext do
+  evalTactic (← `(tactic| (try unfold Kraken.LoopAuto)))
   let solved ← withReducible do
     try (← getMainGoal).refl; pure true catch _ => pure false
   if solved then return
@@ -607,8 +608,10 @@ elab "kintro" pats:(colGt rcasesPat)* : tactic =>
     let target := (← instantiateMVars (← getMainTarget)).consumeMData
     if target.getAppFn'.constName? == some ``Exists then
       evalTactic (← `(tactic| (refine ⟨?_, ?_⟩; rotate_left)))
+    evalTactic (← `(tactic| (try unfold Kraken.LoopAuto)))
     unless pats.isEmpty do
       evalTactic (← `(tactic| rintro $[$pats:rcasesPat]*))
+    evalTactic (← `(tactic| (try unfold Kraken.LoopAuto at *)))
     evalTactic (← `(tactic| (try dsimp only at *)))
 
 private def unifyTraceWitness (trExpected trActual : Expr) : TacticM Unit := do
@@ -899,6 +902,7 @@ private partial def casesRegName (g : MVarId) (fvar : FVarId) : MetaM (List MVar
   rewriting with frame equations in the context (including view equations derived from `≡ … except`
   hypotheses), or by unfolding the view and rewriting. -/
 elab "kframe" : tactic => withKrakenRecDepth <| withMainContext do
+  evalTactic (← `(tactic| (try unfold Kraken.LoopAuto)))
   let target := (← instantiateMVars (← getMainTarget)).consumeMData
   if target.isAppOfArity ``Kraken.RegFile.EqOn 4 then
     if ← tryClose (← `(tactic| apply Kraken.RegFile.EqOn.refl)) then return
@@ -1355,7 +1359,9 @@ apply the tail-recursive loop rule to an `Eventually` goal.
   invariant, `v₀`/`g₀` the initial measure and ghost; `lt`/`wf` default to `<` on `Nat`.
 * Without `exit`, `tailrec_loop_simple` is used: goals `init : P v₀ g₀ s` and `body`, whose
   conclusion is `post mid ∨ ∃ v' g', P v' g' mid ∧ v' < v` (see `kloop_exit` / `kloop_next`).
-* With `exit`, `tailrec_loop_cps` is used: goals `init : Eventually (Q v₀ g₀ ∨ P v₀ g₀) s`,
+* With `exit`, `tailrec_loop_cps` is used: `Q` may have type `State → Prop` (1 arg),
+  `Measure → State → Prop` (2 args), or `Measure → Ghost → State → Prop` (3 args), producing goals
+  `init : Eventually (Q v₀ g₀ ∨ P v₀ g₀) s`,
   `body` (conclusion `Q v g mid ∨ ∃ v' g', P v' g' mid ∧ v' < v ∧ (∀ t, Q v' g' t → Q v g t)`)
   and `exit : ∀ st, Q v₀ g₀ st → Eventually post st`.
 
@@ -1365,10 +1371,11 @@ In `body` the measure, ghost, state and invariant hypothesis are introduced as `
 **Constant-time loops.** With `(pub := pub₀)` the goal is a traced specification
 (`∃ tr, ∀ s₀ sec, pre s₀ sec → TracedEventually e (post s₀ sec) tr ⟨s₀, pc⟩`, as produced by
 `kpack_secrets`; a `Spec … (trace := some tr)` goal is packed first) and `tailrec_loop_cps_traced`
-is used: `inv`/`exit` have type `Measure → Pub → MD → Secret → Ghost → State → Prop`, `ghost` is
-`g₀ : MD → Secret → Ghost`, and `(pubinv := Inv)` (default `fun _ _ => True`) is the invariant on
-measure and public data. Goals: `init` (`(∃ tr, …) ∨ (Inv v₀ pub₀ ∧ ∃ tr, …)`), `body` with
-`v pub hpub` introduced (`(∃ tr, …) ∨ ∃ v' pub', lt v' v ∧ Inv v' pub' ∧ ∃ tr, …`) and `post`;
+is used: `inv`/`exit` have type `Measure → Pub → MD → Secret → Ghost → State → Prop` (or without
+`Ghost` when `ghost` is omitted; `exit` defaults to `post`), `ghost` is `g₀ : MD → Secret → Ghost`,
+and `(pubinv := Inv)` (default `fun _ _ => True`) is the invariant on measure and public data.
+Goals: `init` (`(∃ tr, …) ∨ (Inv v₀ pub₀ ∧ ∃ tr, …)`), `body` with `v pub hpub` introduced
+(`(∃ tr, …) ∨ ∃ v' pub', lt v' v ∧ Inv v' pub' ∧ ∃ tr, …`) and (when `exit` is given) `post`;
 `kloop_exit`, `kloop_next v' pub'` and `kintro` take it from there. -/
 syntax (name := kloop) "kloop" (" at " str)? (ppSpace kloopArg)+ (" with " (ppSpace colGt rcasesPat)+)? : tactic
 
@@ -1408,18 +1415,58 @@ elab_rules : tactic
       | _ => throwErrorAt arg "kloop: unknown argument `{key}` (expected inv, exit, measure, ghost, lt, wf, pub, pubinv, pc, writes, preserves, state)"
     let some inv := inv? | throwError "kloop: missing `(inv := …)`"
     let some v0Stx := measure? | throwError "kloop: missing `(measure := …)`"
+    let extractRegIdents (val : Term) (key : Name) : TacticM (Array Ident) := do
+      match val with
+      | `([$ts:term,*]) =>
+        ts.getElems.mapM fun t =>
+          if t.raw.isIdent then pure ⟨t.raw⟩
+          else throwErrorAt t "kloop: `{key}` expects register or view identifiers"
+      | _ => throwErrorAt val "kloop: `{key}` expects `[r, …]`"
     -- Constant-time loop: delegate to `tailrec_loop_cps_traced`.
     if let some pub0 := pub? then
-      let some exitQ := exit? | throwError "kloop: a constant-time loop needs `(exit := …)`"
-      let some g0 := ghost? | throwError "kloop: a constant-time loop needs `(ghost := g₀)` with `g₀ : MD → Secret → Ghost`"
       let pubInv ← match pubinv? with
         | some t => pure t
         | none => `(fun _ _ => True)
       -- a `∃ tr, ∀ s₀ secrets…, Spec … (trace := some tr) …` goal is packed first
       let target := (← instantiateMVars (← getMainTarget)).consumeMData
+      let prog? := findLayoutProg? target
       if target.find? (·.isConstOf ``Kraken.Executable.Spec) |>.isSome then
         evalTactic (← `(tactic| kpack_secrets))
-      let mut rule : Term ← `(tailrec_loop_cps_traced _ (Inv := $pubInv) (P := $inv) (Q := $exitQ)
+      let g0 ← match ghost? with
+        | some g => pure g
+        | none => `(fun _ _ => ())
+      let liftCtNoGhost (f : Term) : TacticM Term := do
+        match ghost? with
+        | some _ => pure f
+        | none => `(fun v pub s₀ sec _ st => $f v pub s₀ sec st)
+      let mut invCt ← liftCtNoGhost inv
+      if atLbl?.isSome || pc?.isSome || writes?.isSome || preserves?.isSome then
+        let vId := mkIdent (← mkFreshUserName `v)
+        let pubId := mkIdent (← mkFreshUserName `pub)
+        let s0Id := mkIdent (← mkFreshUserName `s₀)
+        let secId := mkIdent (← mkFreshUserName `sec)
+        let gId := mkIdent (← mkFreshUserName `g)
+        let stId := mkIdent (← mkFreshUserName `st)
+        let mut bodyStx : Term ← `($invCt $vId $pubId $s0Id $secId $gId $stId)
+        if let some wVal := writes? then
+          let rs ← extractRegIdents wVal `writes
+          bodyStx ← `(Kraken.LoopAuto (($stId).data.regs ≡ ($s0Id).regs except [$rs,*]) ∧ $bodyStx)
+        if let some pVal := preserves? then
+          let rs ← extractRegIdents pVal `preserves
+          bodyStx ← `(Kraken.LoopAuto (($stId).data.regs ≡ ($s0Id).regs on [$rs,*]) ∧ $bodyStx)
+        if let some e := pc? then
+          bodyStx ← `(Kraken.LoopAuto (($stId).pc = $e) ∧ $bodyStx)
+        if let some lbl := atLbl? then
+          let some progName := prog?
+            | throwError "kloop: could not determine program from goal for `at {lbl}`"
+          let layoutId := mkIdent `layout
+          let progId := mkIdent progName
+          bodyStx ← `(Kraken.LoopAuto (($stId).pc = ($layoutId $progId).label $lbl) ∧ $bodyStx)
+        invCt ← `(fun $vId $pubId $s0Id $secId $gId $stId => $bodyStx)
+      let exitQ ← match exit? with
+        | some q => liftCtNoGhost q
+        | none => `(fun _ _ s₀ sec _ => _)
+      let mut rule : Term ← `(tailrec_loop_cps_traced _ (Inv := $pubInv) (P := $invCt) (Q := $exitQ)
         (v0 := $v0Stx) (pub0 := $pub0) (g0 := $g0))
       match lt?, wf? with
         | some l, some w => rule ← `($rule (lt := $l) (Hwf := $w))
@@ -1428,6 +1475,16 @@ elab_rules : tactic
       evalTactic (← `(tactic| apply $rule))
       let [gInit, gBody, gPost] ← getGoals
         | throwError "kloop: unexpected goals after applying `tailrec_loop_cps_traced`"
+      let postGoals ← match exit? with
+        | some _ =>
+          setGoals [gPost]
+          evalTactic (← `(tactic| (try dsimp only)))
+          tagGoals `post
+          getGoals
+        | none =>
+          setGoals [gPost]
+          evalTactic (← `(tactic| exact ⟨[], fun _ _ _ h => TracedEventually.done h⟩))
+          pure []
       setGoals [gInit]
       evalTactic (← `(tactic| (try dsimp only)))
       tagGoals `init
@@ -1446,10 +1503,6 @@ elab_rules : tactic
       evalTactic (← `(tactic| (try dsimp only)))
       tagGoals `body
       let bodyGoals ← getGoals
-      setGoals [gPost]
-      evalTactic (← `(tactic| (try dsimp only)))
-      tagGoals `post
-      let postGoals ← getGoals
       setGoals (initGoals ++ bodyGoals ++ postGoals)
       return
     let target := (← instantiateMVars (← getMainTarget)).consumeMData
@@ -1475,23 +1528,43 @@ elab_rules : tactic
     -- Invariant (and exit condition).
     let invType ← mkArrow measureType (← mkArrow ghostType postType)
     let invTypeNoGhost ← mkArrow measureType postType
+    let lift1 (f : Expr) : MetaM Expr :=
+      withLocalDeclD `v measureType fun v =>
+        withLocalDeclD `g ghostType fun g =>
+          withLocalDeclD `st stateType fun s => do
+            mkLambdaFVars #[v, g, s] (mkApp f s).headBeta
+    let lift2 (f : Expr) : MetaM Expr :=
+      withLocalDeclD `v measureType fun v =>
+        withLocalDeclD `g ghostType fun g =>
+          withLocalDeclD `st stateType fun s => do
+            mkLambdaFVars #[v, g, s] (mkAppN f #[v, s]).headBeta
+    let tryElab (stx : Term) (ty : Expr) : TacticM (Option Expr) := do
+      let s ← saveState
+      try
+        let e ← Tactic.withoutRecover (Tactic.elabTermEnsuringType stx ty)
+        Term.synthesizeSyntheticMVarsNoPostponing
+        if (← getThe Core.State).messages.hasErrors then
+          s.restore
+          return none
+        return some e
+      catch _ =>
+        s.restore
+        return none
     let elabInv (stx : Term) : TacticM Expr := do
       match ghost? with
-      | some _ => Tactic.elabTermEnsuringType stx invType
+      | some _ =>
+        if let some f ← tryElab stx invType then return f
+        if let some f ← tryElab stx invTypeNoGhost then return ← lift2 f
+        Tactic.elabTermEnsuringType stx invType
       | none =>
-        let f ← Tactic.elabTermEnsuringType stx invTypeNoGhost
-        withLocalDeclD `v measureType fun v =>
-          withLocalDeclD `g ghostType fun g =>
-            withLocalDeclD `st stateType fun s => do
-              mkLambdaFVars #[v, g, s] (mkAppN f #[v, s]).headBeta
+        lift2 (← Tactic.elabTermEnsuringType stx invTypeNoGhost)
+    let elabExit (stx : Term) : TacticM Expr := do
+      if let some f ← tryElab stx postType then return ← lift1 f
+      if let some f ← tryElab stx invTypeNoGhost then return ← lift2 f
+      match ghost? with
+      | some _ => Tactic.elabTermEnsuringType stx invType
+      | none => lift2 (← Tactic.elabTermEnsuringType stx invTypeNoGhost)
     let P_user ← elabInv inv
-    let extractRegIdents (val : Term) (key : Name) : TacticM (Array Ident) := do
-      match val with
-      | `([$ts:term,*]) =>
-        ts.getElems.mapM fun t =>
-          if t.raw.isIdent then pure ⟨t.raw⟩
-          else throwErrorAt t "kloop: `{key}` expects register or view identifiers"
-      | _ => throwErrorAt val "kloop: `{key}` expects `[r, …]`"
     let P ←
       if atLbl?.isNone && pc?.isNone && writes?.isNone && preserves?.isNone then
         pure P_user
@@ -1534,7 +1607,7 @@ elab_rules : tactic
                 let pcExpr ← Tactic.elabTermEnsuringType pcStx (mkSort .zero)
                 body := mkApp2 (mkConst ``And) pcExpr body
               mkLambdaFVars #[v, g, s] body
-    let Q? ← exit?.mapM elabInv
+    let Q? ← exit?.mapM elabExit
     -- Well-founded order on the measure.
     let (lt, wf) ← match lt?, wf? with
       | some l, some w =>
