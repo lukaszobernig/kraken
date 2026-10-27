@@ -91,54 +91,6 @@ bn_sub_words:
 
 /-! ## Helper Lemmas for Multi-Limb Carry/Borrow Arithmetic -/
 
-abbrev adcsWord (a_bs b_bs : List UInt8) (c : Bool) : BitVec 64 :=
-  BitVec.ofInt 64 (Int.ofBytes a_bs) +
-  BitVec.ofInt 64 (Int.ofBytes b_bs) +
-  BitVec.ofNat 64 c.toNat
-
-/-- The carry flag after `adcs` on the two limbs (the semantics' own flag function). -/
-abbrev adcsCarry (a_bs b_bs : List UInt8) (c : Bool) : Bool :=
-  (StatusFlags.adcs (BitVec.ofInt 64 (Int.ofBytes a_bs)) (BitVec.ofInt 64 (Int.ofBytes b_bs)) c).c
-
-theorem adcs_step_bytes (a_bs b_bs : List UInt8) (c : Bool)
-    (ha : a_bs.length = 8) (hb : b_bs.length = 8) :
-    Int.ofBytes (Int.toBytes 8 (adcsWord a_bs b_bs c).toInt) +
-      (if adcsCarry a_bs b_bs c then 1 else 0) * 256 ^ 8 =
-      Int.ofBytes a_bs + Int.ofBytes b_bs + (if c then 1 else 0) := by
-  have h := StatusFlags.adcs_toNat (BitVec.ofInt 64 (Int.ofBytes a_bs))
-    (BitVec.ofInt 64 (Int.ofBytes b_bs)) c (by decide)
-  rw [Int.ofBytes_toNat_ofInt_64 a_bs ha, Int.ofBytes_toNat_ofInt_64 b_bs hb] at h
-  dsimp only [adcsWord, adcsCarry]
-  rw [Int.ofBytes_toBytes_8_toInt]
-  rcases Bool.eq_false_or_eq_true (StatusFlags.adcs (BitVec.ofInt 64 (Int.ofBytes a_bs))
-    (BitVec.ofInt 64 (Int.ofBytes b_bs)) c).c with hc | hc <;> cases c <;>
-    simp only [hc, Bool.toNat_true, Bool.toNat_false, Bool.false_eq_true, ↓reduceIte,
-      Int.natCast_zero, Int.natCast_one] at h ⊢ <;> omega
-
-abbrev sbcsWord (a_bs b_bs : List UInt8) (c : Bool) : BitVec 64 :=
-  BitVec.ofInt 64 (Int.ofBytes a_bs) -
-  BitVec.ofInt 64 (Int.ofBytes b_bs) -
-  BitVec.ofNat 64 (!c).toNat
-
-/-- The carry flag after `sbcs` on the two limbs (the semantics' own flag function). -/
-abbrev sbcsCarry (a_bs b_bs : List UInt8) (c : Bool) : Bool :=
-  (StatusFlags.sbcs (BitVec.ofInt 64 (Int.ofBytes a_bs)) (BitVec.ofInt 64 (Int.ofBytes b_bs)) c).c
-
-theorem sbcs_step_bytes (a_bs b_bs : List UInt8) (c : Bool)
-    (ha : a_bs.length = 8) (hb : b_bs.length = 8) :
-    Int.ofBytes (Int.toBytes 8 (sbcsWord a_bs b_bs c).toInt) -
-      (if sbcsCarry a_bs b_bs c then 0 else 1) * 256 ^ 8 =
-      Int.ofBytes a_bs - Int.ofBytes b_bs - (if c then 0 else 1) := by
-  have h := StatusFlags.sbcs_toNat (BitVec.ofInt 64 (Int.ofBytes a_bs))
-    (BitVec.ofInt 64 (Int.ofBytes b_bs)) c (by decide)
-  rw [Int.ofBytes_toNat_ofInt_64 a_bs ha, Int.ofBytes_toNat_ofInt_64 b_bs hb] at h
-  dsimp only [sbcsWord, sbcsCarry]
-  rw [Int.ofBytes_toBytes_8_toInt]
-  rcases Bool.eq_false_or_eq_true (StatusFlags.sbcs (BitVec.ofInt 64 (Int.ofBytes a_bs))
-    (BitVec.ofInt 64 (Int.ofBytes b_bs)) c).c with hc | hc <;> cases c <;>
-    simp only [hc, Bool.not_true, Bool.not_false, Bool.toNat_true, Bool.toNat_false,
-      Bool.false_eq_true, ↓reduceIte, Int.natCast_zero, Int.natCast_one] at h ⊢ <;> omega
-
 theorem Int.ofBytes_take_16 (bs : List UInt8) (h : 16 ≤ bs.length) :
     Int.ofBytes (bs.take 16) =
       Int.ofBytes (bs.take 8) + 256 ^ 8 * Int.ofBytes ((bs.drop 8).take 8) := by
@@ -164,46 +116,30 @@ theorem pow_256_16_mul_pred (v : Nat) (hv : 0 < v) :
     (256 : Int) ^ 16 * 256 ^ (16 * (v - 1)) = 256 ^ (16 * v) := by
   rw [← Int.pow_add, show 16 + 16 * (v - 1) = 16 * v by omega]
 
-@[simp]
-theorem UInt64.toNat_cset_cs (c : Bool) :
-    ((UInt64.ofBitVec (if !c then 0#64 else 1#64) : UInt64).toNat : Int) = if c then 1 else 0 := by
-  cases c <;> rfl
-
-@[simp]
-theorem UInt64.toNat_cset_cc (c : Bool) :
-    ((UInt64.ofBitVec (if c then 0#64 else 1#64) : UInt64).toNat : Int) = if c then 0 else 1 := by
-  cases c <;> rfl
-
-theorem UInt64.toNat_cset_le_one (c : Bool) :
-    (UInt64.ofBitVec (if c then 0#64 else 1#64) : UInt64).toNat ≤ 1 := by
-  cases c <;> decide
-
 /-! ## Verification of `bn_add_words` -/
 
-theorem bn_add_words_correct [layout : Layout] [Layout.Valid bn_add_words] (s₀ : MachineData)
-    (num : Nat) (rp ap bp : List UInt8) (R : DataMem → Prop) :
-    (layout bn_add_words).Spec s₀
-      (pre :=
-        s₀.regs.X3.toNat = num ∧
-        8 * num ≤ 2 ^ 64 ∧
-        rp.length = 8 * num ∧
-        ap.length = 8 * num ∧
-        bp.length = 8 * num ∧
-        (s₀.dmem =⋆ rp @ s₀.regs.X0 ⋆ ap @ s₀.regs.X1 ⋆ bp @ s₀.regs.X2 ⋆ R))
-      (post := fun st =>
-        st.pc = Int64.ofBitVec s₀.regs.X30.toBitVec ∧
-        st.data.regs.SP = s₀.regs.SP ∧
-        st.data.regs.CalleeSavedEq s₀.regs ∧
-        st.data.regs.X0.toNat ≤ 1 ∧
-        ∃ out : List UInt8,
-          out.length = 8 * num ∧
-          Int.ofBytes out + (st.data.regs.X0.toNat : Int) * 256 ^ (8 * num) =
-            Int.ofBytes ap + Int.ofBytes bp ∧
-          (st.data.dmem =⋆ out @ s₀.regs.X0 ⋆ ap @ s₀.regs.X1 ⋆ bp @ s₀.regs.X2 ⋆ R)) := by
+block_spec bn_add_words_correct bn_add_words s₀
+  (num : Nat) (rp ap bp : List UInt8) (R : DataMem → Prop)
+  (pre :=
+    s₀.regs.X3.toNat = num ∧
+    8 * num ≤ 2 ^ 64 ∧
+    rp.length = 8 * num ∧
+    ap.length = 8 * num ∧
+    bp.length = 8 * num ∧
+    (s₀.dmem =⋆ rp @ s₀.regs.X0 ⋆ ap @ s₀.regs.X1 ⋆ bp @ s₀.regs.X2 ⋆ R))
+  (post := fun st =>
+    st.pc = Int64.ofBitVec s₀.regs.X30.toBitVec ∧
+    st.data.regs.SP = s₀.regs.SP ∧
+    st.data.regs.CalleeSavedEq s₀.regs ∧
+    st.data.regs.X0.toNat ≤ 1 ∧
+    ∃ out : List UInt8,
+      out.length = 8 * num ∧
+      Int.ofBytes out + (st.data.regs.X0.toNat : Int) * 256 ^ (8 * num) =
+        Int.ofBytes ap + Int.ofBytes bp ∧
+      (st.data.dmem =⋆ out @ s₀.regs.X0 ⋆ ap @ s₀.regs.X1 ⋆ bp @ s₀.regs.X2 ⋆ R)) := by
   rintro ⟨h_x3, h_num_bound, h_rp_len, h_ap_len, h_bp_len, h_mem⟩
-  kloop
+  kloop at ".Ladd_loop"
     (inv := fun v (rp_ptr, ap_ptr, bp_ptr, rp_bs, ap_bs, bp_bs, c, frame) st =>
-      st.pc = (layout bn_add_words).label ".Ladd_loop" ∧
       0 < v ∧
       16 * v + 8 * (num % 2) ≤ 2 ^ 64 ∧
       st.data.regs.X8.toNat = v ∧
@@ -245,7 +181,6 @@ theorem bn_add_words_correct [layout : Layout] [Layout.Valid bn_add_words] (s₀
     by_cases hn2 : num / 2 = 0
     · have h_shift_zero : (X3.toBitVec >>> 1 = 0#64) :=
         (UInt64.ushiftRight_one_eq_zero_iff X3).mpr (by omega)
-      sym => kstep; tactic =>
       kloop_exit
       refine ⟨by kaddr bn_add_words, by grind, ?_, ?_, ?_, rfl, rfl,
         Reg64s.CalleeSavedEq_refl _, [], by simp [hn2], by simp +zetaDelta [hn2, Int.ofBytes], ?_⟩
@@ -257,15 +192,13 @@ theorem bn_add_words_correct [layout : Layout] [Layout.Valid bn_add_words] (s₀
         ecancel
     · have h_shift_nz : ¬ (X3.toBitVec >>> 1 = 0#64) := by
         rw [UInt64.ushiftRight_one_eq_zero_iff]; omega
-      sym => kstep; tactic =>
       kloop_next
-      exact ⟨by kaddr bn_add_words, by omega, by omega, by grind, by grind,
+      exact ⟨by omega, by omega, by grind, by grind,
         rfl, rfl, rfl, rfl, rfl, Reg64s.CalleeSavedEq_refl _, rfl,
         by omega, by omega, by omega, by ecancel⟩
   · by_cases hv1 : v = 1
     · subst hv1
       kprologue bn_add_words at ".Ladd_loop" to ".Ladd_tail" with s
-      sym => kstep; tactic =>
       kloop_exit
       refine ⟨by kaddr bn_add_words, h_x3_mod, by grind, by grind, by grind,
         h_x30, h_sp, h_cs, ?_⟩
@@ -290,7 +223,7 @@ theorem bn_add_words_correct [layout : Layout] [Layout.Valid bn_add_words] (s₀
       dsimp +zetaDelta only [v0, v1, c1, adcsCarry, adcsWord] at h_step0 h_step1 ⊢
       omega
     · kprologue bn_add_words at ".Ladd_loop" to ".Ladd_tail" with s
-      sym => kstep; tactic =>
+      kstep
       have h_step0 := adcs_step_bytes (ap_bs.take 8) (bp_bs.take 8) flags.c
         (by simp; omega) (by simp; omega)
       have h_step1 := adcs_step_bytes ((ap_bs.drop 8).take 8) ((bp_bs.drop 8).take 8)
@@ -306,7 +239,7 @@ theorem bn_add_words_correct [layout : Layout] [Layout.Valid bn_add_words] (s₀
         (X0.toBitVec + 16#64, X1.toBitVec + 16#64, X2.toBitVec + 16#64,
          rp_bs.drop 16, ap_bs.drop 16, bp_bs.drop 16, c1,
          (Int.toBytes 8 v0 ++ Int.toBytes 8 v1) @ X0 ⋆ (ap_bs.take 16) @ X1 ⋆ (bp_bs.take 16) @ X2 ⋆ frame)
-      · exact ⟨by kaddr bn_add_words, by omega, by omega, by grind, h_x3_mod,
+      · exact ⟨by omega, by omega, by grind, h_x3_mod,
           by grind, by grind, by grind, h_x30, h_sp, h_cs, rfl,
           by simp [h_rp_v]; omega, by simp [h_ap_v]; omega, by simp [h_bp_v]; omega,
           by ecancel⟩
@@ -347,9 +280,9 @@ theorem bn_add_words_correct [layout : Layout] [Layout.Valid bn_add_words] (s₀
     by_cases h_odd : num % 2 = 0
     · kprologue bn_add_words at ".Ladd_tail" with s
       have h_x3_zero : X3.toBitVec = 0#64 := by grind
-      sym => kstep; tactic =>
+      kstep
       kprologue bn_add_words at ".Ladd_exit"
-      sym => kstep; tactic =>
+      kstep
       apply Eventually.done
       have h_16_eq : 16 * (num / 2) = 8 * num := by omega
       have h_ap_take : ap.take (16 * (num / 2)) = ap := List.take_of_length_le (by omega)
@@ -369,7 +302,7 @@ theorem bn_add_words_correct [layout : Layout] [Layout.Valid bn_add_words] (s₀
       kprologue bn_add_words at ".Ladd_tail" with s
       rw [← h_x0_ptr, ← h_x1_ptr, ← h_x2_ptr] at h_mem_q
       have h_x3_nz : ¬ (X3.toBitVec = 0#64) := by grind
-      sym => kstep; tactic =>
+      kstep
       apply Eventually.done
       have h_step_tail := adcs_step_bytes
         (ap.drop (16 * (num / 2)))
@@ -406,30 +339,28 @@ theorem bn_add_words_correct [layout : Layout] [Layout.Valid bn_add_words] (s₀
 
 /-! ## Verification of `bn_sub_words` -/
 
-theorem bn_sub_words_correct [layout : Layout] [Layout.Valid bn_sub_words] (s₀ : MachineData)
-    (num : Nat) (rp ap bp : List UInt8) (R : DataMem → Prop) :
-    (layout bn_sub_words).Spec s₀
-      (pre :=
-        s₀.regs.X3.toNat = num ∧
-        8 * num ≤ 2 ^ 64 ∧
-        rp.length = 8 * num ∧
-        ap.length = 8 * num ∧
-        bp.length = 8 * num ∧
-        (s₀.dmem =⋆ rp @ s₀.regs.X0 ⋆ ap @ s₀.regs.X1 ⋆ bp @ s₀.regs.X2 ⋆ R))
-      (post := fun st =>
-        st.pc = Int64.ofBitVec s₀.regs.X30.toBitVec ∧
-        st.data.regs.SP = s₀.regs.SP ∧
-        st.data.regs.CalleeSavedEq s₀.regs ∧
-        st.data.regs.X0.toNat ≤ 1 ∧
-        ∃ out : List UInt8,
-          out.length = 8 * num ∧
-          Int.ofBytes out - (st.data.regs.X0.toNat : Int) * 256 ^ (8 * num) =
-            Int.ofBytes ap - Int.ofBytes bp ∧
-          (st.data.dmem =⋆ out @ s₀.regs.X0 ⋆ ap @ s₀.regs.X1 ⋆ bp @ s₀.regs.X2 ⋆ R)) := by
+block_spec bn_sub_words_correct bn_sub_words s₀
+  (num : Nat) (rp ap bp : List UInt8) (R : DataMem → Prop)
+  (pre :=
+    s₀.regs.X3.toNat = num ∧
+    8 * num ≤ 2 ^ 64 ∧
+    rp.length = 8 * num ∧
+    ap.length = 8 * num ∧
+    bp.length = 8 * num ∧
+    (s₀.dmem =⋆ rp @ s₀.regs.X0 ⋆ ap @ s₀.regs.X1 ⋆ bp @ s₀.regs.X2 ⋆ R))
+  (post := fun st =>
+    st.pc = Int64.ofBitVec s₀.regs.X30.toBitVec ∧
+    st.data.regs.SP = s₀.regs.SP ∧
+    st.data.regs.CalleeSavedEq s₀.regs ∧
+    st.data.regs.X0.toNat ≤ 1 ∧
+    ∃ out : List UInt8,
+      out.length = 8 * num ∧
+      Int.ofBytes out - (st.data.regs.X0.toNat : Int) * 256 ^ (8 * num) =
+        Int.ofBytes ap - Int.ofBytes bp ∧
+      (st.data.dmem =⋆ out @ s₀.regs.X0 ⋆ ap @ s₀.regs.X1 ⋆ bp @ s₀.regs.X2 ⋆ R)) := by
   rintro ⟨h_x3, h_num_bound, h_rp_len, h_ap_len, h_bp_len, h_mem⟩
-  kloop
+  kloop at ".Lsub_loop"
     (inv := fun v (rp_ptr, ap_ptr, bp_ptr, rp_bs, ap_bs, bp_bs, c, frame) st =>
-      st.pc = (layout bn_sub_words).label ".Lsub_loop" ∧
       0 < v ∧
       16 * v + 8 * (num % 2) ≤ 2 ^ 64 ∧
       st.data.regs.X8.toNat = v ∧
@@ -471,7 +402,6 @@ theorem bn_sub_words_correct [layout : Layout] [Layout.Valid bn_sub_words] (s₀
     by_cases hn2 : num / 2 = 0
     · have h_shift_zero : (X3.toBitVec >>> 1 = 0#64) :=
         (UInt64.ushiftRight_one_eq_zero_iff X3).mpr (by omega)
-      sym => kstep; tactic =>
       kloop_exit
       refine ⟨by kaddr bn_sub_words, by grind, ?_, ?_, ?_, rfl, rfl,
         Reg64s.CalleeSavedEq_refl _, [], by simp [hn2], by dsimp +zetaDelta only; simp [hn2, Int.ofBytes], ?_⟩
@@ -483,15 +413,13 @@ theorem bn_sub_words_correct [layout : Layout] [Layout.Valid bn_sub_words] (s₀
         ecancel
     · have h_shift_nz : ¬ (X3.toBitVec >>> 1 = 0#64) := by
         rw [UInt64.ushiftRight_one_eq_zero_iff]; omega
-      sym => kstep; tactic =>
       kloop_next
-      exact ⟨by kaddr bn_sub_words, by omega, by omega, by grind, by grind,
+      exact ⟨by omega, by omega, by grind, by grind,
         rfl, rfl, rfl, rfl, rfl, Reg64s.CalleeSavedEq_refl _, by dsimp +zetaDelta only; simp,
         by omega, by omega, by omega, by ecancel⟩
   · by_cases hv1 : v = 1
     · subst hv1
       kprologue bn_sub_words at ".Lsub_loop" to ".Lsub_tail" with s
-      sym => kstep; tactic =>
       kloop_exit
       refine ⟨by kaddr bn_sub_words, h_x3_mod, by grind, by grind, by grind,
         h_x30, h_sp, h_cs, ?_⟩
@@ -516,7 +444,7 @@ theorem bn_sub_words_correct [layout : Layout] [Layout.Valid bn_sub_words] (s₀
       dsimp +zetaDelta only [v0, v1, c1, sbcsCarry, sbcsWord] at h_step0 h_step1 ⊢
       omega
     · kprologue bn_sub_words at ".Lsub_loop" to ".Lsub_tail" with s
-      sym => kstep; tactic =>
+      kstep
       have h_step0 := sbcs_step_bytes (ap_bs.take 8) (bp_bs.take 8) flags.c
         (by simp; omega) (by simp; omega)
       have h_step1 := sbcs_step_bytes ((ap_bs.drop 8).take 8) ((bp_bs.drop 8).take 8)
@@ -532,7 +460,7 @@ theorem bn_sub_words_correct [layout : Layout] [Layout.Valid bn_sub_words] (s₀
         (X0.toBitVec + 16#64, X1.toBitVec + 16#64, X2.toBitVec + 16#64,
          rp_bs.drop 16, ap_bs.drop 16, bp_bs.drop 16, c1,
          (Int.toBytes 8 v0 ++ Int.toBytes 8 v1) @ X0 ⋆ (ap_bs.take 16) @ X1 ⋆ (bp_bs.take 16) @ X2 ⋆ frame)
-      · exact ⟨by kaddr bn_sub_words, by omega, by omega, by grind, h_x3_mod,
+      · exact ⟨by omega, by omega, by grind, h_x3_mod,
           by grind, by grind, by grind, h_x30, h_sp, h_cs, rfl,
           by simp [h_rp_v]; omega, by simp [h_ap_v]; omega, by simp [h_bp_v]; omega,
           by ecancel⟩
@@ -572,9 +500,9 @@ theorem bn_sub_words_correct [layout : Layout] [Layout.Valid bn_sub_words] (s₀
     by_cases h_odd : num % 2 = 0
     · kprologue bn_sub_words at ".Lsub_tail" with s
       have h_x3_zero : X3.toBitVec = 0#64 := by grind
-      sym => kstep; tactic =>
+      kstep
       kprologue bn_sub_words at ".Lsub_exit"
-      sym => kstep; tactic =>
+      kstep
       apply Eventually.done
       have h_16_eq : 16 * (num / 2) = 8 * num := by omega
       have h_ap_take : ap.take (16 * (num / 2)) = ap := List.take_of_length_le (by omega)
@@ -594,7 +522,7 @@ theorem bn_sub_words_correct [layout : Layout] [Layout.Valid bn_sub_words] (s₀
       kprologue bn_sub_words at ".Lsub_tail" with s
       rw [← h_x0_ptr, ← h_x1_ptr, ← h_x2_ptr] at h_mem_q
       have h_x3_nz : ¬ (X3.toBitVec = 0#64) := by grind
-      sym => kstep; tactic =>
+      kstep
       apply Eventually.done
       have h_step_tail := sbcs_step_bytes
         (ap.drop (16 * (num / 2)))

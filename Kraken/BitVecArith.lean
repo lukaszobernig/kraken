@@ -145,6 +145,33 @@ theorem toNat_funnel (lo hi : BitVec 64) {k : BitVec 64} (hk1 : 1#64 ≤ k) (hk6
   have hk := toNat_le_63 hk63
   exact toNat_funnel_nat lo hi (by omega)
 
+/-- Multi-limb funnel-shift limb identity: multiplying the funnel-shifted word
+`(lo >> k) | (hi << (-k))` by `2^k` and adding the low `k` bits of `lo` yields
+`lo + 2^64 · (low k bits of hi)`. -/
+theorem toNat_funnel_mul_add_and_mask (lo hi : BitVec 64) {k : BitVec 64}
+    (hk1 : 1#64 ≤ k) (hk63 : k ≤ 63#64) :
+    let mask := (1#64 <<< (k % 64#64)) - 1#64
+    2 ^ k.toNat * ((lo >>> (k % 64#64)) ||| (hi <<< ((0#64 - k) % 64#64))).toNat +
+      (lo &&& mask).toNat =
+      lo.toNat + 2 ^ 64 * (hi &&& mask).toNat := by
+  dsimp only
+  rw [toNat_funnel lo hi hk1 hk63, umod_64_eq_self hk63, toNat_and_mask lo hk63,
+    toNat_and_mask hi hk63]
+  have := two_pow_mul_two_pow_sub hk63
+  have := Nat.div_add_mod lo.toNat (2 ^ k.toNat)
+  grind
+
+/-- Multi-limb right-shift top-limb identity: multiplying `hi >> k` by `2^k` and adding the low
+`k` bits of `hi` reconstructs `hi`. -/
+theorem toNat_ushiftRight_mul_add_and_mask (hi : BitVec 64) {k : BitVec 64}
+    (hk63 : k ≤ 63#64) :
+    let mask := (1#64 <<< (k % 64#64)) - 1#64
+    2 ^ k.toNat * (hi >>> (k % 64#64)).toNat + (hi &&& mask).toNat = hi.toNat := by
+  dsimp only
+  rw [BitVec.ushiftRight_eq', umod_64_eq_self hk63, BitVec.toNat_ushiftRight,
+    Nat.shiftRight_eq_div_pow, toNat_and_mask hi hk63]
+  exact Nat.div_add_mod hi.toNat (2 ^ k.toNat)
+
 /-! ### Clamped count-trailing-zeros: `rbit; orr #1; clz`
 
 `(x.reverse ||| 1).clz` is `min (ctz x) (w - 1)`, the clamped trailing-zero count computed by the
@@ -429,5 +456,17 @@ stated on the simp normal form of the projections, so they apply after them. -/
 end
 
 end BitVec
+
+theorem UInt64.getLsbD_zero_eq_false_mod2 (x : UInt64) (h : x.toBitVec.getLsbD 0 = false) :
+    x.toNat % 2 = 0 := by
+  simp only [BitVec.getLsbD, Nat.testBit_zero, decide_eq_false_iff_not] at h
+  rw [← UInt64.toNat_toBitVec]
+  omega
+
+theorem UInt64.getLsbD_zero_eq_true_mod2 (x : UInt64) (h : x.toBitVec.getLsbD 0 = true) :
+    x.toNat % 2 = 1 := by
+  simp only [BitVec.getLsbD, Nat.testBit_zero, decide_eq_true_eq] at h
+  rw [← UInt64.toNat_toBitVec]
+  exact h
 
 end
