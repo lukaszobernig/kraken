@@ -121,10 +121,9 @@ block_spec memcmp_ct_correct memcmp (p_a p_b : BitVec 64) (n : Nat)
     st.data.regs.SP = s₀.regs.SP ∧
     st.data.regs.CalleeSavedEq s₀.regs ∧
     (st.data.dmem =⋆ a @ p_a ⋆ b @ p_b ⋆ R)) := by
-  kloop
+  kloop at "loop"
     (pubinv := fun v _ => 0 < v)
     (inv := fun v (a_ptr, b_ptr) s₀ _ (a_bs, b_bs, acc, frame) st =>
-      st.pc = (layout memcmp).label "loop" ∧
       st.data.regs.X2.toNat = v ∧
       st.data.regs.X0.toBitVec = a_ptr ∧
       st.data.regs.X1.toBitVec = b_ptr ∧

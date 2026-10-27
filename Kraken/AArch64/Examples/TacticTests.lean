@@ -138,3 +138,54 @@ block_spec loop_exit_preserves beeu_mod_inverse_vartime s
 example (r' r : Reg64s) :
     (r' ≡ r except [beeuX, X13]) = (r' ≡ r except [X3, X4, X5, X6, X7, X13]) := rfl
 
+-- `kloop` with a 1-arg `(exit := fun st => …)` predicate (independent of measure and ghost state),
+-- handling prologue, loop body, and epilogue in a single `kloop` call.
+def count_down_epilogue : Program := parseAArch64("
+  mov x0, #0
+  cbz x1, done
+loop:
+  add x0, x0, #1
+  sub x1, x1, #1
+  cbnz x1, loop
+done:
+  add x0, x0, #10
+")
+
+block_spec count_down_epilogue_correct count_down_epilogue (n : Nat) s₀
+  (writes := [X0, X1])
+  (pre := s₀.regs.X1.toNat = n)
+  (post := fun st => st.data.regs.X0.toBitVec = BitVec.ofNat 64 (n + 10)) := by
+  intro h_x1
+  kloop at "loop" (writes := [X0, X1])
+    (inv := fun v (k : Nat) st =>
+      0 < v ∧
+      v + k = n ∧
+      st.data.regs.X1.toNat = v ∧
+      st.data.regs.X0.toBitVec = BitVec.ofNat 64 k)
+    (exit := fun st =>
+      st.pc = (layout count_down_epilogue).label "done" ∧
+      st.data.regs ≡ s₀.regs except [X0, X1] ∧
+      st.data.regs.X0.toBitVec = BitVec.ofNat 64 n)
+    (measure := n)
+    (ghost := (0 : Nat))
+    with v k ⟨hv, hvk, h_x1_v, h_x0_v⟩
+  · kprologue count_down_epilogue to "loop" with s₀
+    by_cases hn : n = 0
+    · subst hn
+      kloop_exit
+      kfinish count_down_epilogue
+    · kloop_next
+      kfinish count_down_epilogue
+  · kprologue count_down_epilogue at "loop" to "done" with st
+    by_cases hv1 : v = 1
+    · subst hv1
+      kloop_exit
+      kfinish count_down_epilogue
+    · kloop_next (v - 1) (k + 1)
+      kfinish count_down_epilogue
+  · obtain ⟨h_fr_done, h_x0_done⟩ := hst
+    kframe_eqs h_fr_done
+    kprologue count_down_epilogue at "done" with st
+    kfinish count_down_epilogue
+
+
