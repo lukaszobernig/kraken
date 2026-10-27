@@ -50,9 +50,8 @@ theorem memcpy_correct [layout : Layout] [Layout.Valid memcpy] (s₀ : MachineDa
         st.data.regs.CalleeSavedEq s₀.regs ∧
         (st.data.dmem =⋆ src @ s₀.regs.X0 ⋆ src @ s₀.regs.X1 ⋆ R)) := by
   rintro ⟨h_x2, h_dst_len, h_src_len, h_mem⟩
-  kloop
+  kloop at "loop"
     (inv := fun v (dst_ptr, src_ptr, dst_bs, src_bs, frame) st =>
-      st.pc = (layout memcpy).label "loop" ∧
       0 < v ∧
       st.data.regs.X2.toNat = v ∧
       st.data.regs.X3.toBitVec = dst_ptr ∧
@@ -77,23 +76,19 @@ theorem memcpy_correct [layout : Layout] [Layout.Valid memcpy] (s₀ : MachineDa
       ⟨hv, h_x2_v, rfl, rfl, h_x0, h_x30, h_sp, h_cs, h_dst_v, h_src_v, h_mem_v⟩
   · kprologue memcpy to "loop"
     by_cases hn : n = 0
-    · sym => kstep; tactic =>
-      subst hn
+    · subst hn
       obtain rfl := List.eq_nil_of_length_eq_zero h_dst_len
       obtain rfl := List.eq_nil_of_length_eq_zero h_src_len
       kloop_exit
       kfinish memcpy
-    · sym => kstep; tactic =>
-      kloop_next
+    · kloop_next
       kfinish memcpy
   · by_cases hv1 : v = 1
     · subst hv1
       kprologue memcpy at "loop" to "done" with st
-      sym => kstep; tactic =>
       kloop_exit
       kfinish memcpy
     · kprologue memcpy at "loop" to "done" with st
-      sym => kstep; tactic =>
       kloop_next (v - 1) (X3.toBitVec + 1#64, X1.toBitVec + 1#64, dst_bs.drop 1, src_bs.drop 1,
         (src_bs.take 1) @ X3 ⋆ (src_bs.take 1) @ X1 ⋆ frame)
       · kfinish memcpy
@@ -101,5 +96,4 @@ theorem memcpy_correct [layout : Layout] [Layout.Valid memcpy] (s₀ : MachineDa
         exact ⟨hQ_pc, hQ_x0, hQ_x30, hQ_sp, hQ_cs, by ecancel⟩
   · obtain ⟨h_x0, h_x30, h_sp, h_cs, h_mem_q⟩ := hst
     kprologue memcpy at "done" with st
-    sym => kstep; tactic =>
     kfinish memcpy

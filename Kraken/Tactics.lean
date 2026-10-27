@@ -33,6 +33,11 @@ theorem BitVec.ofNat_sub_of_le {w : Nat} (x y : Nat) (h : y ≤ x) :
 theorem Int64.add_sub_cancel' (a b : Int64) : a + (b - a) = b := by
   grind
 
+/-- Marker on loop-invariant conjuncts (`pc` and register frame) synthesized by
+`kloop at "…" (writes/preserves := […])`, so `init`, `body`, and `kloop_next` can peel and
+discharge them automatically without disturbing user-written invariant conjuncts. -/
+@[expose] def Kraken.LoopAuto (P : Prop) : Prop := P
+
 attribute [grind =]
   BitVec.ofInt_natCast
   BitVec.ofNat_add
@@ -316,6 +321,12 @@ private partial def mkAndSplitPat (e : Expr) : TacticM (TSyntax `rcasesPat) := d
   else
     `(rcasesPat| _)
 
+private partial def bodyIsSpec (e : Expr) : Bool :=
+  match e.consumeMData with
+  | .forallE _ _ b _ => bodyIsSpec b
+  | e => e.getAppFn'.constName? == some ``Kraken.Executable.Spec ||
+         e.getAppFn'.constName? == some ``Kraken.Executable.ExecSpec
+
 elab_rules : tactic
   | `(tactic| kprologue $p:ident $[at $kRaw?]? $[take $nRaw?]? $[to $toRaw?]? $[with $s?]?) => withKrakenRecDepth <| withMainContext do
       let targetInit := (← instantiateMVars (← getMainTarget)).consumeMData
@@ -324,15 +335,21 @@ elab_rules : tactic
       let targetEx := (← instantiateMVars (← getMainTarget)).consumeMData
       if targetEx.getAppFn'.constName? == some ``Exists then
         evalTactic (← `(tactic| (refine ⟨?_, ?_⟩; rotate_left)))
-      let target0 := (← instantiateMVars (← getMainTarget)).consumeMData
+      while (← instantiateMVars (← getMainTarget)).consumeMData.headBeta.isForall &&
+            bodyIsSpec (← instantiateMVars (← getMainTarget)).consumeMData.headBeta do
+        let cur := (← instantiateMVars (← getMainTarget)).consumeMData.headBeta
+        let id := mkIdent cur.bindingName!
+        evalTactic (← `(tactic| intro $id:ident))
+      let target0 := (← instantiateMVars (← getMainTarget)).consumeMData.headBeta
       if target0.getAppFn'.constName? == some ``Kraken.Executable.Spec ||
          target0.getAppFn'.constName? == some ``Kraken.Executable.ExecSpec then
         evalTactic (← `(tactic| dsimp only [Kraken.Executable.Spec, Kraken.Executable.ExecSpec]))
-      let target1 := (← instantiateMVars (← getMainTarget)).consumeMData
+      let target1 := (← instantiateMVars (← getMainTarget)).consumeMData.headBeta
       if let .forallE _ reqType _ _ := target1 then
         let pat ← mkAndSplitPat reqType
         evalTactic (← `(tactic| rintro $pat:rcasesPat))
       evalTactic (← `(tactic| (try dsimp only [Kraken.Executable.startAddr_apply])))
+      withMainContext do
       let curTarget := (← instantiateMVars (← getMainTarget)).consumeMData
       let isTraced := curTarget.getAppFn'.constName? == some ``TracedEventually
       let isTracedAccum := curTarget.isAppOfArity ``Eventually 4 &&
@@ -817,15 +834,39 @@ elab_rules : tactic
   if eqs.isEmpty then throwErrorAt h "`{h}` is not a `≡ … except` or `≡ … on` hypothesis"
   let mut hyps ← eqs.mapM fun (nm, prf) => do
     pure { userName := h.getId.appendAfter ("_" ++ nm), type := ← inferType prf, value := prf : Hypothesis }
+  let hType := (← instantiateMVars decl.type).consumeMData
+  let hArgs := hType.getAppArgs
+  let r' := hArgs[hArgs.size - 2]!
+  let r := hArgs[hArgs.size - 1]!
+  -- For `EqExcept`, also derive equations for any unary view `f : R → α` occurring in the goal or
+  -- local context that only reads preserved registers.
+  if hType.isAppOfArity ``Kraken.RegFile.EqExcept 5 then
+    let R := hArgs[0]!
+    if let some rName := R.constName? then
+      let candRef ← IO.mkRef (#[] : Array Name)
+      let collectViews (e : Expr) : MetaM Unit := do
+        e.forEach fun sub => do
+          if let .app (.const c []) _ := sub then
+            if !(`Kraken.RegFile).isPrefixOf c then
+              let nm := c.getString!
+              unless eqs.any (fun (n, _) => n == nm) || (← candRef.get).contains c do
+                if let some cinfo := (← getEnv).find? c then
+                  if let .forallE _ dom body _ := cinfo.type then
+                    if dom.isConstOf rName && !body.isForall && body != mkSort .zero then
+                      candRef.modify (·.push c)
+      collectViews (← instantiateMVars (← getMainTarget))
+      for d in (← getLCtx) do
+        unless d.isImplementationDetail do
+          collectViews (← instantiateMVars d.type)
+      for c in (← candRef.get) do
+        let nm := c.getString!
+        if let some (stmt, value) ← proveViewEq? (mkConst c) r' r eqs then
+          hyps := hyps.push { userName := h.getId.appendAfter ("_" ++ nm), type := stmt, value }
   if let some vs := views? then
     let vs : Array Ident := vs.getElems
-    let hType := (← instantiateMVars decl.type).consumeMData
-    let hArgs := hType.getAppArgs
-    let r' := hArgs[hArgs.size - 2]!
-    let r := hArgs[hArgs.size - 1]!
     for v in vs do
       let nm := v.getId.getString!
-      if eqs.any (fun (n, _) => n == nm) then continue
+      if hyps.any (fun hyp => hyp.userName == h.getId.appendAfter ("_" ++ nm)) then continue
       let f ← Term.elabTerm v none
       let f ← instantiateMVars f
       let some (stmt, value) ← proveViewEq? f r' r eqs
@@ -961,23 +1002,42 @@ elab "kframe" : tactic => withKrakenRecDepth <| withMainContext do
     logInfo m!"kframe: add to writes: [{String.intercalate ", " missingNames.toList}]"
   setGoals remaining.toList
 
-/-- Finish a post-`kstep` goal: apply `Eventually.done` if needed, zeta-reduce and normalise the
-goal and hypotheses (`dsimp +zetaDelta only [extra lemmas] at *`, the `BitVec`/`UInt64` normal form
-used by `kstep`, then `simp only [extra lemmas, ↓reduceIte]` on the goal), split conjunctions and
-`Prop`-valued structures, and discharge the components by `rfl`, `trivial`, `assumption`, `omega`,
-`kaddr p` (label/address goals) or `ecancel` (separation-logic goals). Components that cannot be
-discharged are left to the user, in order of appearance. -/
+syntax (name := tacticKStep) "kstep" optConfig (ppSpace num)? : tactic
+
+private def isEffectsAll (e : Expr) : Bool :=
+  match e with
+  | .letE _ _ _ body _ => isEffectsAll body
+  | .mdata _ e => isEffectsAll e
+  | _ => e.isAppOfArity ``Kraken.Effects.All 3
+
+/-- Finish a goal (running `kstep` first if the goal is still an unstepped `Effects.All`): apply
+`kdone` (`Eventually.done` / `TracedEventually.done` / `TracedGoal.done`) if needed, zeta-reduce and
+normalise the goal and hypotheses (`dsimp +zetaDelta only [extra lemmas] at *`, the `BitVec`/`UInt64`
+normal form used by `kstep`, then `simp only [extra lemmas, ↓reduceIte]` on the goal), split
+conjunctions and `Prop`-valued structures, and discharge the components by `rfl`, `trivial`,
+`assumption`, `omega`, `kaddr p` (label/address goals), `kframe` (register frames), or `ecancel`
+(separation-logic goals). Components that cannot be discharged are left to the user, in order of
+appearance. -/
 syntax (name := kfinish) "kfinish" ident ("[" Lean.Parser.Tactic.simpLemma,* "]")? : tactic
 
 elab_rules : tactic
   | `(tactic| kfinish $p:ident $[[$lemmas,*]]?) => withKrakenRecDepth <| withMainContext do
     let lemmas : Array (TSyntax `Lean.Parser.Tactic.simpLemma) :=
       match lemmas with | some l => l.getElems | none => #[]
+    let goalsBefore := (← getUnsolvedGoals).length
+    if isEffectsAll (← instantiateMVars (← getMainTarget)) then
+      evalTactic (← `(tactic| kstep))
+      if (← getUnsolvedGoals).length > goalsBefore ||
+         ((← getUnsolvedGoals).length > 0 && isEffectsAll (← instantiateMVars (← getMainTarget))) then
+        return
+    withMainContext do
     let tgt := (← instantiateMVars (← getMainTarget)).consumeMData
-    if tgt.isAppOfArity ``Eventually 4 then
-      evalTactic (← `(tactic| apply Eventually.done))
+    if tgt.isAppOfArity ``Eventually 4 || tgt.isAppOfArity ``TracedGoal 4 then
+      evalTactic (← `(tactic| kdone))
+    evalTactic (← `(tactic| (try unfold Kraken.LoopAuto at *)))
     evalTactic (← `(tactic| (try dsimp +zetaDelta only [$lemmas,*] at *)))
-    evalTactic (← `(tactic| (try dsimp +zetaDelta only at *)))
+    if (← getUnsolvedGoals).isEmpty then return
+    withMainContext do
     -- the `BitVec`/`UInt64` normal form of `kstep` (ground conditions and arithmetic are folded
     -- by the default simprocs)
     let nfStx ← (Kraken.Tactic.normalFormLemmas ++ [``Bool.false_eq_true, ``Bool.true_eq_false,
@@ -1054,6 +1114,8 @@ private def findLayoutProg? (e : Expr) : Option Name := do
 /-- Close the main goal (a program-counter equation) by `rfl` or `kaddr p`. -/
 private def closePcGoal (prog? : Option Name) : TacticM Bool := do
   if ← tryClose (← `(tactic| with_reducible rfl)) then return true
+  if !(← instantiateMVars (← getMainTarget)).hasExprMVar then
+    if ← tryClose (← `(tactic| rfl)) then return true
   match prog? with
   | some p => tryClose (← `(tactic| kaddr $(mkIdent p):ident))
   | none => pure false
@@ -1090,19 +1152,24 @@ private def substLeadingVarEq (h : Ident) : TacticM Unit := withMainContext do
   let some decl := (← getLCtx).findFromUserName? h.getId | return
   let t ← whnfR (← instantiateMVars decl.type)
   let isVarEq (e : Expr) : Bool :=
-    match e.consumeMData.eq? with
+    let e := e.consumeMData
+    let e := if e.isAppOfArity ``Kraken.LoopAuto 1 then (e.getArg! 0).consumeMData else e
+    match e.eq? with
     | some (_, lhs, rhs) =>
       (lhs.isFVar && !rhs.containsFVar lhs.fvarId!) || (rhs.isFVar && !lhs.containsFVar rhs.fvarId!)
     | none => false
   if t.isAppOfArity ``And 2 && isVarEq (t.getArg! 0) then
     let hpc := mkIdent (← mkFreshUserName `hpc)
     evalTactic (← `(tactic| obtain ⟨$hpc:ident, $h:ident⟩ := $h:ident))
+    evalTactic (← `(tactic| (try unfold Kraken.LoopAuto at $hpc:ident)))
     evalTactic (← `(tactic| subst $hpc:ident))
   else if isVarEq t then
+    evalTactic (← `(tactic| (try unfold Kraken.LoopAuto at $h:ident)))
     evalTactic (← `(tactic| subst $h:ident))
 
 /-- Introduce the continuation of a `bind`/loop rule: `rintro ⟨st, st_pc⟩ h`, beta-reduce `h`,
-substitute a leading `st_pc = …` conjunct, and destructure the rest with `pat?`. -/
+substitute a leading `st_pc = …` conjunct, peel and expand any `LoopAuto` register-frame conjunct,
+and destructure the rest with `pat?`. -/
 private def introContinuation (st h : Ident) (pat? : Option (TSyntax `rcasesPat)) :
     TacticM Unit := do
   let stPc := mkIdent (st.getId.appendAfter "_pc")
@@ -1111,8 +1178,45 @@ private def introContinuation (st h : Ident) (pat? : Option (TSyntax `rcasesPat)
   evalTactic (← `(tactic| rintro $stPat:rcasesPat $hPat:rcasesPat))
   evalTactic (← `(tactic| (try dsimp only at $h:ident)))
   try substLeadingVarEq h catch _ => pure ()
+  withMainContext do
+    if let some decl := (← getLCtx).findFromUserName? h.getId then
+      let t := (← instantiateMVars decl.type).consumeMData
+      if t.isAppOfArity ``And 2 && (t.getArg! 0).consumeMData.isAppOfArity ``Kraken.LoopAuto 1 then
+        let inner := ((t.getArg! 0).consumeMData.getArg! 0).consumeMData
+        if inner.isAppOf ``Kraken.RegFile.EqExcept || inner.isAppOf ``Kraken.RegFile.EqOn then
+          let hFr := mkIdent `h_fr
+          evalTactic (← `(tactic| obtain ⟨$hFr:ident, $h:ident⟩ := $h:ident))
+          evalTactic (← `(tactic| (try unfold Kraken.LoopAuto at $hFr:ident)))
+          evalTactic (← `(tactic| kframe_eqs $hFr:ident))
   if let some pat := pat? then
     evalTactic (← `(tactic| obtain $pat:rcasesPat := $h:ident))
+
+/-- Peel and discharge leading `Kraken.LoopAuto` (`pc` and register-frame) conjuncts of a loop
+invariant goal using `closePcGoal` and `kframe`. -/
+private partial def peelAutoLoopGoals (prog? : Option Name) : TacticM Unit := withMainContext do
+  if (← getUnsolvedGoals).isEmpty then return
+  let g ← getMainGoal
+  let t := (← instantiateMVars (← g.getType)).consumeMData
+  unless t.isAppOfArity ``And 2 && (t.getArg! 0).consumeMData.isAppOfArity ``Kraken.LoopAuto 1 do
+    return
+  let inner := ((t.getArg! 0).consumeMData.getArg! 0).consumeMData
+  evalTactic (← `(tactic| refine ⟨?_, ?_⟩))
+  let [gHead, gTail] ← getGoals | return
+  setGoals [gHead]
+  evalTactic (← `(tactic| (try unfold Kraken.LoopAuto)))
+  let closed ←
+    if inner.isAppOf ``Kraken.RegFile.EqExcept || inner.isAppOf ``Kraken.RegFile.EqOn then
+      tryClose (← `(tactic| kframe))
+    else
+      closePcGoal prog?
+  if closed then
+    setGoals [gTail]
+    peelAutoLoopGoals prog?
+  else
+    let headGoals ← getGoals
+    setGoals [gTail]
+    peelAutoLoopGoals prog?
+    setGoals (headGoals ++ (← getGoals))
 
 private def rcasesPatIdent? (p : TSyntax `rcasesPat) : Option Name :=
   if p.raw.isOfKind ``Lean.Parser.Tactic.rcasesPat.one then
@@ -1148,6 +1252,9 @@ elab_rules : tactic
       | _ => throwError "kcall: expected at most two patterns (`with [st] pat`)"
     let st := mkIdent stName
     let h := mkIdent (Name.mkSimple ("h" ++ stName.toString))
+    if isEffectsAll (← instantiateMVars (← getMainTarget)) then
+      evalTactic (← `(tactic| kstep))
+    withMainContext do
     let target := (← instantiateMVars (← getMainTarget)).consumeMData
     if target.isAppOf ``TracedEventually then
       evalTactic (← `(tactic| unfold TracedEventually))
@@ -1204,9 +1311,15 @@ elab_rules : tactic
 
 syntax kloopArg := " (" ident " := " term ")"
 
-/-- `kloop (inv := P) [(exit := Q)] (measure := v₀) [(ghost := g₀)] [(lt := r) (wf := h)]
-[(state := st)] [with v g pat]`: apply the tail-recursive loop rule to an `Eventually` goal.
+/-- `kloop [at "label"] [(writes := […]) | (preserves := […])] (inv := P) [(exit := Q)]
+(measure := v₀) [(ghost := g₀)] [(lt := r) (wf := h)] [(state := st)] [with v g pat]`:
+apply the tail-recursive loop rule to an `Eventually` goal.
 
+* `at "label"` (or `(pc := e)`) prepends `st.pc = (layout prog).label "label"` to `inv`, discharging
+  it automatically in `init` and `kloop_next` and substituting it in `body`.
+* `(writes := [r, …])` / `(preserves := [r, …])` prepends `st.data.regs ≡ s₀.regs except/on [r, …]`
+  to `inv`, discharging it with `kframe` in `init` and `kloop_next` and introducing `h_fr` together
+  with its `kframe_eqs` equations (`h_fr_<reg>`, `h_fr_<view>`) in `body`.
 * `P : Measure → Ghost → State → Prop` (or `Measure → State → Prop` without `ghost`) is the loop
   invariant, `v₀`/`g₀` the initial measure and ghost; `lt`/`wf` default to `<` on `Nat`.
 * Without `exit`, `tailrec_loop_simple` is used: goals `init : P v₀ g₀ s` and `body`, whose
@@ -1226,10 +1339,10 @@ is used: `inv`/`exit` have type `Measure → Pub → MD → Secret → Ghost →
 measure and public data. Goals: `init` (`(∃ tr, …) ∨ (Inv v₀ pub₀ ∧ ∃ tr, …)`), `body` with
 `v pub hpub` introduced (`(∃ tr, …) ∨ ∃ v' pub', lt v' v ∧ Inv v' pub' ∧ ∃ tr, …`) and `post`;
 `kloop_exit`, `kloop_next v' pub'` and `kintro` take it from there. -/
-syntax (name := kloop) "kloop" (ppSpace kloopArg)+ (" with " (ppSpace colGt rcasesPat)+)? : tactic
+syntax (name := kloop) "kloop" (" at " str)? (ppSpace kloopArg)+ (" with " (ppSpace colGt rcasesPat)+)? : tactic
 
 elab_rules : tactic
-  | `(tactic| kloop $args* $[with $pats?*]?) => withKrakenRecDepth <| withMainContext do
+  | `(tactic| kloop $[at $atLbl?]? $args* $[with $pats?*]?) => withKrakenRecDepth <| withMainContext do
     let pats : Array (TSyntax `rcasesPat) := pats?.getD #[]
     let mut inv? : Option Term := none
     let mut exit? : Option Term := none
@@ -1239,6 +1352,9 @@ elab_rules : tactic
     let mut wf? : Option Term := none
     let mut pub? : Option Term := none
     let mut pubinv? : Option Term := none
+    let mut pc? : Option Term := none
+    let mut writes? : Option Term := none
+    let mut preserves? : Option Term := none
     let mut stName := `st
     for arg in args do
       let key := arg.raw[1].getId
@@ -1252,10 +1368,13 @@ elab_rules : tactic
       | `wf => wf? := some val
       | `pub => pub? := some val
       | `pubinv => pubinv? := some val
+      | `pc => pc? := some val
+      | `writes => writes? := some val
+      | `preserves => preserves? := some val
       | `state =>
         unless val.raw.isIdent do throwErrorAt val "kloop: `state` expects a name"
         stName := val.raw.getId
-      | _ => throwErrorAt arg "kloop: unknown argument `{key}` (expected inv, exit, measure, ghost, lt, wf, pub, pubinv, state)"
+      | _ => throwErrorAt arg "kloop: unknown argument `{key}` (expected inv, exit, measure, ghost, lt, wf, pub, pubinv, pc, writes, preserves, state)"
     let some inv := inv? | throwError "kloop: missing `(inv := …)`"
     let some v0Stx := measure? | throwError "kloop: missing `(measure := …)`"
     -- Constant-time loop: delegate to `tailrec_loop_cps_traced`.
@@ -1308,6 +1427,7 @@ elab_rules : tactic
     let target := (← instantiateMVars (← getMainTarget)).consumeMData
     unless target.isAppOfArity ``Eventually 4 do
       throwError "kloop: the goal must be an `Eventually`:{indentExpr target}"
+    let prog? := findLayoutProg? target
     let trans := target.getArg! 1
     let post := target.getArg! 2
     let initial := target.getArg! 3
@@ -1333,7 +1453,56 @@ elab_rules : tactic
           withLocalDeclD `g ghostType fun g =>
             withLocalDeclD `st stateType fun s => do
               mkLambdaFVars #[v, g, s] (mkAppN f #[v, s]).headBeta
-    let P ← elabInv inv
+    let P_user ← elabInv inv
+    let extractRegIdents (val : Term) (key : Name) : TacticM (Array Ident) := do
+      match val with
+      | `([$ts:term,*]) =>
+        ts.getElems.mapM fun t =>
+          if t.raw.isIdent then pure ⟨t.raw⟩
+          else throwErrorAt t "kloop: `{key}` expects register or view identifiers"
+      | _ => throwErrorAt val "kloop: `{key}` expects `[r, …]`"
+    let P ←
+      if atLbl?.isNone && pc?.isNone && writes?.isNone && preserves?.isNone then
+        pure P_user
+      else do
+        let s0Expr ←
+          if initial.consumeMData.isAppOfArity ``Kraken.MachineState.mk 3 then
+            pure (initial.consumeMData.getArg! 1)
+          else
+            mkAppM ``Kraken.MachineState.data #[initial]
+        let s0Stx : Term ←
+          if s0Expr.isFVar then
+            pure (mkIdent (← s0Expr.fvarId!.getUserName))
+          else
+            Term.exprToSyntax s0Expr
+        let stTmpId := mkIdent (← mkFreshUserName `st)
+        withLocalDeclD `v measureType fun v =>
+          withLocalDeclD `g ghostType fun g =>
+            withLocalDeclD stTmpId.getId stateType fun s => do
+              let mut body := (mkAppN P_user #[v, g, s]).headBeta
+              if let some wVal := writes? then
+                let rs ← extractRegIdents wVal `writes
+                let frStx ← `(Kraken.LoopAuto (($stTmpId).data.regs ≡ ($s0Stx).regs except [$rs,*]))
+                let frExpr ← Tactic.elabTermEnsuringType frStx (mkSort .zero)
+                body := mkApp2 (mkConst ``And) frExpr body
+              if let some pVal := preserves? then
+                let rs ← extractRegIdents pVal `preserves
+                let frStx ← `(Kraken.LoopAuto (($stTmpId).data.regs ≡ ($s0Stx).regs on [$rs,*]))
+                let frExpr ← Tactic.elabTermEnsuringType frStx (mkSort .zero)
+                body := mkApp2 (mkConst ``And) frExpr body
+              if let some e := pc? then
+                let pcStx ← `(Kraken.LoopAuto (($stTmpId).pc = $e))
+                let pcExpr ← Tactic.elabTermEnsuringType pcStx (mkSort .zero)
+                body := mkApp2 (mkConst ``And) pcExpr body
+              if let some lbl := atLbl? then
+                let some progName := prog?
+                  | throwError "kloop: could not determine program from goal for `at {lbl}`"
+                let layoutId := mkIdent `layout
+                let progId := mkIdent progName
+                let pcStx ← `(Kraken.LoopAuto (($stTmpId).pc = ($layoutId $progId).label $lbl))
+                let pcExpr ← Tactic.elabTermEnsuringType pcStx (mkSort .zero)
+                body := mkApp2 (mkConst ``And) pcExpr body
+              mkLambdaFVars #[v, g, s] body
     let Q? ← exit?.mapM elabInv
     -- Well-founded order on the measure.
     let (lt, wf) ← match lt?, wf? with
@@ -1362,6 +1531,7 @@ elab_rules : tactic
     -- `init`
     setGoals [gInit]
     evalTactic (← `(tactic| (try dsimp only)))
+    peelAutoLoopGoals prog?
     tagGoals `init
     let initGoals ← getGoals
     -- `body`
@@ -1388,9 +1558,11 @@ elab_rules : tactic
         getGoals
     setGoals (initGoals ++ bodyGoals ++ exitGoals)
 
-/-- Reduce a loop-body/entry goal to its disjunction `post ∨ …` (applying `Eventually.done` if
-needed) and return the right disjunct. -/
+/-- Reduce a loop-body/entry goal to its disjunction `post ∨ …` (running `kstep` and applying
+`Eventually.done` if needed) and return the right disjunct. -/
 private def kloopDisjunct : TacticM Expr := do
+  if isEffectsAll (← instantiateMVars (← getMainTarget)) then
+    evalTactic (← `(tactic| kstep))
   let t := (← instantiateMVars (← getMainTarget)).consumeMData
   if t.isAppOfArity ``Eventually 4 then
     evalTactic (← `(tactic| apply Eventually.done))
@@ -1413,11 +1585,14 @@ with `omega`/`decide` and the `Q`-monotonicity goal of `tailrec_loop_cps` with
 `kloop … (exit := Q)` entry goal (`P v₀ g₀ mid`). -/
 elab "kloop_next" vs:(ppSpace colGt term:max)* : tactic => withMainContext do
     let rhs ← kloopDisjunct
+    withMainContext do
     if !rhs.isAppOfArity ``Exists 2 then
       unless vs.isEmpty do
         throwError "kloop_next: this goal has no measure to supply:{indentExpr rhs}"
+      let prog? := findLayoutProg? rhs
       evalTactic (← `(tactic| refine Or.inr ?_))
       evalTactic (← `(tactic| (try dsimp only)))
+      peelAutoLoopGoals prog?
       return
     -- `∃ v' g', P v' g' mid ∧ lt v' v [∧ mono]`
     let vLam := (rhs.getArg! 1).consumeMData
@@ -1462,6 +1637,7 @@ elab "kloop_next" vs:(ppSpace colGt term:max)* : tactic => withMainContext do
       evalTactic (← `(tactic| (try dsimp only)))
       setGoals ((← getGoals) ++ side)
       return
+    let prog? := findLayoutProg? rhs
     evalTactic (← `(tactic| refine Or.inr ⟨$v', $g', ?inv, ?rest⟩))
     let gs ← getGoals
     let [gInv, gRest] := gs | throwError "kloop_next: unexpected goals"
@@ -1484,6 +1660,7 @@ elab "kloop_next" vs:(ppSpace colGt term:max)* : tactic => withMainContext do
         side := side ++ [gRest]
     setGoals [gInv]
     evalTactic (← `(tactic| (try dsimp only)))
+    peelAutoLoopGoals prog?
     setGoals ((← getGoals) ++ side)
 
 --------------------------------------------------------------------------------
@@ -1517,10 +1694,13 @@ theorem loop_exit [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s�
 * `to "label"` or `(exit := e)` give the program counter of the final state; without either the
   post has no pc conjunct.
 * `(writes := [r, …])` adds the frame conjunct `st.data.regs ≡ s₀.regs except [r, …]`
-  (`(writes := [])` means "no register is modified").
+  (`(writes := [])` means "no register is modified"), where each entry may be a register name or a
+  view on the register file (expanded to the registers it reads).
 * `(preserves := [r, …])` adds the dual frame conjunct `st.data.regs ≡ s₀.regs on [r, …]`,
   where each entry may be a register name or a derived view on the register file (e.g. `beeuN`).
-* `(trace := tr)` selects the constant-time (`TracedEventually`) form of `Spec`.
+* `ct` states an existential constant-time specification `∃ tr, ∀ (s₀ : MachineData) …, Spec … (trace := some tr) …`
+  (binders placed before `s₀` are public parameters outside `∃ tr`; binders after `s₀` are secret
+  parameters inside `∀ s₀`). `(trace := tr)` supplies an explicit trace term `tr`.
 * `(post := fun st => …)` is mandatory; `(pre := …)` optional. The post may use the state name
   `st` of the lambda; the generated conjuncts refer to it as `st`.
 -/
@@ -1531,20 +1711,53 @@ syntax blockSpecExit := atomic("(" &"exit" " := ") term ")"
 syntax blockSpecWrites := atomic("(" &"writes" " := ") "[" ident,* "]" ")"
 syntax blockSpecPreserves := atomic("(" &"preserves" " := ") "[" ident,* "]" ")"
 syntax blockSpecTrace := atomic("(" &"trace" " := ") term ")"
+syntax blockSpecCt := &"ct"
 syntax blockSpecPre := atomic("(" &"pre" " := ") term ")"
 syntax blockSpecPost := atomic("(" &"post" " := ") term ")"
 
-/-- Explicit typed binders only (`(x y : T)`), so that the `(name := …)` options cannot be
-mistaken for binders with default values. -/
-syntax blockSpecBinder := atomic("(" ident+ " : ") term ")"
+/-- Typed explicit `(x y : T)`, implicit `{x y : T}`, or instance `[T]` / `[inst : T]` binders,
+so that `(name := …)` options cannot be mistaken for binders with default values. -/
+syntax blockSpecExplicitBinder := atomic("(" ident+ " : ") term ")"
+syntax blockSpecImplicitBinder := "{" ident+ (" : " term)? "}"
+syntax blockSpecInstBinder := "[" (atomic(ident " : "))? term "]"
+syntax blockSpecBinder := blockSpecExplicitBinder <|> blockSpecImplicitBinder <|> blockSpecInstBinder
 
-syntax (name := blockSpec) declModifiers "block_spec " ident ident ident blockSpecBinder*
-  (blockSpecFrom)? (blockSpecTo <|> blockSpecExit)? (blockSpecWrites <|> blockSpecPreserves)?
-  (blockSpecTrace)? (blockSpecPre)? blockSpecPost " := " term : command
+private def elabBlockSpecBinder (b : TSyntax ``blockSpecBinder) :
+    MacroM (TSyntax ``Lean.Parser.Term.bracketedBinder) := do
+  let inner := b.raw[0]
+  if inner.isOfKind ``blockSpecExplicitBinder then
+    let xs : TSyntaxArray `ident := inner[1].getArgs.map (⟨·⟩)
+    let t : Term := ⟨inner[3]⟩
+    `(bracketedBinder| ($xs* : $t))
+  else if inner.isOfKind ``blockSpecImplicitBinder then
+    let xs : TSyntaxArray `ident := inner[1].getArgs.map (⟨·⟩)
+    if inner[2].isNone then
+      `(bracketedBinder| {$xs*})
+    else
+      let t : Term := ⟨inner[2][1]⟩
+      `(bracketedBinder| {$xs* : $t})
+  else if inner.isOfKind ``blockSpecInstBinder then
+    if inner[1].isNone then
+      let t : Term := ⟨inner[2]⟩
+      `(bracketedBinder| [$t])
+    else
+      let x : Ident := ⟨inner[1][0]⟩
+      let t : Term := ⟨inner[2]⟩
+      `(bracketedBinder| [$x : $t])
+  else
+    Macro.throwUnsupported
+
+syntax (name := blockSpec) declModifiers "block_spec " ident ident
+  blockSpecBinder* ident blockSpecBinder*
+  (blockSpecFrom)? (blockSpecTo <|> blockSpecExit)?
+  (blockSpecTrace <|> blockSpecCt)? (blockSpecWrites <|> blockSpecPreserves)?
+  (blockSpecTrace <|> blockSpecCt)? (blockSpecPre)? blockSpecPost " := " term : command
 
 macro_rules
-  | `($mods:declModifiers block_spec $name:ident $prog:ident $s:ident $bs:blockSpecBinder*
-      $[$from?]? $[$exit?]? $[$frame?]? $[$trace?]? $[$pre?]? (post := $post) := $proof) => do
+  | `($mods:declModifiers block_spec $name:ident $prog:ident
+      $pubBs:blockSpecBinder* $s:ident $secBs:blockSpecBinder*
+      $[$from?]? $[$exit?]? $[$trace1?]? $[$frame?]? $[$trace2?]? $[$pre?]? (post := $post) := $proof) => do
+    let trace? := trace1?.orElse (fun () => trace2?)
     -- names that must resolve in the user's scope (the architecture's `Layout`/`MachineData`
     -- abbreviations, and the `layout` binder the statement refers to)
     let layoutTy := mkIdent `Layout
@@ -1559,11 +1772,8 @@ macro_rules
       | _ => do
         let st := mkIdent `st
         pure (st, ← `(($post) $st))
-    let binders ← bs.mapM fun b => do
-      -- `blockSpecBinder` node: `(`, identifiers, `:`, type, `)`
-      let xs : TSyntaxArray `ident := b.raw[1].getArgs.map (⟨·⟩)
-      let t : Term := ⟨b.raw[3]⟩
-      `(bracketedBinder| ($xs* : $t))
+    let pubBinders ← pubBs.mapM elabBlockSpecBinder
+    let secBinders ← secBs.mapM elabBlockSpecBinder
     -- post conjuncts: pc, frame, user post (applied to `st`)
     let mut conj : Array Term := #[]
     if let some ex := exit? then
@@ -1587,18 +1797,28 @@ macro_rules
         | `(blockSpecFrom| from $l:str) => `(($layout $prog).label $l)
         | _ => Macro.throwUnsupported
       | none => `(($layout $prog).startAddr)
-    let traceTerm : Term ← match trace? with
-      | some t => match t with
-        | `(blockSpecTrace| (trace := $tr)) => `(some $tr)
-        | _ => Macro.throwUnsupported
-      | none => `(none)
     let preTerm : Term ← match pre? with
       | some pr => match pr with
         | `(blockSpecPre| (pre := $p)) => pure p
         | _ => Macro.throwUnsupported
       | none => `(True)
-    `($mods:declModifiers theorem $name [$layout : $layoutTy] [$layoutValid $prog] ($s : $machineData)
-        $binders* : Kraken.Executable.Spec ($layout $prog) $s $pcTerm $traceTerm $preTerm $postFn := $proof)
+    match trace? with
+    | some t =>
+      match t with
+      | `(blockSpecCt| ct) =>
+        let tr := mkIdent `tr
+        `($mods:declModifiers theorem $name [$layout : $layoutTy] [$layoutValid $prog] $pubBinders* :
+            ∃ $tr:ident, ∀ ($s : $machineData) $secBinders*,
+              Kraken.Executable.Spec ($layout $prog) $s $pcTerm (some $tr) $preTerm $postFn := $proof)
+      | `(blockSpecTrace| (trace := $tr)) =>
+        `($mods:declModifiers theorem $name [$layout : $layoutTy] [$layoutValid $prog] $pubBinders*
+            ($s : $machineData) $secBinders* :
+            Kraken.Executable.Spec ($layout $prog) $s $pcTerm (some $tr) $preTerm $postFn := $proof)
+      | _ => Macro.throwUnsupported
+    | none =>
+      `($mods:declModifiers theorem $name [$layout : $layoutTy] [$layoutValid $prog] $pubBinders*
+          ($s : $machineData) $secBinders* :
+          Kraken.Executable.Spec ($layout $prog) $s $pcTerm none $preTerm $postFn := $proof)
 
 --------------------------------------------------------------------------------
 
@@ -3016,8 +3236,6 @@ def evalSymRotateRight : Grind.GrindTactic := fun stx => do
   let n := if stx[1].isNone then 1 else stx[1][0].toNat
   let goals ← Grind.getGoals
   Grind.setGoals (goals.rotateRight n)
-
-syntax (name := tacticKStep) "kstep" optConfig (ppSpace num)? : tactic
 
 @[tactic tacticKStep]
 def evalTacticKStep : Tactic := fun stx => withMainContext do
