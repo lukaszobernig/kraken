@@ -29,7 +29,6 @@ theorem loop_exit_frame [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime
   have ⟨h25, h26, h27, h28⟩ := val256_eq_zero_limbs
     s₀.regs.X25 s₀.regs.X26 s₀.regs.X27 s₀.regs.X28 h_B_zero
   kprologue beeu_mod_inverse_vartime at ".Lbeeu_loop" to ".Lbeeu_shift_A_Y" with s₀
-  sym => kstep; tactic =>
   kfinish beeu_mod_inverse_vartime
 
 -- Consumer: composing two frames and using frame equations for derived facts.
@@ -43,7 +42,7 @@ example [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s : MachineDa
         st.data.regs.beeuA = s.regs.beeuA) := by
   intro _
   kcall loop_exit_frame s hB with st1 ⟨h1_fr, h1_mem⟩
-  kframe_eqs h1_fr [Reg64s.beeuA]   -- field equations `h1_fr_X21 …` and `h1_fr_beeuA`
+  kframe_eqs h1_fr   -- field equations `h1_fr_X21 …` and auto-derived `h1_fr_beeuA`
   apply Eventually.done
   refine ⟨rfl, ?_, ?_⟩
   · kframe
@@ -73,7 +72,6 @@ theorem extr_lsr_correct [layout : Layout] [Layout.Valid extr_lsr] (s₀ : Machi
           BitVec.setWidth 64 (BitVec.extractLsb' 0 16 (s₀.regs.X3.toBitVec >>> 8)) ∧
         st.data.regs ≡ s₀.regs except [X0, X4, X5]) := by
   kprologue extr_lsr with s₀
-  sym => kstep; tactic =>
   kfinish extr_lsr
 
 /-! ### Flags as an abstraction boundary
@@ -101,13 +99,11 @@ theorem cmp_branch_correct [layout : Layout] [Layout.Valid cmp_branch] (s₀ : M
         st.data.regs ≡ s₀.regs except [X2, X3]) := by
   kprologue cmp_branch with s₀
   by_cases h : X0.toNat < X1.toNat
-  · sym => kstep; tactic =>          -- `b.lo` taken: decided from `h` through `subs_c`
+  · kstep                             -- `b.lo` taken: decided from `h` through `subs_c`
     kprologue cmp_branch at "less"
-    sym => kstep; tactic =>
     kfinish cmp_branch
-  · sym => kstep; tactic =>          -- not taken
+  · kstep                             -- not taken
     kprologue cmp_branch at "done"
-    sym => kstep; tactic =>
     kfinish cmp_branch
 
 /-! ### `block_spec`: the same statements without the boilerplate -/
@@ -116,15 +112,14 @@ theorem cmp_branch_correct [layout : Layout] [Layout.Valid cmp_branch] (s₀ : M
 -- statement is judgmentally equal to the hand-written `loop_exit_frame` above.
 example : @beeu_loop_exit_when_B_zero = @loop_exit_frame := rfl
 
--- A whole-program block (no `from`), with extra binders and no pc conjunct.
-block_spec extr_lsr_correct' extr_lsr s₀ (n : Nat) (hn : n = 5)
+-- A whole-program block (no `from`), with implicit/explicit binders and `ct` constant-time mode.
+block_spec extr_lsr_correct' extr_lsr {n : Nat} s₀ ct
   (writes := [X0, X4, X5])
+  (pre := n = 5)
   (post := fun st =>
     st.data.regs.X0.toBitVec = s₀.regs.X1.toBitVec <<< 63 ||| s₀.regs.X2.toBitVec >>> 1 ∧
     st.data.regs.X4.toBitVec = s₀.regs.X3.toBitVec >>> n) := by
-  subst hn
   kprologue extr_lsr with s₀
-  sym => kstep; tactic =>
   kfinish extr_lsr
 
 -- A consumer composes a `block_spec` lemma with `kcall` as usual, and can narrow an `except`

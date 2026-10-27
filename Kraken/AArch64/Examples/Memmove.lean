@@ -77,14 +77,13 @@ private theorem memmove_forward_loop_spec [layout : Layout] [Layout.Valid memmov
     kprologue memmove at "forward_loop" to "done" with s₀
     by_cases hn : n = 0
     · subst hn
-      sym => kstep; tactic =>
+      kstep
       apply Eventually.done
       refine ⟨by kaddr memmove, rfl, rfl, rfl, Reg64s.CalleeSavedEq_refl _, ?_⟩
       rw [List.drop_append_of_le_length (by omega),
           Mem.At_append_sep (pre.drop 1) src _ (by simp; omega)]
       ecancel
-    · sym => kstep; tactic =>
-      kcall ih _ (pre.drop 1 ++ src.take 1) (src.drop 1) ((src.take 1) @ X3 ⋆ R)
+    · kcall ih _ (pre.drop 1 ++ src.take 1) (src.drop 1) ((src.take 1) @ X3 ⋆ R)
         with s₁ ⟨h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
       · apply Eventually.done
         refine ⟨rfl, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
@@ -128,7 +127,7 @@ private theorem memmove_backward_loop_spec [layout : Layout] [Layout.Valid memmo
     by_cases hn : n = 0
     · subst hn
       rw [Mem.At_take_drop_sep post (d - 1) (src_ptr + 1#64) (by omega) (by omega)] at h_mem
-      sym => kstep; tactic =>
+      kstep
       apply Eventually.done
       refine ⟨by kaddr memmove, rfl, rfl, rfl, Reg64s.CalleeSavedEq_refl _, ?_⟩
       rw [List.take_append, h_src_len, List.take_of_length_le (by omega),
@@ -136,7 +135,6 @@ private theorem memmove_backward_loop_spec [layout : Layout] [Layout.Valid memmo
       ecancel
     · rw [Mem.At_take_drop_sep src n src_ptr (by omega) (by omega),
           Mem.At_take_drop_sep post (d - 1) (src_ptr + BitVec.ofNat 64 (n + 1)) (by omega) (by omega)] at h_mem
-      sym => kstep; tactic =>
       kcall ih _ (src.take n) (src.drop n ++ post.take (d - 1))
         ((src.drop n) @ (dst_ptr + BitVec.ofNat 64 n) ⋆ R)
         with s₁ ⟨h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
@@ -200,14 +198,14 @@ theorem memmove_correct [layout : Layout] [Layout.Valid memmove] (s₀ : Machine
   · kprologue memmove to "backward_loop" with s₀
     by_cases hn : n = 0
     · subst hn
-      sym => kstep; tactic =>
+      kstep
       apply Eventually.done
       refine ⟨by kaddr memmove, rfl, rfl, rfl, Reg64s.CalleeSavedEq_refl _, ?_⟩
       simp only [memmoveBytes, List.take_zero, List.append_nil, Nat.add_zero, List.take_append_drop]
       ecancel
     · by_cases h_eq : dst_off = src_off
       · subst h_eq
-        sym => kstep; tactic =>
+        kstep
         apply Eventually.done
         refine ⟨by kaddr memmove, rfl, rfl, rfl, Reg64s.CalleeSavedEq_refl _, ?_⟩
         rw [memmoveBytes, List.append_assoc, ← List.drop_drop, List.take_append_drop,
@@ -215,7 +213,7 @@ theorem memmove_correct [layout : Layout] [Layout.Valid memmove] (s₀ : Machine
         ecancel
       · by_cases h_lt : dst_off < src_off
         · obtain ⟨d, rfl⟩ : ∃ d, src_off = dst_off + d := ⟨src_off - dst_off, by omega⟩
-          sym => kstep; tactic =>
+          kstep
           rw [Mem.At_take_drop_sep buf dst_off _ (by omega) (by omega),
               Mem.At_take_drop_sep (buf.drop dst_off) d _ (by simp; omega) (by simp; omega),
               List.drop_drop,
@@ -240,7 +238,7 @@ theorem memmove_correct [layout : Layout] [Layout.Valid memmove] (s₀ : Machine
                 by simp; omega]
           ecancel
         · obtain ⟨d, rfl⟩ : ∃ d, dst_off = src_off + d := ⟨dst_off - src_off, by omega⟩
-          sym => kstep; tactic =>
+          kstep
           rw [Mem.At_take_drop_sep buf src_off _ (by omega) (by omega),
               Mem.At_take_drop_sep (buf.drop src_off) n _ (by simp; omega) (by simp; omega),
               List.drop_drop,
@@ -263,6 +261,4 @@ theorem memmove_correct [layout : Layout] [Layout.Valid memmove] (s₀ : Machine
           ecancel
   · rintro ⟨st, pc⟩ ⟨rfl, h_x0, h_x30, h_sp, h_cs, h_mem_done⟩
     kprologue memmove at "done" with st
-    sym => kstep; tactic =>
-    apply Eventually.done
-    exact ⟨by grind, h_x0, h_sp, h_cs, by ecancel⟩
+    kfinish memmove
