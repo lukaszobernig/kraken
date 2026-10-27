@@ -425,6 +425,10 @@ def normalFormLemmas : List Name :=
    ``BitVec.or_zero, ``BitVec.zero_or, ``BitVec.xor_self, ``BitVec.setWidth_eq,
    ``UInt64.toNat_toBitVec, ``UInt64.toBitVec_ofBitVec, ``UInt64.ofBitVec_toBitVec,
    ``Int64.ofBitVec_toBitVec, ``Nat.sub_zero, ``Nat.add_zero, ``Nat.zero_add,
+   -- register reads through sub-register extraction (`extractLsb' 0 64 x` unfolds to
+   -- `BitVec.ofNat 64 (x.toNat >>> 0)`): `x >>> 0 = x`, `BitVec.ofNat 64 r.toNat = r.toBitVec`
+   ``Nat.shiftRight_zero, ``UInt64.bitVecOfNat_toNat, ``UInt32.bitVecOfNat_toNat,
+   ``BitVec.ofNat_toNat,
    -- ground `if`s (conditions are decided, see `simpNormalForm`)
    ``ite_true, ``ite_false, ``dite_true, ``dite_false,
    -- `ubfm`/`lsr #k`: `setWidth w (extractLsb' 0 m (x >>> k)) = x >>> k` for `w ≤ m + k`

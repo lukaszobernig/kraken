@@ -68,6 +68,14 @@ theorem toNat_and_mask (x : BitVec 64) {k : BitVec 64} (hk63 : k ≤ 63#64) :
     (x &&& ((1#64 <<< k) - 1#64)).toNat = x.toNat % 2 ^ k.toNat := by
   rw [BitVec.toNat_and, toNat_mask hk63, Nat.and_two_pow_sub_one_eq_mod]
 
+/-- A full-width register read in `BitVec` form: `BitVec.ofNat 64 x.toNat` is `x.toBitVec`
+(the shape left by sub-register extraction, `extractLsb' 0 64`, on `UInt64` registers). -/
+theorem _root_.UInt64.bitVecOfNat_toNat (x : UInt64) : BitVec.ofNat 64 x.toNat = x.toBitVec :=
+  BitVec.eq_of_toNat_eq (by simp)
+
+theorem _root_.UInt32.bitVecOfNat_toNat (x : UInt32) : BitVec.ofNat 32 x.toNat = x.toBitVec :=
+  BitVec.eq_of_toNat_eq (by simp)
+
 /-- `x >> k = x / 2^k`. -/
 theorem toNat_ushiftRight_bv (x k : BitVec 64) :
     (x >>> k).toNat = x.toNat / 2 ^ k.toNat := by
