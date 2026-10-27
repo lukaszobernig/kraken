@@ -43,7 +43,16 @@ example (lo hi k : BitVec 64) (hk1 : 1#64 ≤ k) (hk63 : k ≤ 63#64) :
   rw [hpq, Nat.add_mul, Nat.one_mul] at this
   omega
 
+-- `grind` finds `toNat_funnel_nat'` by E-matching and discharges `1 + 63 = 64` itself.
+example (hi lo : UInt64) :
+    (UInt64.ofBitVec (lo.toBitVec >>> 1 ||| hi.toBitVec <<< 63)).toNat =
+      lo.toNat / 2 + 2 ^ 63 * (hi.toNat % 2) := by
+  grind
+
 /-! ### Immediate shifts (`ubfm`/`lsr #k`) -/
+
+example (x : BitVec 64) : setWidth 64 (extractLsb' 0 63 (x >>> 1)) = x >>> 1 := by
+  grind
 
 example (x : BitVec 64) : setWidth 64 (extractLsb' 0 63 (x >>> 1)) = x >>> 1 :=
   setWidth_extractLsb'_ushiftRight x (by decide)

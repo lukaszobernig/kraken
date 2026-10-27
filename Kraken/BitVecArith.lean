@@ -72,7 +72,9 @@ theorem toNat_ushiftRight_bv (x k : BitVec 64) :
   rw [BitVec.ushiftRight_eq', BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]
 
 /-- `ubfm`/`lsr #k` with an immediate: extracting the low `m ≥ w - k` bits of `x >>> k` and
-re-extending to `w` bits is the identity (the top `k` bits are already zero). -/
+re-extending to `w` bits is the identity (the top `k` bits are already zero). Used by `kstep` as
+a normal-form rule for the `ubfm` residue, and a `grind` rewrite rule. -/
+@[grind =]
 theorem setWidth_extractLsb'_ushiftRight (x : BitVec w) {k m : Nat} (h : w ≤ m + k) :
     BitVec.setWidth w (BitVec.extractLsb' 0 m (x >>> k)) = x >>> k := by
   apply BitVec.eq_of_toNat_eq
@@ -102,7 +104,9 @@ theorem toNat_shiftLeft_neg (x : BitVec 64) {k : BitVec 64} (hk1 : 1#64 ≤ k) (
 `lo / 2^k + (hi mod 2^k) · 2^(w-k)` with no overflow. -/
 
 /-- Funnel shift with `Nat` shift amounts `k` and `m`, `k + m = w` (the form produced by
-`extr`-style instructions with immediate shift amounts). -/
+`extr`-style instructions with immediate shift amounts). A `grind` rewrite rule: with literal
+amounts `grind` discharges `k + m = w` itself. -/
+@[grind =]
 theorem toNat_funnel_nat' (lo hi : BitVec w) {k m : Nat} (hkm : k + m = w) :
     ((lo >>> k) ||| (hi <<< m)).toNat = lo.toNat / 2 ^ k + (hi.toNat % 2 ^ k) * 2 ^ m := by
   rw [BitVec.toNat_or, BitVec.toNat_ushiftRight, BitVec.toNat_shiftLeft, Nat.shiftRight_eq_div_pow,
