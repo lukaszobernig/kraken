@@ -455,6 +455,15 @@ stated on the simp normal form of the projections, so they apply after them. -/
 
 end
 
+/-- Stack-pointer alignment modulo 16 is invariant under adding a 16-byte-aligned offset. -/
+@[kcond] theorem add_umod_16_right (a b : BitVec 64) (hb : b % 16#64 = 0#64) :
+    (a + b) % 16#64 = a % 16#64 := by
+  grind
+
+@[kcond] theorem add_umod_16_left (a b : BitVec 64) (ha : a % 16#64 = 0#64) :
+    (a + b) % 16#64 = b % 16#64 := by
+  grind
+
 end BitVec
 
 theorem UInt64.getLsbD_zero_eq_false_mod2 (x : UInt64) (h : x.toBitVec.getLsbD 0 = false) :

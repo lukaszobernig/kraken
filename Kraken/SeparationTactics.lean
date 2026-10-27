@@ -269,6 +269,16 @@ partial def isArithProp (t : Expr) : MetaM Bool := do
     return ← isNatInt (t.getArg! 0)
   return false
 
+private initialize lengthSimpTheoremsCache : IO.Ref (Option SimpTheorems) ← IO.mkRef none
+
+private def getLengthSimpTheorems : MetaM SimpTheorems := do
+  if let some thms ← lengthSimpTheoremsCache.get then
+    return thms
+  let thms ← lengthSimpLemmas.foldlM (fun (s : SimpTheorems) n => s.addConst n) {}
+  let thms ← simpOnlyBuiltinThms thms
+  lengthSimpTheoremsCache.set (some thms)
+  return thms
+
 /-- Try to close an arithmetic side goal (typically a byte-length condition such as
 `(List.drop 8 bs).length = 8` or `k ≤ bs.length`) by normalising lengths with
 `lengthSimpLemmas` and running `omega` on the result with the hypotheses of the context.
@@ -277,8 +287,7 @@ def solveArithGoal (g : MVarId) : MetaM Bool := g.withContext do
   -- `commitWhen`: leave the metavariable context untouched unless the goal was closed.
   commitWhen do
     try
-      let simpThms ← lengthSimpLemmas.foldlM (fun (s : SimpTheorems) n => s.addConst n) {}
-      let simpThms ← simpOnlyBuiltinThms simpThms
+      let simpThms ← getLengthSimpTheorems
       let ctx ← Simp.mkContext {} (simpTheorems := #[simpThms]) (congrTheorems := ← getSimpCongrTheorems)
       -- (`simpGoal` throws when nothing simplifies; the goal may already be in normal form)
       let g ← (do
@@ -305,12 +314,21 @@ def decideArithProp (prop : Expr) : MetaM (Option Bool) := withoutModifyingState
 
 initialize registerTraceClass `Kraken.sep
 
-/-- Normalise a goal `lhs = rhs` of `BitVec` sums: right-associate and fold literal offsets
-(`a + 16#64 + 8#64 ↦ a + 24#64`). Returns `none` if the goal was closed, else the new goal. -/
-def normBitVecEqGoal (g : MVarId) : MetaM (Option MVarId) := g.withContext do
+private initialize bitVecEqSimpTheoremsCache : IO.Ref (Option SimpTheorems) ← IO.mkRef none
+
+private def getBitVecEqSimpTheorems : MetaM SimpTheorems := do
+  if let some thms ← bitVecEqSimpTheoremsCache.get then
+    return thms
   let thms ← ([``BitVec.add_assoc] : List Name).foldlM (fun (s : SimpTheorems) n => s.addConst n) {}
   let thms ← thms.addConst ``BitVec.ofNat_add (inv := true)
   let thms ← simpOnlyBuiltinThms thms
+  bitVecEqSimpTheoremsCache.set (some thms)
+  return thms
+
+/-- Normalise a goal `lhs = rhs` of `BitVec` sums: right-associate and fold literal offsets
+(`a + 16#64 + 8#64 ↦ a + 24#64`). Returns `none` if the goal was closed, else the new goal. -/
+def normBitVecEqGoal (g : MVarId) : MetaM (Option MVarId) := g.withContext do
+  let thms ← getBitVecEqSimpTheorems
   let ctx ← Simp.mkContext {} (simpTheorems := #[thms]) (congrTheorems := ← getSimpCongrTheorems)
   let (r, _) ← simpGoal g ctx (simprocs := #[← Simp.getSimprocs])
   return r.map (·.2)
@@ -356,6 +374,7 @@ def decideBitVecAddEq (prop : Expr) : MetaM (Option Bool) := withoutModifyingSta
 def assumptionModBool (prop : Expr) : MetaM (Option Expr) :=
   -- let-bound intermediate values of the symbolic state must be unfolded
   withConfig (fun c => { c with zetaDelta := true }) do
+  withOptions (fun o => maxRecDepth.set o 256) do
   let prop ← instantiateMVars prop
   let isBoolEq (t : Expr) : Option (Expr × Expr) :=
     match t.consumeMData.eq? with
@@ -372,15 +391,26 @@ def assumptionModBool (prop : Expr) : MetaM (Option Expr) :=
     | none => none
   let defEq (a b : Expr) : MetaM Bool :=
     tryCatchRuntimeEx (withReducibleAndInstances (isDefEq a b) <||> isDefEq a b) (fun _ => pure false)
-  let propHead := prop.consumeMData.getAppFn
+  let propStripped := prop.consumeMData
+  let propHead := propStripped.getAppFn
+  let propEqTy? := propStripped.eq?.map (·.1)
   for decl in (← getLCtx) do
-    if decl.isImplementationDetail then continue
+    if decl.isImplementationDetail || decl.hasValue then continue
     let t ← instantiateMVars decl.type
     if t.hasExprMVar then continue
+    let tStripped := t.consumeMData
     -- same head symbol (`Eq`, `Not`, …): cheap filter before definitional unfolding
-    if t.consumeMData.getAppFn == propHead then
-      if ← defEq t prop then
-        return some decl.toExpr
+    if tStripped.getAppFn == propHead then
+      -- Lean's `isDefEqArgs` postpones implicit arguments (like `{α}` in `@Eq α lhs rhs`) and
+      -- unifies `lhs`/`rhs` first; check the equality type upfront so `@Eq (BitVec 64) …` is never
+      -- unified against `@Eq Bool …`.
+      let sameEqTy ← match propEqTy?, tStripped.eq? with
+        | some ty₁, some (ty₂, _, _) =>
+          if ty₁ == ty₂ then pure true else withReducible (isDefEq ty₁ ty₂)
+        | _, _ => pure true
+      if sameEqTy then
+        if ← defEq t prop then
+          return some decl.toExpr
     if let some (b, v) := negated? then
       if let some (b', v') := isBoolEq t then
         if v && v'.isConstOf ``Bool.false && (← defEq b b') then
@@ -462,6 +492,31 @@ def reduceBitVecOfIntGround : Simp.Simproc := fun e => do
   let n := (i % (2 ^ w : Nat)).toNat
   return .done { expr := mkApp2 (mkConst ``BitVec.ofNat) (mkRawNatLit w) (mkRawNatLit n) }
 
+/-- Fold closed `BitVec` modulo (`a % b`) where `a` or `b` may contain raw `Nat` literals from
+`Sym`'s `evalGround` (which standard `BitVec` simprocs do not match). -/
+def reduceBitVecModGround : Simp.Simproc := fun e => do
+  unless e.isAppOfArity ``HMod.hMod 6 || e.isAppOfArity ``BitVec.umod 3 do return .continue
+  if e.hasFVar || e.hasMVar then return .continue
+  let args := e.getAppArgs
+  let a := args[args.size - 2]!
+  let b := args[args.size - 1]!
+  let some ⟨wa, bva⟩ ← getBitVecValue? a | return .continue
+  let some ⟨wb, bvb⟩ ← getBitVecValue? b | return .continue
+  if h : wa = wb then
+    let res := bva % (h ▸ bvb)
+    return .done { expr := toExpr res }
+  return .continue
+
+private initialize normalFormSimpTheoremsCache : IO.Ref (Option SimpTheorems) ← IO.mkRef none
+
+private def getNormalFormSimpTheorems : MetaM SimpTheorems := do
+  if let some thms ← normalFormSimpTheoremsCache.get then
+    return thms
+  let thms ← normalFormLemmas.foldlM (fun (s : SimpTheorems) n => do
+    if (← getEnv).contains n then s.addConst n else pure s) {}
+  normalFormSimpTheoremsCache.set (some thms)
+  return thms
+
 /-- Bring a (small) term into the normal form with the standard simplifier, which, unlike the
 `Sym` simplifier, matches raw natural-number literals against `OfNat` numerals. Closed conditions
 (`1 ≤ 63`, `(1 == 0) = true`) are decided so that ground `if`s disappear, and closed `Nat`
@@ -470,8 +525,7 @@ equality if anything changed. -/
 def simpNormalForm (e : Expr) : MetaM (Option (Expr × Expr)) := do
   tryCatchRuntimeEx
     (do
-      let thms ← normalFormLemmas.foldlM (fun (s : SimpTheorems) n => do
-        if (← getEnv).contains n then s.addConst n else pure s) {}
+      let thms ← getNormalFormSimpTheorems
       -- no standard simprocs: they would introduce `OfNat` numerals, while the `Sym` simplifier
       -- works with the raw literals produced by its ground evaluation
       let ctx ← Simp.mkContext { decide := true } (simpTheorems := #[thms])
@@ -552,68 +606,106 @@ inductive SimpWithHypsResult where
   | refuted
   | goal (g : MVarId)
 
+private initialize simpWithHypsBaseCache : IO.Ref (Option SimpTheorems) ← IO.mkRef none
+
+private def getSimpWithHypsBaseTheorems : MetaM SimpTheorems := do
+  if let some thms ← simpWithHypsBaseCache.get then
+    return thms
+  let mut thms : SimpTheorems := {}
+  for n in [``bne_self_eq_false, ``beq_self_eq_true, ``Bool.false_eq_true, ``Bool.true_eq_false,
+      ``Bool.not_false, ``Bool.not_true, ``decide_eq_true_eq, ``bne_iff_ne, ``beq_iff_eq,
+      ``ne_eq, ``not_true_eq_false, ``not_false_eq_true,
+      -- `Bool` combinations of decided flags to `Prop`, and the `UInt64`/`BitVec` bridge, so that
+      -- a condition such as `(!decide (b.toBitVec.toNat ≤ a.toBitVec.toNat)) = true` becomes the
+      -- arithmetic fact `a.toNat < b.toNat`
+      ``Bool.not_eq_true', ``decide_eq_false_iff_not, ``Bool.and_eq_true, ``Bool.or_eq_true,
+      ``Nat.not_le, ``Nat.not_lt, ``Int.not_le, ``Int.not_lt,
+      ``UInt64.toNat_toBitVec, ``UInt64.toBitVec_ofBitVec,
+      ``BitVec.add_umod_16_right, ``BitVec.add_umod_16_left] do
+    if (← getEnv).contains n then thms ← thms.addConst n
+  thms ← simpOnlyBuiltinThms thms
+  simpWithHypsBaseCache.set (some thms)
+  return thms
+
 /-- Simplify the goal using the equational hypotheses of the context as rewrite rules (plus
 `Bool`/`decide` normalisation). Reports whether the goal was closed, reduced to `False`, or
 replaced by a simplified goal. -/
 def simpWithHyps (g : MVarId) : MetaM SimpWithHypsResult := g.withContext do
   tryCatchRuntimeEx (do
-    let mut thms : SimpTheorems := {}
+    let mut thms ← getSimpWithHypsBaseTheorems
     for decl in (← getLCtx) do
-      if decl.isImplementationDetail then continue
+      if decl.isImplementationDetail || decl.hasValue then continue
       let t ← instantiateMVars decl.type
       if t.hasExprMVar then continue
       if t.consumeMData.isAppOfArity ``Eq 3 || t.consumeMData.isAppOfArity ``Ne 3 ||
           t.consumeMData.isAppOfArity ``Not 1 then
         thms ← thms.add (.fvar decl.fvarId) #[] decl.toExpr
-    for n in [``bne_self_eq_false, ``beq_self_eq_true, ``Bool.false_eq_true, ``Bool.true_eq_false,
-        ``Bool.not_false, ``Bool.not_true, ``decide_eq_true_eq, ``bne_iff_ne, ``beq_iff_eq,
-        ``ne_eq, ``not_true_eq_false, ``not_false_eq_true,
-        -- `Bool` combinations of decided flags to `Prop`, and the `UInt64`/`BitVec` bridge, so that
-        -- a condition such as `(!decide (b.toBitVec.toNat ≤ a.toBitVec.toNat)) = true` becomes the
-        -- arithmetic fact `a.toNat < b.toNat`
-        ``Bool.not_eq_true', ``decide_eq_false_iff_not, ``Bool.and_eq_true, ``Bool.or_eq_true,
-        ``Nat.not_le, ``Nat.not_lt, ``Int.not_le, ``Int.not_lt, ``UInt64.toNat_toBitVec] do
-      if (← getEnv).contains n then thms ← thms.addConst n
-    thms ← simpOnlyBuiltinThms thms
-    -- flag projections and the compare idiom (`@[kcond]`), e.g. `(subs a b).c = decide (b ≤ a)`
+    let congrThms ← getSimpCongrTheorems
+    let baseMethods := Simp.mkDefaultMethodsCore #[← Simp.getSimprocs]
+    let methods := { baseMethods with
+      post := fun e => do
+        match ← reduceBitVecModGround e with
+        | .done r => return .done r
+        | _ => baseMethods.post e }
+    let tgt ← instantiateMVars (← g.getType)
+    -- Pass 1: rewrite with context hypotheses (`thms`) before unfolding `@[kcond]` flag definitions
+    -- so compound carry/borrow hypotheses (e.g. 4-limb `sbcCarry … = false`) match before inner
+    -- limbs are expanded into `decide (… ≤ …)`.
+    let ctx1 ← Simp.mkContext { decide := true, zetaDelta := true } (simpTheorems := #[thms])
+      (congrTheorems := congrThms)
+    let (r1, _) ← Simp.main tgt ctx1 (methods := methods)
+    if r1.expr.consumeMData.isConstOf ``True then
+      g.assign (← mkOfEqTrue (← r1.getProof))
+      return .closed
+    else if r1.expr.consumeMData.isConstOf ``False then
+      return .refuted
+    -- Pass 2: unfold flag projections and the compare idiom (`@[kcond]`), e.g. `(subs a b).c = decide (b ≤ a)`
     let kcond ← kcondExt.getTheorems
-    let ctx ← Simp.mkContext {} (simpTheorems := #[thms, kcond])
-      (congrTheorems := ← getSimpCongrTheorems)
-    let (r, _) ← simpGoal g ctx (simprocs := #[← Simp.getSimprocs])
-    match r with
-    | none => return .closed
-    | some (_, g') =>
-      if (← instantiateMVars (← g'.getType)).consumeMData.isConstOf ``False then
-        return .refuted
-      return .goal g')
+    let ctx2 ← Simp.mkContext { decide := true, zetaDelta := true } (simpTheorems := #[thms, kcond])
+      (congrTheorems := congrThms)
+    let (r, _) ← Simp.main tgt ctx2 (methods := methods)
+    if r.expr.consumeMData.isConstOf ``True then
+      g.assign (← mkOfEqTrue (← r.getProof))
+      return .closed
+    else if r.expr.consumeMData.isConstOf ``False then
+      return .refuted
+    else if r.expr != tgt then
+      let g' ← g.replaceTargetEq r.expr (← r.getProof)
+      return .goal g'
+    else
+      return .goal g)
     (fun _ => return .goal g)
 
 def provePropGoal (prop : Expr) : MetaM (Option Expr) :=
   commitWhenSomeNoEx? do
     let prop ← instantiateMVars prop
-    -- Cheap path: address equalities of `BitVec` sums.
-    match ← decideBitVecAddEq prop with
-    | some true =>
-      let goal ← mkFreshExprMVar prop
-      if ← proveBitVecEqByNorm goal.mvarId! then
-        trace[Kraken.sep] "provePropGoal by BitVec normalisation: {prop}"
-        return some (← instantiateMVars goal)
-    | some false =>
-      trace[Kraken.sep] "provePropGoal refuted by BitVec normalisation: {prop}"
-      return none
-    | none => pure ()
-    -- Cheap path: linear length arithmetic (and no `grind` on refutable side conditions).
-    if ← isArithProp prop then
-      match ← decideArithProp prop with
-      | some true =>
+    -- Cheap path: address equalities of `BitVec` sums (single normalisation pass).
+    if let some (ty, _, _) := prop.consumeMData.eq? then
+      if (← whnfR ty).isAppOfArity ``BitVec 1 then
         let goal ← mkFreshExprMVar prop
-        if ← solveArithGoal goal.mvarId! then
-          trace[Kraken.sep] "provePropGoal by omega: {prop}"
-          return some (← instantiateMVars goal)
-      | some false =>
+        let normRes? ← try some <$> normBitVecEqGoal goal.mvarId! catch _ => pure none
+        if let some optG := normRes? then
+          match optG with
+          | none =>
+            trace[Kraken.sep] "provePropGoal by BitVec normalisation: {prop}"
+            return some (← instantiateMVars goal)
+          | some g' =>
+            let t ← instantiateMVars (← g'.getType)
+            if let some (_, lhs, rhs) := t.consumeMData.eq? then
+              if let (some (b₁, o₁), some (b₂, o₂)) := (bvBaseOffset? lhs, bvBaseOffset? rhs) then
+                if b₁ == b₂ && o₁ < 2 ^ 64 && o₂ < 2 ^ 64 && o₁ != o₂ then
+                  trace[Kraken.sep] "provePropGoal refuted by BitVec normalisation: {prop}"
+                  return none
+    -- Cheap path: linear length arithmetic (single pass to prove, then check negation to skip `grind`).
+    if ← isArithProp prop then
+      let goal ← mkFreshExprMVar prop
+      if ← solveArithGoal goal.mvarId! then
+        trace[Kraken.sep] "provePropGoal by omega: {prop}"
+        return some (← instantiateMVars goal)
+      let gNot ← mkFreshExprMVar (mkNot prop)
+      if ← solveArithGoal gNot.mvarId! then
         trace[Kraken.sep] "provePropGoal refuted by omega: {prop}"
         return none
-      | none => pure ()
     trace[Kraken.sep] "provePropGoal by grind: {prop}"
     let hasBytesInProp :=
       (prop.find? (fun e => e.isConstOf ``Int.ofBytes || e.isConstOf ``Int.toBytes)).isSome
