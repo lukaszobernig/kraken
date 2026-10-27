@@ -1,5 +1,6 @@
 module
 
+public import Kraken.BitVecArith
 public import Kraken.Mem
 public import Kraken.Separation
 public import Kraken.SeparationMem
@@ -417,24 +418,99 @@ def normalFormLemmas : List Name :=
   [``BitVec.shiftLeft_zero, ``BitVec.zero_shiftLeft, ``BitVec.add_zero, ``BitVec.zero_add,
    ``BitVec.or_zero, ``BitVec.zero_or, ``BitVec.xor_self, ``BitVec.setWidth_eq,
    ``UInt64.toNat_toBitVec, ``UInt64.toBitVec_ofBitVec, ``UInt64.ofBitVec_toBitVec,
-   ``Int64.ofBitVec_toBitVec, ``Nat.sub_zero, ``Nat.add_zero, ``Nat.zero_add]
+   ``Int64.ofBitVec_toBitVec, ``Nat.sub_zero, ``Nat.add_zero, ``Nat.zero_add,
+   -- ground `if`s (conditions are decided, see `simpNormalForm`)
+   ``ite_true, ``ite_false, ``dite_true, ``dite_false,
+   -- `ubfm`/`lsr #k`: `setWidth w (extractLsb' 0 m (x >>> k)) = x >>> k` for `w ≤ m + k`
+   ``BitVec.setWidth_extractLsb'_ushiftRight]
+
+/-- Heads of the closed `Nat` arithmetic that `reduceNatGround` folds. -/
+private def natGroundHeads : List Name :=
+  [``HAdd.hAdd, ``HSub.hSub, ``HMul.hMul, ``HDiv.hDiv, ``HMod.hMod, ``HPow.hPow,
+   ``Nat.add, ``Nat.sub, ``Nat.mul, ``Nat.div, ``Nat.mod, ``Nat.pow, ``Nat.succ]
+
+/-- Fold closed `Nat` arithmetic on literals (`64 - 1`, `63 + 1`) into a *raw* literal — the
+convention of the `Sym` simplifier's ground evaluation; the standard `Nat.reduceSub` & co. would
+produce `OfNat` numerals, which `Sym` does not fold any further. The result is definitionally
+equal to the input (kernel `Nat` literal arithmetic). -/
+def reduceNatGround : Simp.Simproc := fun e => do
+  let .const fn _ := e.getAppFn | return .continue
+  unless natGroundHeads.contains fn do return .continue
+  if e.hasFVar || e.hasMVar then return .continue
+  let some n ← (Meta.evalNat e).run | return .continue
+  return .done { expr := mkRawNatLit n }
 
 /-- Bring a (small) term into the normal form with the standard simplifier, which, unlike the
-`Sym` simplifier, matches raw natural-number literals against `OfNat` numerals. Returns the new
-term and a proof of equality if anything changed. -/
+`Sym` simplifier, matches raw natural-number literals against `OfNat` numerals. Closed conditions
+(`1 ≤ 63`, `(1 == 0) = true`) are decided so that ground `if`s disappear, and closed `Nat`
+arithmetic is folded to raw literals (`reduceNatGround`). Returns the new term and a proof of
+equality if anything changed. -/
 def simpNormalForm (e : Expr) : MetaM (Option (Expr × Expr)) := do
   tryCatchRuntimeEx
     (do
       let thms ← normalFormLemmas.foldlM (fun (s : SimpTheorems) n => do
         if (← getEnv).contains n then s.addConst n else pure s) {}
-      -- no simprocs: they would introduce `OfNat` numerals, while the `Sym` simplifier works
-      -- with the raw literals produced by its ground evaluation
-      let ctx ← Simp.mkContext {} (simpTheorems := #[thms]) (congrTheorems := ← getSimpCongrTheorems)
-      let (r, _) ← Meta.simp e ctx (simprocs := #[])
+      -- no standard simprocs: they would introduce `OfNat` numerals, while the `Sym` simplifier
+      -- works with the raw literals produced by its ground evaluation
+      let ctx ← Simp.mkContext { decide := true } (simpTheorems := #[thms])
+        (congrTheorems := ← getSimpCongrTheorems)
+      let methods := Simp.mkDefaultMethodsCore #[]
+      let methods := { methods with
+        post := fun e => do
+          match ← reduceNatGround e with
+          | .done r => return .done r
+          | _ => methods.post e }
+      let (r, _) ← Simp.main e ctx (methods := methods)
       if r.expr == e then return none
       let prf ← r.getProof
       return some (r.expr, prf))
     (fun _ => return none)
+
+/-- Number of nodes of `e`, saturating at `cap + 1`; binders count as "too big". -/
+private def exprSizeCapped (e : Expr) (cap : Nat) : Nat :=
+  go e cap
+where
+  go (e : Expr) (fuel : Nat) : Nat :=
+    match fuel with
+    | 0 => cap + 1
+    | fuel + 1 =>
+      match e with
+      | .app f a => go f fuel + go a fuel
+      | .mdata _ e => go e fuel
+      | .proj _ _ e => 1 + go e fuel
+      | .lam .. | .forallE .. | .letE .. => cap + 1
+      | _ => 1
+
+/-- Is `e` an "atomic" value worth inlining wherever its `let` is referenced: a literal, a local
+variable, a closed term of at most `maxSize` nodes (an immediate such as `BitVec.ofInt 64 1`), or a
+structure projection of a local variable (a register read such as `X4.toBitVec`)? -/
+def isAtomicValue (e : Expr) (maxSize : Nat := 8) : MetaM Bool := do
+  if e.isFVar || e.nat?.isSome || e.rawNatLit?.isSome then return true
+  if e.hasMVar then return false
+  if !e.hasFVar then return exprSizeCapped e maxSize ≤ maxSize
+  if let .const fn _ := e.getAppFn then
+    if let some info ← getProjectionFnInfo? fn then
+      if !info.fromClass && e.getAppNumArgs == info.numParams + 1 then
+        return (e.getArg! info.numParams).isFVar
+  return false
+
+/-- Replace `let`-bound local variables with atomic values (`isAtomicValue`) by their values, so
+that instruction residues become self-contained (`X4.toBitVec <<< 63 ||| …` instead of
+`val1 <<< (64 - lsb) ||| …`) and their ground conditions and shift amounts can be decided and
+folded. The result is definitionally equal to `e` (zeta-delta). -/
+partial def inlineAtomicLets (e : Expr) : MetaM Expr := do
+  let lctx ← getLCtx
+  let mut subst : Std.HashMap FVarId Expr := {}
+  for fvarId in (collectFVars {} e).fvarIds do
+    if let some (.ldecl (value := v) ..) := lctx.find? fvarId then
+      -- values may refer to earlier atomic lets themselves
+      let v' ← inlineAtomicLets v
+      if ← isAtomicValue v' then
+        subst := subst.insert fvarId v'
+  if subst.isEmpty then return e
+  return e.replace fun
+    | .fvar id => subst[id]?
+    | _ => none
 
 /-- Is `ty` a machine-word-like type (`BitVec _`, `UInt*`, `Int*`, `Nat`, `Int`, `Bool`) whose
 values are worth normalising eagerly? -/

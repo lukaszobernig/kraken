@@ -492,12 +492,9 @@ theorem val256_pos_or_ne_zero (w0 w1 w2 w3 : UInt64) (h : 0 < val256 w0 w1 w2 w3
 def extr1Word (hi lo : UInt64) : BitVec 64 :=
   (hi.toBitVec <<< 63) ||| (lo.toBitVec >>> 1)
 
+/-- Fold the `extr dst, hi, lo, #1` residue of `kstep` into `extr1Word`. -/
 theorem extr_sem_eq (hi lo : UInt64) :
-    hi.toBitVec <<< (64 - 1) ||| lo.toBitVec >>> 1 = extr1Word hi lo := rfl
-
-theorem ubfm_lsr1_sem_eq (x : UInt64) :
-    BitVec.setWidth 64 (BitVec.extractLsb' 0 63 (x.toBitVec >>> 1)) = x.toBitVec >>> 1 :=
-  BitVec.setWidth_extractLsb'_ushiftRight x.toBitVec (by decide)
+    hi.toBitVec <<< 63 ||| lo.toBitVec >>> 1 = extr1Word hi lo := rfl
 
 theorem extr1Word_toNat (hi lo : UInt64) :
     (UInt64.ofBitVec (extr1Word hi lo)).toNat =
@@ -1660,7 +1657,7 @@ theorem beeu_shift1_0_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
     have h_x3_mod : (X3.toNat % 2 : Int) = 0 := by
       rw [← val320_emod_two X3 X4 X5 X6 X7]; exact h_x_even
     sym => kstep; tactic =>
-    kfinish beeu_mod_inverse_vartime [extr_sem_eq, ubfm_lsr1_sem_eq]
+    kfinish beeu_mod_inverse_vartime [extr_sem_eq]
     rw [UInt64.toNat_ofBitVec, h_x13_bv]; rfl
   · simp only [h1, ↓reduceIte]
     have h_gt1 : 1 < s.regs.X13.toNat := by omega
@@ -1671,7 +1668,7 @@ theorem beeu_shift1_0_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
     have h_x3_mod : (X3.toNat % 2 : Int) = 0 := by
       rw [← val320_emod_two X3 X4 X5 X6 X7]; exact h_x_even
     sym => kstep; tactic =>
-    kfinish beeu_mod_inverse_vartime [extr_sem_eq, ubfm_lsr1_sem_eq]
+    kfinish beeu_mod_inverse_vartime [extr_sem_eq]
 
 theorem beeu_shift_loop_X_step_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -1843,7 +1840,7 @@ theorem beeu_shift1_1_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
     have h_x8_mod : (X8.toNat % 2 : Int) = 0 := by
       rw [← val320_emod_two X8 X9 X10 X11 X12]; exact h_y_even
     sym => kstep; tactic =>
-    kfinish beeu_mod_inverse_vartime [extr_sem_eq, ubfm_lsr1_sem_eq]
+    kfinish beeu_mod_inverse_vartime [extr_sem_eq]
     rw [UInt64.toNat_ofBitVec, h_x13_bv]; rfl
   · simp only [h1, ↓reduceIte]
     have h_gt1 : 1 < s.regs.X13.toNat := by omega
@@ -1854,7 +1851,7 @@ theorem beeu_shift1_1_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
     have h_x8_mod : (X8.toNat % 2 : Int) = 0 := by
       rw [← val320_emod_two X8 X9 X10 X11 X12]; exact h_y_even
     sym => kstep; tactic =>
-    kfinish beeu_mod_inverse_vartime [extr_sem_eq, ubfm_lsr1_sem_eq]
+    kfinish beeu_mod_inverse_vartime [extr_sem_eq]
 
 theorem beeu_shift_loop_Y_step_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
