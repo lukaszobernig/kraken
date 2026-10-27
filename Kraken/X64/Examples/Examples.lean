@@ -162,7 +162,7 @@ example [layout : Layout] [Layout.Valid p5] (s : MachineData) :
   kprologue p5 with s
   sym => kstep; tactic =>
   apply Eventually.done
-  dsimp; bv_decide
+  dsimp; grind
 
 def p6 := parse("push %rax
 mov $0, %rax
@@ -180,7 +180,7 @@ theorem p6_correct [layout : Layout] [Layout.Valid p6] (s₀ : MachineData)
   sym => kstep; tactic =>
   apply Eventually.done
   simp (config := { zetaDelta := true }) only [show (OfNat.ofNat 8 : UInt64) = 8 from rfl]
-  bv_decide
+  grind
 
 
 open Std
