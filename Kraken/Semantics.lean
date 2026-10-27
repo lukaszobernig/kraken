@@ -1,6 +1,7 @@
 module
 
 import Kraken.Attribute
+public import Kraken.BitVecArith
 public import Kraken.Layout
 public import Kraken.Mem
 meta import Kraken.Mem

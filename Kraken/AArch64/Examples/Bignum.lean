@@ -96,40 +96,48 @@ abbrev adcsWord (a_bs b_bs : List UInt8) (c : Bool) : BitVec 64 :=
   BitVec.ofInt 64 (Int.ofBytes b_bs) +
   BitVec.ofNat 64 c.toNat
 
+/-- The carry flag after `adcs` on the two limbs (the semantics' own flag function). -/
 abbrev adcsCarry (a_bs b_bs : List UInt8) (c : Bool) : Bool :=
-  ((adcsWord a_bs b_bs c).toNat : Int) !=
-    ((BitVec.ofInt 64 (Int.ofBytes a_bs)).toNat : Int) +
-    ((BitVec.ofInt 64 (Int.ofBytes b_bs)).toNat : Int) +
-    if c then 1 else 0
+  (StatusFlags.adcs (BitVec.ofInt 64 (Int.ofBytes a_bs)) (BitVec.ofInt 64 (Int.ofBytes b_bs)) c).c
 
 theorem adcs_step_bytes (a_bs b_bs : List UInt8) (c : Bool)
     (ha : a_bs.length = 8) (hb : b_bs.length = 8) :
     Int.ofBytes (Int.toBytes 8 (adcsWord a_bs b_bs c).toInt) +
       (if adcsCarry a_bs b_bs c then 1 else 0) * 256 ^ 8 =
       Int.ofBytes a_bs + Int.ofBytes b_bs + (if c then 1 else 0) := by
+  have h := StatusFlags.adcs_toNat (BitVec.ofInt 64 (Int.ofBytes a_bs))
+    (BitVec.ofInt 64 (Int.ofBytes b_bs)) c (by decide)
+  rw [Int.ofBytes_toNat_ofInt_64 a_bs ha, Int.ofBytes_toNat_ofInt_64 b_bs hb] at h
   dsimp only [adcsWord, adcsCarry]
-  rw [Int.ofBytes_toBytes_8_toInt, adcs_bv]
-  rw [Int.ofBytes_toNat_ofInt_64 a_bs ha, Int.ofBytes_toNat_ofInt_64 b_bs hb]
+  rw [Int.ofBytes_toBytes_8_toInt]
+  rcases Bool.eq_false_or_eq_true (StatusFlags.adcs (BitVec.ofInt 64 (Int.ofBytes a_bs))
+    (BitVec.ofInt 64 (Int.ofBytes b_bs)) c).c with hc | hc <;> cases c <;>
+    simp only [hc, Bool.toNat_true, Bool.toNat_false, Bool.false_eq_true, ↓reduceIte,
+      Int.natCast_zero, Int.natCast_one] at h ⊢ <;> omega
 
 abbrev sbcsWord (a_bs b_bs : List UInt8) (c : Bool) : BitVec 64 :=
   BitVec.ofInt 64 (Int.ofBytes a_bs) -
   BitVec.ofInt 64 (Int.ofBytes b_bs) -
   BitVec.ofNat 64 (!c).toNat
 
+/-- The carry flag after `sbcs` on the two limbs (the semantics' own flag function). -/
 abbrev sbcsCarry (a_bs b_bs : List UInt8) (c : Bool) : Bool :=
-  ((sbcsWord a_bs b_bs c).toNat : Int) ==
-    ((BitVec.ofInt 64 (Int.ofBytes a_bs)).toNat : Int) -
-    ((BitVec.ofInt 64 (Int.ofBytes b_bs)).toNat : Int) -
-    if c then 0 else 1
+  (StatusFlags.sbcs (BitVec.ofInt 64 (Int.ofBytes a_bs)) (BitVec.ofInt 64 (Int.ofBytes b_bs)) c).c
 
 theorem sbcs_step_bytes (a_bs b_bs : List UInt8) (c : Bool)
     (ha : a_bs.length = 8) (hb : b_bs.length = 8) :
     Int.ofBytes (Int.toBytes 8 (sbcsWord a_bs b_bs c).toInt) -
       (if sbcsCarry a_bs b_bs c then 0 else 1) * 256 ^ 8 =
       Int.ofBytes a_bs - Int.ofBytes b_bs - (if c then 0 else 1) := by
+  have h := StatusFlags.sbcs_toNat (BitVec.ofInt 64 (Int.ofBytes a_bs))
+    (BitVec.ofInt 64 (Int.ofBytes b_bs)) c (by decide)
+  rw [Int.ofBytes_toNat_ofInt_64 a_bs ha, Int.ofBytes_toNat_ofInt_64 b_bs hb] at h
   dsimp only [sbcsWord, sbcsCarry]
-  rw [Int.ofBytes_toBytes_8_toInt, sbcs_bv]
-  rw [Int.ofBytes_toNat_ofInt_64 a_bs ha, Int.ofBytes_toNat_ofInt_64 b_bs hb]
+  rw [Int.ofBytes_toBytes_8_toInt]
+  rcases Bool.eq_false_or_eq_true (StatusFlags.sbcs (BitVec.ofInt 64 (Int.ofBytes a_bs))
+    (BitVec.ofInt 64 (Int.ofBytes b_bs)) c).c with hc | hc <;> cases c <;>
+    simp only [hc, Bool.not_true, Bool.not_false, Bool.toNat_true, Bool.toNat_false,
+      Bool.false_eq_true, ↓reduceIte, Int.natCast_zero, Int.natCast_one] at h ⊢ <;> omega
 
 theorem Int.ofBytes_take_16 (bs : List UInt8) (h : 16 ≤ bs.length) :
     Int.ofBytes (bs.take 16) =

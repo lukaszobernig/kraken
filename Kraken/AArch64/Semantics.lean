@@ -435,15 +435,50 @@ structure StatusFlags.from_result.Remaining where
     c := f.c
     v := f.v }
 
-@[kstep, simp] def StatusFlags.adds {w} (res val1 val2 : BitVec w) : StatusFlags :=
-  StatusFlags.from_result res {
-    c := res.unsigned != val1.unsigned + val2.unsigned
-    v := res.signed != val1.signed + val2.signed }
+/-! ### Flag-setting arithmetic
 
-@[kstep, simp] def StatusFlags.subs {w} (res val1 val2 : BitVec w) : StatusFlags :=
+The flag functions below are the abstraction boundary for symbolic execution: `kstep` does not
+unfold them (they are deliberately not `@[kstep]`/`@[simp]`), so a state after `subs x1, x2, x3`
+reads `status := StatusFlags.subs X2.toBitVec X3.toBitVec`, and the projection lemmas at the end
+of this file (`StatusFlags.subs_c : (subs a b).c = decide (b.toNat ≤ a.toNat)`, …) present the
+individual flags as decided value-level facts when a condition code or a carry-in reads them.
+
+The definitions follow the architecture reference: a flag is set iff the wrapped result differs
+from the exact (unbounded) result. -/
+
+/-- Flags of `adds`: `res = a + b`. -/
+def StatusFlags.adds {w} (a b : BitVec w) : StatusFlags :=
+  let res := a + b
   StatusFlags.from_result res {
-    c := res.unsigned == val1.unsigned - val2.unsigned
-    v := res.signed != val1.signed - val2.signed }
+    c := res.unsigned != a.unsigned + b.unsigned
+    v := res.signed != a.signed + b.signed }
+
+/-- Flags of `adcs`: `res = a + b + cin`. -/
+def StatusFlags.adcs {w} (a b : BitVec w) (cin : Bool) : StatusFlags :=
+  let res := a + b + BitVec.ofNat w cin.toNat
+  let cin_int : Int := if cin then 1 else 0
+  StatusFlags.from_result res {
+    c := res.unsigned != a.unsigned + b.unsigned + cin_int
+    v := res.signed != a.signed + b.signed + cin_int }
+
+/-- Flags of `subs`/`cmp`: `res = a - b`. -/
+def StatusFlags.subs {w} (a b : BitVec w) : StatusFlags :=
+  let res := a - b
+  StatusFlags.from_result res {
+    c := res.unsigned == a.unsigned - b.unsigned
+    v := res.signed != a.signed - b.signed }
+
+/-- Flags of `sbcs`: `res = a - b - (1 - cin)`. -/
+def StatusFlags.sbcs {w} (a b : BitVec w) (cin : Bool) : StatusFlags :=
+  let res := a - b - BitVec.ofNat w (!cin).toNat
+  let bin : Int := if cin then 0 else 1
+  StatusFlags.from_result res {
+    c := res.unsigned == a.unsigned - b.unsigned - bin
+    v := res.signed != a.signed - b.signed - bin }
+
+/-- Flags of the flag-setting logical operations (`ands`, `bics`, `tst`): `c = v = 0`. -/
+def StatusFlags.logical {w} (res : BitVec w) : StatusFlags :=
+  StatusFlags.from_result res { c := false, v := false }
 
 def StatusFlags.ofNat (nzcv : Nat) : StatusFlags :=
   { n := (nzcv &&& 8) != 0
@@ -564,12 +599,12 @@ set_option maxHeartbeats 1000000
     let val1 := s.regs.getRegOrSp src1
     let val2 := src2.interp s.regs p
     let res := val1 + val2
-    { s with status := StatusFlags.adds res val1 val2 }.setRegOrZr dst res next
+    { s with status := StatusFlags.adds val1 val2 }.setRegOrZr dst res next
   | .ADDS_s dst src1 src2 =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := src2.interp s.regs p
     let res := val1 + val2
-    { s with status := StatusFlags.adds res val1 val2 }.setRegOrZr dst res next
+    { s with status := StatusFlags.adds val1 val2 }.setRegOrZr dst res next
   | .SUB_e dst src1 src2 =>
     let val1 := s.regs.getRegOrSp src1
     let val2 := src2.interp s.regs p
@@ -584,12 +619,12 @@ set_option maxHeartbeats 1000000
     let val1 := s.regs.getRegOrSp src1
     let val2 := src2.interp s.regs p
     let res := val1 - val2
-    { s with status := StatusFlags.subs res val1 val2 }.setRegOrZr dst res next
+    { s with status := StatusFlags.subs val1 val2 }.setRegOrZr dst res next
   | .SUBS_s dst src1 src2 =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := src2.interp s.regs p
     let res := val1 - val2
-    { s with status := StatusFlags.subs res val1 val2 }.setRegOrZr dst res next
+    { s with status := StatusFlags.subs val1 val2 }.setRegOrZr dst res next
   | .ADC dst src1 src2 =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := s.regs.getRegOrZr src2
@@ -601,11 +636,7 @@ set_option maxHeartbeats 1000000
     let val2 := s.regs.getRegOrZr src2
     let carry : w.type := s.status.c
     let res := val1 + val2 + carry
-    let carry_int : Int := if s.status.c then 1 else 0
-    let status := StatusFlags.from_result res {
-      c := res.unsigned != val1.unsigned + val2.unsigned + carry_int
-      v := res.signed != val1.signed + val2.signed + carry_int }
-    { s with status }.setRegOrZr dst res next
+    { s with status := StatusFlags.adcs val1 val2 s.status.c }.setRegOrZr dst res next
   | .SBC dst src1 src2 =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := s.regs.getRegOrZr src2
@@ -617,11 +648,7 @@ set_option maxHeartbeats 1000000
     let val2 := s.regs.getRegOrZr src2
     let borrow : w.type := !s.status.c
     let res := val1 - val2 - borrow
-    let borrow_int : Int := if s.status.c then 0 else 1
-    let status := StatusFlags.from_result res {
-      c := res.unsigned == val1.unsigned - val2.unsigned - borrow_int
-      v := res.signed != val1.signed - val2.signed - borrow_int }
-    { s with status }.setRegOrZr dst res next
+    { s with status := StatusFlags.sbcs val1 val2 s.status.c }.setRegOrZr dst res next
   | .MADD dst src1 src2 src3 =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := s.regs.getRegOrZr src2
@@ -696,14 +723,12 @@ set_option maxHeartbeats 1000000
     let val1 := s.regs.getRegOrZr src1
     let val2 := BitVec.ofInt w.bits (Int64.toInt (imm.interp p))
     let res := val1 &&& val2
-    let flags := StatusFlags.from_result res { c := false, v := false }
-    { s with status := flags }.setRegOrZr dst res next
+    { s with status := StatusFlags.logical res }.setRegOrZr dst res next
   | .ANDS_s dst src1 src2 =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := src2.interp s.regs p
     let res := val1 &&& val2
-    let flags := StatusFlags.from_result res { c := false, v := false }
-    { s with status := flags }.setRegOrZr dst res next
+    { s with status := StatusFlags.logical res }.setRegOrZr dst res next
   | .ORR_i dst src1 imm =>
     let val1 := s.regs.getRegOrZr src1
     let val2 := BitVec.ofInt w.bits (Int64.toInt (imm.interp p))
@@ -743,8 +768,7 @@ set_option maxHeartbeats 1000000
     let val1 := s.regs.getRegOrZr src1
     let val2 := src2.interp s.regs p
     let res := val1 &&& ~~~val2
-    let status' := StatusFlags.from_result res { c := false, v := false }
-    { s with status := status' }.setRegOrZr dst res next
+    { s with status := StatusFlags.logical res }.setRegOrZr dst res next
   | .BFM dst src immr imms =>
     let val_dst := s.regs.getRegOrZr dst
     let val_src := s.regs.getRegOrZr src
@@ -848,8 +872,7 @@ set_option maxHeartbeats 1000000
     let status' := if cond.interp s.status then
         let val1 := s.regs.getRegOrZr src1
         let val2 := s.regs.getRegOrZr src2
-        let res := val1 - val2
-        StatusFlags.subs res val1 val2
+        StatusFlags.subs val1 val2
       else
         StatusFlags.ofNat nzcv
     next { s with status := status' }
@@ -857,8 +880,7 @@ set_option maxHeartbeats 1000000
     let status' := if cond.interp s.status then
         let val1 := s.regs.getRegOrZr src1
         let val2 := BitVec.ofNat w.bits imm
-        let res := val1 - val2
-        StatusFlags.subs res val1 val2
+        StatusFlags.subs val1 val2
       else
         StatusFlags.ofNat nzcv
     next { s with status := status' }
@@ -866,8 +888,7 @@ set_option maxHeartbeats 1000000
     let status' := if cond.interp s.status then
         let val1 := s.regs.getRegOrZr src1
         let val2 := s.regs.getRegOrZr src2
-        let res := val1 + val2
-        StatusFlags.adds res val1 val2
+        StatusFlags.adds val1 val2
       else
         StatusFlags.ofNat nzcv
     next { s with status := status' }
@@ -875,8 +896,7 @@ set_option maxHeartbeats 1000000
     let status' := if cond.interp s.status then
         let val1 := s.regs.getRegOrZr src1
         let val2 := BitVec.ofNat w.bits imm
-        let res := val1 + val2
-        StatusFlags.adds res val1 val2
+        StatusFlags.adds val1 val2
       else
         StatusFlags.ofNat nzcv
     next { s with status := status' }
@@ -1009,92 +1029,220 @@ def Program.fakeLayout (prog : Program) : Executable :=
     | none => .error "Memory store failed"
   )
 
-/-! ## 64-Bit Carry/Borrow Arithmetic Helpers (`adds`/`adcs`/`subs`/`sbcs`) -/
+/-! ## Flags at the value level
 
-theorem adcs_bv (a b : BitVec 64) (c : Bool) :
-    let carry : BitVec 64 := BitVec.ofNat 64 c.toNat
-    let res : BitVec 64 := a + b + carry
-    let carry_int : Int := if c then 1 else 0
-    let c' : Bool := (res.toNat : Int) != (a.toNat : Int) + (b.toNat : Int) + carry_int
-    (res.toNat : Int) + (if c' then 1 else 0) * 256 ^ 8 =
-      (a.toNat : Int) + (b.toNat : Int) + carry_int := by
-  have ha_lt : a.toNat < 2 ^ 64 := a.isLt
-  have hb_lt : b.toNat < 2 ^ 64 := b.isLt
-  dsimp only
-  cases c <;> simp [BitVec.toNat_add] <;> split <;> omega
+The projection lemmas of the flag functions (`@[kcond]`: used by `kstep` when deciding branch
+conditions and by `kfinish`) and the limb identities for carry chains. The compare idiom
+(`subs`/`cmp` followed by a condition code) is covered by the architecture-independent
+`BitVec.cmp_*` lemmas in `Kraken.BitVecArith`. -/
 
-theorem sbcs_bv (a b : BitVec 64) (c : Bool) :
-    let borrow : BitVec 64 := BitVec.ofNat 64 (!c).toNat
-    let res : BitVec 64 := a - b - borrow
-    let borrow_int : Int := if c then 0 else 1
-    let c' : Bool := (res.toNat : Int) == (a.toNat : Int) - (b.toNat : Int) - borrow_int
-    (res.toNat : Int) - (if c' then 0 else 1) * 256 ^ 8 =
-      (a.toNat : Int) - (b.toNat : Int) - borrow_int := by
-  have ha_lt : a.toNat < 2 ^ 64 := a.isLt
-  have hb_lt : b.toNat < 2 ^ 64 := b.isLt
-  have h_res : ((a - b - BitVec.ofNat 64 (!c).toNat).toNat : Int) =
-      if (a.toNat : Int) ≥ (b.toNat : Int) + (if c then 0 else 1) then
-        (a.toNat : Int) - (b.toNat : Int) - (if c then 0 else 1)
-      else
-        (a.toNat : Int) - (b.toNat : Int) - (if c then 0 else 1) + 2 ^ 64 := by
-    cases c <;> simp [BitVec.toNat_sub] <;> omega
-  dsimp only
-  rw [h_res]
-  by_cases h : (a.toNat : Int) ≥ (b.toNat : Int) + (if c then 0 else 1)
-  · simp [h]
-  · simp [h]; omega
+namespace StatusFlags
+section
+variable {w : Nat} (a b : BitVec w) (cin : Bool)
+
+/-! ### Projections -/
+
+@[simp, kcond, grind =] theorem logical_n (res : BitVec w) : (logical res).n = res.msb := rfl
+@[simp, kcond, grind =] theorem logical_z (res : BitVec w) : (logical res).z = decide (res = 0#w) := by
+  simp [logical, from_result, Bool.beq_eq_decide_eq]
+@[simp, kcond, grind =] theorem logical_c (res : BitVec w) : (logical res).c = false := rfl
+@[simp, kcond, grind =] theorem logical_v (res : BitVec w) : (logical res).v = false := rfl
+
+@[simp, kcond, grind =] theorem adds_n : (adds a b).n = (a + b).msb := rfl
+@[simp, kcond, grind =] theorem adds_z : (adds a b).z = decide (a + b = 0#w) := by
+  simp [adds, from_result, Bool.beq_eq_decide_eq]
+@[simp, kcond, grind =] theorem adds_c : (adds a b).c = decide (2 ^ w ≤ a.toNat + b.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [adds, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
+  have := BitVec.toNat_add_cases a b
+  omega
+@[simp, kcond, grind =] theorem adds_v : (adds a b).v = BitVec.saddOverflow a b := by
+  rw [BitVec.saddOverflow_eq_decide]
+  rcases w with _ | w
+  · simp [adds, from_result, BitVec.signed, BitVec.of_length_zero]
+  · rw [Bool.eq_iff_iff]
+    simp only [adds, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq,
+      BitVec.toInt_add, ne_eq, Int.bmod_two_pow_eq_self_iff (w := w + 1) (by omega)]
+    omega
+
+@[simp, kcond, grind =] theorem adcs_n :
+    (adcs a b cin).n = (a + b + BitVec.ofNat w cin.toNat).msb := rfl
+@[simp, kcond, grind =] theorem adcs_z :
+    (adcs a b cin).z = decide (a + b + BitVec.ofNat w cin.toNat = 0#w) := by
+  simp [adcs, from_result, Bool.beq_eq_decide_eq]
+@[simp, kcond, grind =] theorem adcs_c :
+    (adcs a b cin).c = decide (2 ^ w ≤ a.toNat + b.toNat + cin.toNat) := by
+  rcases Nat.eq_zero_or_pos w with rfl | hw
+  · cases cin <;> simp [adcs, from_result, BitVec.unsigned, BitVec.of_length_zero]
+  rw [Bool.eq_iff_iff]
+  simp only [adcs, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
+  have h1 := BitVec.toNat_add_cases a b
+  have h2 := BitVec.toNat_add_cases (a + b) (BitVec.ofNat w cin.toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
+  cases cin <;> simp only [Bool.toNat_false, Bool.toNat_true, Bool.false_eq_true,
+    ↓reduceIte] at h2 ⊢ <;> omega
+@[simp, kcond, grind =] theorem adcs_v (hw : 1 < w) :
+    (adcs a b cin).v = decide (a.toInt + b.toInt + cin.toNat < -2 ^ (w - 1) ∨
+      2 ^ (w - 1) ≤ a.toInt + b.toInt + cin.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [adcs, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq, BitVec.toInt_add,
+    Int.bmod_add_bmod, BitVec.toInt_ofNat_toNat_bool hw, ne_eq]
+  cases cin <;> simp only [Bool.toNat_false, Bool.toNat_true, Bool.false_eq_true, ↓reduceIte,
+    Int.natCast_zero, Int.natCast_one, Int.add_zero,
+    Int.bmod_two_pow_eq_self_iff (w := w) (by omega)] <;> omega
+
+@[simp, kcond, grind =] theorem subs_n : (subs a b).n = (a - b).msb := rfl
+@[simp, kcond, grind =] theorem subs_z : (subs a b).z = decide (a = b) := by
+  have : a - b = 0#w ↔ a = b := by grind
+  simp [subs, from_result, Bool.beq_eq_decide_eq, this]
+@[simp, kcond, grind =] theorem subs_c : (subs a b).c = decide (b.toNat ≤ a.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [subs, from_result, BitVec.unsigned, beq_iff_eq, decide_eq_true_eq]
+  have := BitVec.toNat_sub_cases a b
+  have := a.isLt; have := b.isLt
+  omega
+@[simp, kcond, grind =] theorem subs_v : (subs a b).v = BitVec.ssubOverflow a b := by
+  rw [BitVec.ssubOverflow_eq_decide]
+  rcases w with _ | w
+  · simp [subs, from_result, BitVec.signed, BitVec.of_length_zero]
+  · rw [Bool.eq_iff_iff]
+    simp only [subs, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq,
+      BitVec.toInt_sub, ne_eq, Int.bmod_two_pow_eq_self_iff (w := w + 1) (by omega)]
+    omega
+
+@[simp, kcond, grind =] theorem sbcs_n :
+    (sbcs a b cin).n = (a - b - BitVec.ofNat w (!cin).toNat).msb := rfl
+@[simp, kcond, grind =] theorem sbcs_z :
+    (sbcs a b cin).z = decide (a - b - BitVec.ofNat w (!cin).toNat = 0#w) := by
+  simp [sbcs, from_result, Bool.beq_eq_decide_eq]
+@[simp, kcond, grind =] theorem sbcs_c :
+    (sbcs a b cin).c = decide (b.toNat + (!cin).toNat ≤ a.toNat) := by
+  rcases Nat.eq_zero_or_pos w with rfl | hw
+  · cases cin <;> simp [sbcs, from_result, BitVec.unsigned, BitVec.of_length_zero]
+  rw [Bool.eq_iff_iff]
+  simp only [sbcs, from_result, BitVec.unsigned, beq_iff_eq, decide_eq_true_eq]
+  have h1 := BitVec.toNat_sub_cases a b
+  have h2 := BitVec.toNat_sub_cases (a - b) (BitVec.ofNat w (!cin).toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
+  have := a.isLt; have := b.isLt
+  cases cin <;> simp only [Bool.not_false, Bool.not_true, Bool.toNat_false, Bool.toNat_true,
+    Bool.false_eq_true, ↓reduceIte] at h2 ⊢ <;> omega
+@[simp, kcond, grind =] theorem sbcs_v (hw : 1 < w) :
+    (sbcs a b cin).v = decide (a.toInt - b.toInt - (!cin).toNat < -2 ^ (w - 1) ∨
+      2 ^ (w - 1) ≤ a.toInt - b.toInt - (!cin).toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [sbcs, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq, BitVec.toInt_sub,
+    Int.bmod_sub_bmod, BitVec.toInt_ofNat_toNat_bool hw, ne_eq]
+  cases cin <;> simp only [Bool.not_false, Bool.not_true, Bool.toNat_false, Bool.toNat_true,
+    Bool.false_eq_true, ↓reduceIte, Int.natCast_zero, Int.natCast_one, Int.sub_zero,
+    Int.bmod_two_pow_eq_self_iff (w := w) (by omega)] <;> omega
+
+/-! ### Limb identities for carry chains: wrapped result + carry weight = exact result -/
+
+theorem adds_toNat :
+    ((a + b).toNat : Int) + ((adds a b).c).toNat * (2 ^ w : Nat) = a.toNat + b.toNat := by
+  rw [adds_c]
+  have := BitVec.toNat_add_cases a b
+  by_cases h : 2 ^ w ≤ a.toNat + b.toNat <;> simp only [h, decide_true, decide_false,
+    Bool.toNat_true, Bool.toNat_false] <;> omega
+
+theorem adcs_toNat (hw : 0 < w) :
+    ((a + b + BitVec.ofNat w cin.toNat).toNat : Int) + ((adcs a b cin).c).toNat * (2 ^ w : Nat) =
+      a.toNat + b.toNat + cin.toNat := by
+  rw [adcs_c]
+  have h1 := BitVec.toNat_add_cases a b
+  have h2 := BitVec.toNat_add_cases (a + b) (BitVec.ofNat w cin.toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
+  have := a.isLt; have := b.isLt
+  have hc : cin.toNat ≤ 1 := by cases cin <;> simp
+  by_cases h : 2 ^ w ≤ a.toNat + b.toNat + cin.toNat <;> simp only [h, decide_true, decide_false,
+    Bool.toNat_true, Bool.toNat_false] <;> omega
+
+theorem subs_toNat :
+    ((a - b).toNat : Int) - (!(subs a b).c).toNat * (2 ^ w : Nat) = a.toNat - b.toNat := by
+  rw [subs_c]
+  have := BitVec.toNat_sub_cases a b
+  by_cases h : b.toNat ≤ a.toNat <;> simp only [h, decide_true, decide_false, Bool.not_true,
+    Bool.not_false, Bool.toNat_true, Bool.toNat_false] <;> omega
+
+theorem sbcs_toNat (hw : 0 < w) :
+    ((a - b - BitVec.ofNat w (!cin).toNat).toNat : Int) - (!(sbcs a b cin).c).toNat * (2 ^ w : Nat) =
+      a.toNat - b.toNat - (!cin).toNat := by
+  rw [sbcs_c]
+  have h1 := BitVec.toNat_sub_cases a b
+  have h2 := BitVec.toNat_sub_cases (a - b) (BitVec.ofNat w (!cin).toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
+  have := a.isLt; have := b.isLt
+  have hc : (!cin).toNat ≤ 1 := by cases cin <;> simp
+  by_cases h : b.toNat + (!cin).toNat ≤ a.toNat <;> simp only [h, decide_true, decide_false,
+    Bool.not_true, Bool.not_false, Bool.toNat_true, Bool.toNat_false] <;> omega
+
+end
+end StatusFlags
+
+/-! ## 64-bit carry/borrow helpers used by the multi-limb examples
+
+Thin aliases for the flag functions on `UInt64` operands, and their limb identities. -/
 
 abbrev sub0Word (b a : UInt64) : BitVec 64 := b.toBitVec - a.toBitVec
-abbrev sub0Carry (b a : UInt64) : Bool :=
-  ((sub0Word b a).toNat : Int) == (b.toNat : Int) - (a.toNat : Int)
+abbrev sub0Carry (b a : UInt64) : Bool := (StatusFlags.subs b.toBitVec a.toBitVec).c
 
 abbrev sbcWord (b a : UInt64) (c : Bool) : BitVec 64 :=
   b.toBitVec - a.toBitVec - BitVec.ofNat 64 (!c).toNat
-abbrev sbcCarry (b a : UInt64) (c : Bool) : Bool :=
-  ((sbcWord b a c).toNat : Int) == (b.toNat : Int) - (a.toNat : Int) - (if c then 0 else 1)
+abbrev sbcCarry (b a : UInt64) (c : Bool) : Bool := (StatusFlags.sbcs b.toBitVec a.toBitVec c).c
 
 abbrev add0Word (x y : UInt64) : BitVec 64 := x.toBitVec + y.toBitVec
-abbrev add0Carry (x y : UInt64) : Bool :=
-  ((add0Word x y).toNat : Int) != (x.toNat : Int) + (y.toNat : Int)
+abbrev add0Carry (x y : UInt64) : Bool := (StatusFlags.adds x.toBitVec y.toBitVec).c
 
 abbrev adcWord (x y : UInt64) (c : Bool) : BitVec 64 :=
   x.toBitVec + y.toBitVec + BitVec.ofNat 64 c.toNat
-abbrev adcCarry (x y : UInt64) (c : Bool) : Bool :=
-  ((adcWord x y c).toNat : Int) != (x.toNat : Int) + (y.toNat : Int) + (if c then 1 else 0)
+abbrev adcCarry (x y : UInt64) (c : Bool) : Bool := (StatusFlags.adcs x.toBitVec y.toBitVec c).c
 
 theorem sub0_step (b a : UInt64) :
     ((UInt64.ofBitVec (sub0Word b a)).toNat : Int) - (if sub0Carry b a then 0 else 1) * 256 ^ 8 =
       (b.toNat : Int) - (a.toNat : Int) := by
-  have hb : b.toNat < 2 ^ 64 := b.toBitVec.isLt
-  have ha : a.toNat < 2 ^ 64 := a.toBitVec.isLt
+  have h := BitVec.toNat_sub_cases b.toBitVec a.toBitVec
   dsimp only [sub0Word, sub0Carry]
   rw [UInt64.toNat_ofBitVec]
-  simp [BitVec.toNat_sub]
+  simp only [StatusFlags.subs_c, UInt64.toNat_toBitVec, decide_eq_true_eq] at h ⊢
   split <;> omega
 
 theorem sbc_step (b a : UInt64) (c : Bool) :
     ((UInt64.ofBitVec (sbcWord b a c)).toNat : Int) - (if sbcCarry b a c then 0 else 1) * 256 ^ 8 =
       (b.toNat : Int) - (a.toNat : Int) - (if c then 0 else 1) := by
+  have h1 := BitVec.toNat_sub_cases b.toBitVec a.toBitVec
+  have h2 := BitVec.toNat_sub_cases (b.toBitVec - a.toBitVec) (BitVec.ofNat 64 (!c).toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool (by decide)] at h2
   dsimp only [sbcWord, sbcCarry]
   rw [UInt64.toNat_ofBitVec]
-  exact sbcs_bv b.toBitVec a.toBitVec c
+  simp only [StatusFlags.sbcs_c, UInt64.toNat_toBitVec, decide_eq_true_eq] at h1 h2 ⊢
+  have hb : b.toNat < 2 ^ 64 := b.toBitVec.isLt
+  have ha : a.toNat < 2 ^ 64 := a.toBitVec.isLt
+  cases c <;> simp only [Bool.not_false, Bool.not_true, Bool.toNat_false, Bool.toNat_true,
+    Bool.false_eq_true, ↓reduceIte] at h2 ⊢ <;> split <;> omega
 
 theorem add0_step (x y : UInt64) :
     ((UInt64.ofBitVec (add0Word x y)).toNat : Int) + (if add0Carry x y then 1 else 0) * 256 ^ 8 =
       (x.toNat : Int) + (y.toNat : Int) := by
-  have hx : x.toNat < 2 ^ 64 := x.toBitVec.isLt
-  have hy : y.toNat < 2 ^ 64 := y.toBitVec.isLt
+  have h := BitVec.toNat_add_cases x.toBitVec y.toBitVec
   dsimp only [add0Word, add0Carry]
   rw [UInt64.toNat_ofBitVec]
-  simp [BitVec.toNat_add]
+  simp only [StatusFlags.adds_c, UInt64.toNat_toBitVec, decide_eq_true_eq] at h ⊢
   split <;> omega
 
 theorem adc_step (x y : UInt64) (c : Bool) :
     ((UInt64.ofBitVec (adcWord x y c)).toNat : Int) + (if adcCarry x y c then 1 else 0) * 256 ^ 8 =
       (x.toNat : Int) + (y.toNat : Int) + (if c then 1 else 0) := by
+  have h1 := BitVec.toNat_add_cases x.toBitVec y.toBitVec
+  have h2 := BitVec.toNat_add_cases (x.toBitVec + y.toBitVec) (BitVec.ofNat 64 c.toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool (by decide)] at h2
   dsimp only [adcWord, adcCarry]
   rw [UInt64.toNat_ofBitVec]
-  exact adcs_bv x.toBitVec y.toBitVec c
+  simp only [StatusFlags.adcs_c, UInt64.toNat_toBitVec, decide_eq_true_eq] at h1 h2 ⊢
+  have hx : x.toNat < 2 ^ 64 := x.toBitVec.isLt
+  have hy : y.toNat < 2 ^ 64 := y.toBitVec.isLt
+  cases c <;> simp only [Bool.toNat_false, Bool.toNat_true, Bool.false_eq_true, ↓reduceIte]
+    at h2 ⊢ <;> split <;> omega
 
 @[simp, ksimp, grind =]
 theorem BitVec.zeroExtend_64_extractLsb'_63_ushiftRight_1 (v : BitVec 64) :
