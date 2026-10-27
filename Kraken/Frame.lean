@@ -56,6 +56,30 @@ theorem EqExcept.symm {W : List (Name R)} {r' r : R} (h : EqExcept W r' r) : EqE
 theorem EqExcept.nil_iff {r' r : R} : EqExcept [] r' r ↔ ∀ n, RegFile.get r' n = RegFile.get r n :=
   ⟨fun h n => h n (List.not_mem_nil), fun h n _ => h n⟩
 
+/-- A register-file projection or derived view `proj : R → α`. -/
+structure View (R : Type) where
+  {α : Type}
+  proj : R → α
+
+def View.of {R α : Type} (f : R → α) : View R := ⟨f⟩
+
+/-- `r'` agrees with `r` on every register or view in `vs`. -/
+def EqOn {R : Type} (vs : List (View R)) (r' r : R) : Prop :=
+  ∀ v ∈ vs, v.proj r' = v.proj r
+
+theorem EqOn.refl {R : Type} (vs : List (View R)) (r : R) : EqOn vs r r :=
+  fun _ _ => rfl
+
+theorem EqOn.nil {R : Type} (r' r : R) : EqOn ([] : List (View R)) r' r :=
+  fun _ h => nomatch h
+
+theorem EqOn.cons {R : Type} {v : View R} {vs : List (View R)} {r' r : R}
+    (h : v.proj r' = v.proj r) (hs : EqOn vs r' r) : EqOn (v :: vs) r' r := by
+  intro w hw
+  cases hw with
+  | head => exact h
+  | tail _ hw' => exact hs w hw'
+
 end RegFile
 
 end Kraken
@@ -72,6 +96,11 @@ namespace Kraken.RegFile
 (see `Kraken.RegFile.EqExcept`). The names are constructors of the register-name type of
 `r'`/`r` (possibly nested one level, e.g. `X13` for `XRegOrSp.reg XReg.X13`). -/
 syntax:50 term:51 " ≡ " term:51 " except " "[" ident,* "]" : term
+
+/-- `r' ≡ r on [a, b, …]`: `r'` and `r` agree on the listed registers or derived views
+(e.g. `SP`, `X29`, `beeuN`; see `Kraken.RegFile.EqOn`). Each name is resolved on the register-file
+type `R` first (`R.<name>`), or elaborated directly as a function `R → α`. -/
+syntax:50 term:51 " ≡ " term:51 " on " "[" ident,* "]" : term
 
 /-- Resolve a register name against the constructors of `nameTy` (one level of nesting allowed). -/
 private def resolveRegName (nameTy : Lean.Name) (id : Ident) : MetaM Expr := do
@@ -95,6 +124,25 @@ private def resolveRegName (nameTy : Lean.Name) (id : Ident) : MetaM Expr := do
                 return mkApp (mkConst c) (mkConst c')
   throwErrorAt id "unknown register `{s}` for register names of type `{nameTy}`"
 
+/-- Resolve a register projection or derived view `id` on register-file type `R` into `View.of f`. -/
+private def resolveView (R : Expr) (id : Ident) : TermElabM Expr := do
+  let mut cands : Array Ident := #[]
+  if let .const RName _ := R.getAppFn then
+    cands := cands.push (mkIdentFrom id (RName ++ id.getId))
+    cands := cands.push (mkIdentFrom id (Lean.Name.mkSimple RName.getString! ++ id.getId))
+  cands := cands.push id
+  for cand in cands do
+    let s ← saveState
+    try
+      let α ← mkFreshTypeMVar
+      let expectedTy ← mkArrow R α
+      let f ← withoutErrToSorry <| elabTermEnsuringType cand expectedTy
+      Term.synthesizeSyntheticMVarsNoPostponing
+      return ← mkAppM ``Kraken.RegFile.View.of #[f]
+    catch _ =>
+      s.restore
+  throwErrorAt id "unknown register or view `{id.getId}` on `{R}`"
+
 elab_rules : term
   | `($r':term ≡ $r:term except [$ns:ident,*]) => do
     let r' ← elabTerm r' none
@@ -107,6 +155,14 @@ elab_rules : term
     let elems ← ns.getElems.mapM fun id => (resolveRegName nameTy id : MetaM Expr)
     let W ← mkListLit nameTyE elems.toList
     return mkAppN (mkConst ``Kraken.RegFile.EqExcept) #[R, inst, W, r', r]
+  | `($r':term ≡ $r:term on [$ns:ident,*]) => do
+    let r' ← elabTerm r' none
+    let R ← instantiateMVars (← inferType r')
+    let r ← elabTermEnsuringType r R
+    let elems ← ns.getElems.mapM fun id => resolveView R id
+    let viewTy := mkApp (mkConst ``Kraken.RegFile.View) R
+    let vs ← mkListLit viewTy elems.toList
+    return mkAppN (mkConst ``Kraken.RegFile.EqOn) #[R, vs, r', r]
 
 /-- Last identifier component of a register-name term, for pretty printing. -/
 private partial def regNameIdent? (stx : Term) : Option Ident :=
@@ -124,6 +180,13 @@ def unexpandEqExcept : PrettyPrinter.Unexpander
   | `($_ [$ns:term,*] $r' $r) => do
     let some ids := ns.getElems.mapM regNameIdent? | throw ()
     `($r' ≡ $r except [$ids,*])
+  | _ => throw ()
+
+@[app_unexpander Kraken.RegFile.EqOn]
+def unexpandEqOn : PrettyPrinter.Unexpander
+  | `($_ [$vs:term,*] $r' $r) => do
+    let some ids := vs.getElems.mapM regNameIdent? | throw ()
+    `($r' ≡ $r on [$ids,*])
   | _ => throw ()
 
 end Kraken.RegFile
