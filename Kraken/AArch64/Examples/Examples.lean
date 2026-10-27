@@ -13,7 +13,6 @@ import Kraken.Eval
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
-import Std.Tactic.BVDecide
 
 
 open Kraken.AArch64

@@ -11,7 +11,6 @@ import Kraken.AArch64.Semantics
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
-import Std.Tactic.BVDecide
 
 open Kraken.AArch64
 open Kraken.AArch64.Parser
