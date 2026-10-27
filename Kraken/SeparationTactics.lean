@@ -280,14 +280,19 @@ def solveArithGoal (g : MVarId) : MetaM Bool := g.withContext do
       let simpThms ← lengthSimpLemmas.foldlM (fun (s : SimpTheorems) n => s.addConst n) {}
       let simpThms ← simpOnlyBuiltinThms simpThms
       let ctx ← Simp.mkContext {} (simpTheorems := #[simpThms]) (congrTheorems := ← getSimpCongrTheorems)
-      let (r, _) ← simpGoal g ctx (simprocs := #[← Simp.getSimprocs])
-      let some (_, g) := r | return true
+      -- (`simpGoal` throws when nothing simplifies; the goal may already be in normal form)
+      let g ← (do
+        let (r, _) ← simpGoal g ctx (simprocs := #[← Simp.getSimprocs])
+        pure (r.map (·.2))) <|> pure (some g)
+      let some g := g | return true
       let some g ← g.falseOrByContra | return true
       g.withContext do
         let hyps := (← getLocalHyps).toList
         Lean.Elab.Tactic.Omega.omega hyps g {}
       return true
-    catch _ => return false
+    catch e =>
+      trace[Kraken.sep] "solveArithGoal failed: {e.toMessageData}"
+      return false
 
 /-- `some true` if `prop` holds by `solveArithGoal`, `some false` if its negation does, `none`
 otherwise. Used to avoid expensive `grind` calls on side goals that are simply false. -/
