@@ -494,13 +494,10 @@ def extr1Word (hi lo : UInt64) : BitVec 64 :=
   (hi.toBitVec <<< 63) ||| (lo.toBitVec >>> 1)
 
 theorem extr_sem_eq (hi lo : UInt64) :
-    (if (1 == 0) = true then lo.toBitVec else hi.toBitVec <<< (64 - 1) ||| lo.toBitVec >>> 1) =
-      extr1Word hi lo := rfl
+    hi.toBitVec <<< (64 - 1) ||| lo.toBitVec >>> 1 = extr1Word hi lo := rfl
 
 theorem ubfm_lsr1_sem_eq (x : UInt64) :
-    (if (1 : Nat) ≤ 63 then BitVec.setWidth 64 (BitVec.extractLsb' 0 63 (x.toBitVec >>> 1))
-     else BitVec.setWidth 64 (BitVec.extractLsb' 0 64 x.toBitVec) <<< 63) =
-      x.toBitVec >>> 1 := by
+    BitVec.setWidth 64 (BitVec.extractLsb' 0 63 (x.toBitVec >>> 1)) = x.toBitVec >>> 1 := by
   bv_decide
 
 theorem extr1_eq_add_bv (hi lo : BitVec 64) :

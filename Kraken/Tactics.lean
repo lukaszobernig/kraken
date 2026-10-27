@@ -844,8 +844,18 @@ elab_rules : tactic
       evalTactic (← `(tactic| apply Eventually.done))
     evalTactic (← `(tactic| (try dsimp +zetaDelta only [$lemmas,*] at *)))
     evalTactic (← `(tactic| (try dsimp +zetaDelta only at *)))
+    -- the `BitVec`/`UInt64` normal form of `kstep` (ground conditions and arithmetic are folded
+    -- by the default simprocs)
+    let nfStx ← (Kraken.Tactic.normalFormLemmas ++ [``Bool.false_eq_true, ``Bool.true_eq_false,
+        ``beq_self_eq_true, ``bne_self_eq_false]).filterMapM fun n => do
+      if (← getEnv).contains n then
+        some <$> `(Lean.Parser.Tactic.simpLemma| $(mkIdent n):ident)
+      else pure none
+    let nfStx := nfStx.toArray.push (← `(Lean.Parser.Tactic.simpLemma| ↓reduceIte))
     evalTactic (← `(tactic| (try simp only [BitVec.shiftLeft_zero, BitVec.zero_or, BitVec.or_zero,
       BitVec.xor_self, UInt64.toNat_toBitVec, UInt64.toBitVec_ofBitVec] at *)))
+    -- goal only, deciding ground conditions (`if (1 == 0) = true then … else …`)
+    evalTactic (← `(tactic| (try simp +decide only [$nfStx,*])))
     -- Apply the extra lemmas to the goal and to every hypothesis that is not itself one of them.
     let lemmaNames : Array Name := lemmas.filterMap fun l =>
       match l.raw.find? (·.isIdent) with
@@ -1442,6 +1452,12 @@ theorem gimmickId_Effects_All_require_const_time {MD : Type}
 
 -- Enable with `set_option trace.Kraken.kstep true`.
 initialize registerTraceClass `Kraken.kstep
+initialize registerTraceClass `Kraken.kstep.phase
+
+register_option kraken.kstep.normalizeLets : Bool := {
+  defValue := true
+  descr := "kstep: bring the values of `let`-bound intermediate results into the normal form before introducing them"
+}
 
 -- Debugging the reduction steps: to easily have a marker that tells us when we've hit the top-level
 -- term, we assume prior to running `kstep`, the user does `apply gimmick`. (This also avoids having
@@ -1776,6 +1792,32 @@ partial def evalSymKStep : Grind.GrindTactic :=
     let mvarId ← goal.mvarId.replaceTargetDefEq target'
     return { goal with mvarId }
 
+  -- Bring the value of a leading `let` into the `ksimp` normal form before it is introduced into
+  -- the context (introduced values are never simplified again, and un-normalised values such as
+  -- `x <<< 0` make later definitional matching against user lemmas fail).
+  let simpLetValue (goal : Grind.Goal) : Grind.GrindTacticM Grind.Goal := goal.withContext do
+    let t := (← instantiateMVars (← goal.mvarId.getType)).consumeMData
+    let .letE n ty v b nd := t | return goal
+    unless kraken.kstep.normalizeLets.get (← getOptions) do return goal
+    if v.hasLooseBVars then return goal
+    -- only register-sized values (not memories or byte lists)
+    unless ← Kraken.Tactic.isWordType ty do return goal
+    -- stuck `match`es (e.g. the operand width inside instance arguments) block lemma matching
+    let v₁ ← Kraken.Tactic.reduceStuckMatchers v
+    let (v', h?) ← match ← Kraken.Tactic.simpNormalForm v₁ with
+      | none => pure (v₁, none)
+      | some (v', h) => pure (v', some h)
+    if v' == v then return goal
+    trace[Kraken.kstep.phase] "simpLetValue {n} := {v} ↦ {v'}"
+    let h ← match h? with
+      | some h => pure h
+      | none => mkExpectedTypeHint (← mkEqRefl v) (← mkEq v v')
+    let f := mkLambda n .default ty b
+    let eqPrf ← mkCongrArg f h
+    let newTarget ← Grind.liftSymM (Sym.preprocessExpr (mkLet n ty v' b nd))
+    let mvarId ← goal.mvarId.replaceTargetEq newTarget eqPrf
+    return { goal with mvarId }
+
   -- TODO: remove once we have lift_lets
   let introsIf (goal: Grind.Goal): Grind.GrindTacticM Grind.Goal := do
     let goalT ← instantiateMVars (← goal.mvarId.getType)
@@ -1783,16 +1825,30 @@ partial def evalSymKStep : Grind.GrindTactic :=
     let inner := inner.consumeMData
     unless inner.isLet || inner.isForall do return goal
     let goal ← removeGimmick goal
-    let goal ← match ← Grind.liftGrindM (goal.intros #[]) with
+    let rec introLoop (goal : Grind.Goal) (fuel : Nat) : Grind.GrindTacticM Grind.Goal := do
+      if fuel = 0 then return goal
+      let goal ← simpLetValue goal
+      match ← Grind.liftGrindM (goal.introN 1) with
       | Grind.IntrosResult.failed => pure goal
-      | .goal _ goal => pure goal
+      | .goal _ goal => introLoop goal (fuel - 1)
+    let goal ← introLoop goal 1024
     pure (← insertGimmick goal)
 
+  let tStep ← IO.mkRef (0 : Nat)
+  let tSimp ← IO.mkRef (0 : Nat)
+  let tSpec ← IO.mkRef (0 : Nat)
+  let tIte ← IO.mkRef (0 : Nat)
+  let tPre ← IO.mkRef (0 : Nat)
+  let timed {α} (r : IO.Ref Nat) (x : Grind.GrindTacticM α) : Grind.GrindTacticM α := do
+    let t0 ← IO.monoNanosNow
+    try x finally
+      let t1 ← IO.monoNanosNow
+      r.modify (· + (t1 - t0))
   -- MAIN LOOP
   let rec go (goal: Grind.Goal): Grind.GrindTacticM (Grind.Goal × List Grind.Goal) := do
     if config.debug then
       logInfo m!"[hb={← IO.getNumHeartbeats}] start of go"
-    let goal ← goal.withContext (preprocessGoalIfNeeded goal)
+    let goal ← timed tPre <| goal.withContext (preprocessGoalIfNeeded goal)
     if config.debug then
       logInfo m!"[hb={← IO.getNumHeartbeats}] after preprocessGoalIfNeeded"
     -- STEP 1: dsimp and step through Directives.interp via equational theorems
@@ -1936,13 +1992,14 @@ partial def evalSymKStep : Grind.GrindTactic :=
       | none =>
         return goal
 
-    let goal ← stepDirectivesLoop goal
+    let goal ← timed tStep <| withTraceNode `Kraken.kstep.phase (fun _ => return m!"step (dsimp + directives)") do
+      stepDirectivesLoop goal
     goal.withContext do
     if config.debug then
       logInfo m!"[hb={← IO.getNumHeartbeats}] after stepDirectivesLoop"
 
     -- STEP 2: simp
-    let (keepGoingSimp, goal) ← Grind.liftGrindM $ do
+    let (keepGoingSimp, goal) ← timed tSimp <| withTraceNode `Kraken.kstep.phase (fun _ => return m!"ksimp") <| Grind.liftGrindM $ do
       let simpResult ← Sym.simpGoal goal.mvarId simpMethods
       match simpResult with
       | .noProgress => pure (false, goal)
@@ -1999,7 +2056,8 @@ partial def evalSymKStep : Grind.GrindTactic :=
         if config.debug then
           logInfo m!"[hb={← IO.getNumHeartbeats}] before rwTarget {thmName}"
         trace[Kraken.kstep] "Found a spec lemma: {thmName}"
-        let (goal, subGoals) ← rwTarget goal false (mkConst thmName)
+        let (goal, subGoals) ← timed tSpec <| withTraceNode `Kraken.kstep.phase (fun _ => return m!"spec rewrite {thmName}") do
+          rwTarget goal false (mkConst thmName)
         if config.debug then
           logInfo m!"[hb={← IO.getNumHeartbeats}] after rwTarget {thmName} ({subGoals.length} subgoals)"
         trace[Kraken.kstep] "{subGoals.length} subgoals generated"
@@ -2459,7 +2517,9 @@ partial def evalSymKStep : Grind.GrindTactic :=
             return (goal, subGoals)
 
         -- Then, we repeatedly visit subgoals until all are solved or we make no progress.
-        while !(← subGoals.allM (·.mvarId.isAssigned)) do
+        subGoals ← timed tSpec <| withTraceNode `Kraken.kstep.phase (fun _ => return m!"spec side goals") do
+         let mut subGoals := subGoals
+         while !(← subGoals.allM (·.mvarId.isAssigned)) do
           let mut progress := false
           let mut newSubGoals := []
           for subGoal in subGoals do
@@ -2468,6 +2528,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             newSubGoals := newSubGoals ++ [subGoal']
           subGoals := newSubGoals
           unless progress do break
+         pure subGoals
 
         -- Unsolved goals left? Return control to the user
         let unsolvedGoals ← subGoals.filterMapM fun (g: Grind.Goal) => do
@@ -2487,7 +2548,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
       | _ =>
         throwError "TODO"
 
-    let (keepGoingIte, goal) ←
+    let (keepGoingIte, goal) ← timed tIte do
       if !keepGoingSimp && !keepGoingSpec && effectsAll.appArg!.isAppOfArity ``ite 5 then
         if config.debug then
           logInfo m!"[hb={← IO.getNumHeartbeats}] entering STEP 4 (ite) on {effectsAll.appArg!.getArg! 1}"
@@ -2499,6 +2560,13 @@ partial def evalSymKStep : Grind.GrindTactic :=
         let f := iteExpr.getArg! 4
         let tryProveIteCond (prop : Expr) : Grind.GrindTacticM (Option Expr) :=
           goal.mvarId.withContext do
+            -- Fast path: a hypothesis proves the condition up to definitional unfolding (let-bound
+            -- intermediate values, `abbrev`s) and `Bool` negation (`b = false` for `¬ b = true`).
+            -- This avoids expanding the let-shared condition, which can be exponentially large.
+            trace[Kraken.kstep.phase] "ite condition: {prop}"
+            if let some prf ← Kraken.Tactic.assumptionModBool prop then
+              trace[Kraken.kstep] "ite condition by assumption: {prop}"
+              return some prf
             let saved ← Grind.saveState
             try
               let mvar ← mkFreshExprSyntheticOpaqueMVar prop
@@ -2580,6 +2648,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
   let goal ← removeGimmick goal
 
   trace[Kraken.kstep] "END KSTEP: {subGoals.length} sub-goals left"
+  trace[Kraken.kstep.phase] "kstep time (ms): preprocess {(← tPre.get) / 1000000}, step {(← tStep.get) / 1000000}, ksimp {(← tSimp.get) / 1000000}, spec {(← tSpec.get) / 1000000}, ite {(← tIte.get) / 1000000}"
 
   if let .some r := maxInstrCount then
     let remaining ← r.get

@@ -344,6 +344,108 @@ def decideBitVecAddEq (prop : Expr) : MetaM (Option Bool) := withoutModifyingSta
     return none
   catch _ => return none
 
+/-- Find a hypothesis proving `prop` up to definitional equality (lets, `abbrev`s), or, for
+`prop = ¬ (b = true)` / `¬ (b = false)`, a hypothesis `b' = false` / `b' = true` with `b ≡ b'`. -/
+def assumptionModBool (prop : Expr) : MetaM (Option Expr) :=
+  -- let-bound intermediate values of the symbolic state must be unfolded
+  withConfig (fun c => { c with zetaDelta := true }) do
+  let prop ← instantiateMVars prop
+  let isBoolEq (t : Expr) : Option (Expr × Expr) :=
+    match t.consumeMData.eq? with
+    | some (ty, lhs, rhs) => if ty.isConstOf ``Bool then some (lhs, rhs) else none
+    | none => none
+  let negated? : Option (Expr × Bool) :=
+    match prop.consumeMData.not? with
+    | some inner =>
+      match isBoolEq inner with
+      | some (b, v) =>
+        if v.isConstOf ``Bool.true then some (b, true)
+        else if v.isConstOf ``Bool.false then some (b, false) else none
+      | none => none
+    | none => none
+  let defEq (a b : Expr) : MetaM Bool :=
+    tryCatchRuntimeEx (withReducibleAndInstances (isDefEq a b) <||> isDefEq a b) (fun _ => pure false)
+  let propHead := prop.consumeMData.getAppFn
+  for decl in (← getLCtx) do
+    if decl.isImplementationDetail then continue
+    let t ← instantiateMVars decl.type
+    if t.hasExprMVar then continue
+    -- same head symbol (`Eq`, `Not`, …): cheap filter before definitional unfolding
+    if t.consumeMData.getAppFn == propHead then
+      if ← defEq t prop then
+        return some decl.toExpr
+    if let some (b, v) := negated? then
+      if let some (b', v') := isBoolEq t then
+        if v && v'.isConstOf ``Bool.false && (← defEq b b') then
+          return some (← mkExpectedTypeHint (← mkAppM ``ne_true_of_eq_false #[decl.toExpr]) prop)
+        if !v && v'.isConstOf ``Bool.true && (← defEq b b') then
+          return some (← mkExpectedTypeHint (← mkAppM ``ne_false_of_eq_true #[decl.toExpr]) prop)
+  return none
+
+/-- Reduce `match` applications and structure projections whose discriminant is a constructor
+application, everywhere in `e` (including implicit and instance arguments, which the `Sym`
+simplifiers do not visit). The result is definitionally equal to `e`. -/
+private def getStructureCtor? (major : Expr) : MetaM Name := do
+  let ty ← whnfD (← inferType major)
+  let .const tyName _ := ty.getAppFn | return .anonymous
+  let some info := getStructureInfo? (← getEnv) tyName | return .anonymous
+  let _ := info
+  return (getStructureCtor (← getEnv) tyName).name
+
+def reduceStuckMatchers (e : Expr) : MetaM Expr :=
+  Meta.transform e (post := fun e => do
+    if let .const fn _ := e.getAppFn then
+      if (← getMatcherInfo? fn).isSome then
+        if let .reduced e' ← reduceMatcher? e then return .visit e'
+      else if e.isApp then
+        -- structure (not class) projections of constructor applications
+        if let some info ← getProjectionFnInfo? fn then
+          if !info.fromClass && e.getAppNumArgs > info.numParams then
+            let major := e.getArg! info.numParams
+            if (← whnfCore major).isAppOf (← getStructureCtor? major) then
+              if let some e' ← Meta.unfoldDefinition? e then
+                let e'' ← whnfCore e'
+                unless e''.isProj do return .visit e''
+    else if e.isProj then
+      let e' ← whnfCore e
+      unless e'.isProj do return .visit e'
+    return .continue)
+
+/-- Lemmas of the `BitVec`/`UInt64` normal form `kstep` leaves its symbolic state in (also used
+by `kfinish`). -/
+def normalFormLemmas : List Name :=
+  [``BitVec.shiftLeft_zero, ``BitVec.zero_shiftLeft, ``BitVec.add_zero, ``BitVec.zero_add,
+   ``BitVec.or_zero, ``BitVec.zero_or, ``BitVec.xor_self, ``BitVec.setWidth_eq,
+   ``UInt64.toNat_toBitVec, ``UInt64.toBitVec_ofBitVec, ``UInt64.ofBitVec_toBitVec,
+   ``Int64.ofBitVec_toBitVec, ``Nat.sub_zero, ``Nat.add_zero, ``Nat.zero_add]
+
+/-- Bring a (small) term into the normal form with the standard simplifier, which, unlike the
+`Sym` simplifier, matches raw natural-number literals against `OfNat` numerals. Returns the new
+term and a proof of equality if anything changed. -/
+def simpNormalForm (e : Expr) : MetaM (Option (Expr × Expr)) := do
+  tryCatchRuntimeEx
+    (do
+      let thms ← normalFormLemmas.foldlM (fun (s : SimpTheorems) n => do
+        if (← getEnv).contains n then s.addConst n else pure s) {}
+      -- no simprocs: they would introduce `OfNat` numerals, while the `Sym` simplifier works
+      -- with the raw literals produced by its ground evaluation
+      let ctx ← Simp.mkContext {} (simpTheorems := #[thms]) (congrTheorems := ← getSimpCongrTheorems)
+      let (r, _) ← Meta.simp e ctx (simprocs := #[])
+      if r.expr == e then return none
+      let prf ← r.getProof
+      return some (r.expr, prf))
+    (fun _ => return none)
+
+/-- Is `ty` a machine-word-like type (`BitVec _`, `UInt*`, `Int*`, `Nat`, `Int`, `Bool`) whose
+values are worth normalising eagerly? -/
+def isWordType (ty : Expr) : MetaM Bool := do
+  let ty ← whnfR ty
+  if ty.isAppOf ``BitVec then return true
+  if let .const n _ := ty.getAppFn then
+    return [``UInt64, ``UInt32, ``UInt16, ``UInt8, ``Int64, ``Int32, ``Int16, ``Int8, ``Nat, ``Int,
+      ``Bool].contains n
+  return false
+
 inductive SimpWithHypsResult where
   | closed
   | refuted
@@ -353,7 +455,7 @@ inductive SimpWithHypsResult where
 `Bool`/`decide` normalisation). Reports whether the goal was closed, reduced to `False`, or
 replaced by a simplified goal. -/
 def simpWithHyps (g : MVarId) : MetaM SimpWithHypsResult := g.withContext do
-  try
+  tryCatchRuntimeEx (do
     let mut thms : SimpTheorems := {}
     for decl in (← getLCtx) do
       if decl.isImplementationDetail then continue
@@ -374,8 +476,8 @@ def simpWithHyps (g : MVarId) : MetaM SimpWithHypsResult := g.withContext do
     | some (_, g') =>
       if (← instantiateMVars (← g'.getType)).consumeMData.isConstOf ``False then
         return .refuted
-      return .goal g'
-  catch _ => return .goal g
+      return .goal g')
+    (fun _ => return .goal g)
 
 def provePropGoal (prop : Expr) : MetaM (Option Expr) :=
   commitWhenSomeNoEx? do
