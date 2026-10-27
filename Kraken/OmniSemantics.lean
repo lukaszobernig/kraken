@@ -49,26 +49,6 @@ theorem Eventually.bind {State : Type} {trans : State → Post → Prop} {p q : 
     Eventually trans q s :=
   eventually_trans trans p q s h₁ h₂
 
--- A loop down to 0
-theorem reg_dec_loop {State : Type} (trans : State → Post → Prop) (post : Post) (initial : State) (invariant : Nat → Post) (n : Nat) :
-  -- if:
-  -- invariant holds before entering the loop
-  invariant n initial ∧
-  -- final iteration allows proving `post`
-  (∀ state, invariant 0 state → Eventually trans post state) ∧
-  -- while iterating, we eventually re-establish the invariant
-  (∀ state k, k ≠ 0 → invariant k state → Eventually trans (invariant (k - 1)) state) →
-  -- then: we can prove the post
-  Eventually trans post initial
-  := by
-    rintro ⟨hinv, hzero, hnz⟩
-    if h : n = 0 then
-      exact hzero initial (h ▸ hinv)
-    else
-      exact eventually_trans trans (invariant (n - 1)) post initial
-        (hnz initial n h hinv) fun s hs =>
-          reg_dec_loop trans post s invariant (n - 1) ⟨hs, hzero, hnz⟩
-
 -- Tailrec-style loop rule
 -- Adapted from: https://github.com/mit-plv/bedrock2/blob/8ec2c459bbf16d6cf2baa7d433ae211a243b1011/bedrock2/src/bedrock2/Loops.v#L48
 -- This version moves the choice inside the Eventually postcondition.
@@ -111,26 +91,6 @@ theorem tailrec_loop {State Measure : Type _} {Ghost : Sort _}
   intro t_s hQ_t
   apply hQ_t
 
-/-- `tailrec_loop` specialised to a postcondition that does not depend on the measure or the
-ghost state: the loop body either reaches `post` directly or re-establishes the invariant `P`
-at a smaller measure. This removes the duplicated `Q` and the trivial `∀ t, Q → Q` obligation. -/
-theorem tailrec_loop_simple {State Measure : Type _} {Ghost : Sort _}
-  (trans : State → Post → Prop) (post : Post) (initial : State)
-  (P : Measure → Ghost → Post)
-  (lt : Measure → Measure → Prop)
-  (Hwf : WellFounded lt)
-  (v0 : Measure) (g0 : Ghost)
-  (hinit : P v0 g0 initial)
-  (hbody : ∀ v g state, P v g state →
-    Eventually trans (fun mid_s => post mid_s ∨ ∃ v' g', P v' g' mid_s ∧ lt v' v) state) :
-  Eventually trans post initial :=
-  tailrec_loop trans post initial P (fun _ _ => post) lt Hwf v0 g0 hinit
-    (fun v g state hP =>
-      eventually_weaken trans _ _ state
-        (fun _ h => h.elim Or.inl (fun ⟨v', g', hP', hlt⟩ => Or.inr ⟨v', g', hP', hlt, fun _ h => h⟩))
-        (hbody v g state hP))
-    (fun _ h => h)
-
 theorem tailrec_loop_cps {State Measure : Type _} {Ghost : Sort _}
   (trans : State → Post → Prop) (post : Post) (initial : State)
   (P Q : Measure → Ghost → Post)
@@ -152,6 +112,28 @@ theorem tailrec_loop_cps {State Measure : Type _} {Ghost : Sort _}
   · exact eventually_trans trans (Q v0 g0) post mid_s
       (tailrec_loop trans (Q v0 g0) mid_s P Q lt Hwf v0 g0 hP hbody (fun _ h => h))
       hpost
+
+/-- `tailrec_loop_cps` specialised to a loop starting at the cut-point (`initial` already satisfies
+`P v0 g0`) and a postcondition that does not depend on the measure or the ghost state: the loop body
+either reaches `post` directly or re-establishes the invariant `P` at a smaller measure. This
+removes the duplicated `Q` and the trivial `∀ t, Q → Q` obligation. -/
+theorem tailrec_loop_simple {State Measure : Type _} {Ghost : Sort _}
+  (trans : State → Post → Prop) (post : Post) (initial : State)
+  (P : Measure → Ghost → Post)
+  (lt : Measure → Measure → Prop)
+  (Hwf : WellFounded lt)
+  (v0 : Measure) (g0 : Ghost)
+  (hinit : P v0 g0 initial)
+  (hbody : ∀ v g state, P v g state →
+    Eventually trans (fun mid_s => post mid_s ∨ ∃ v' g', P v' g' mid_s ∧ lt v' v) state) :
+  Eventually trans post initial :=
+  tailrec_loop_cps trans post initial P (fun _ _ => post) lt Hwf v0 g0
+    (.done initial (.inr hinit))
+    (fun v g state hP =>
+      eventually_weaken trans _ _ state
+        (fun _ h => h.elim Or.inl (fun ⟨v', g', hP', hlt⟩ => Or.inr ⟨v', g', hP', hlt, fun _ h => h⟩))
+        (hbody v g state hP))
+    (fun s h => .done s h)
 
 abbrev TracedPost (MD : Type) := Kraken.MachineState MD → List LeakageEvent → Prop
 
