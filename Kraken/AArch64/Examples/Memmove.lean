@@ -84,16 +84,16 @@ private theorem memmove_forward_loop_spec [layout : Layout] [Layout.Valid memmov
           Mem.At_append_sep (pre.drop 1) src _ (by simp; omega)]
       ecancel
     · sym => kstep; tactic =>
-      refine (ih _ (pre.drop 1 ++ src.take 1) (src.drop 1) ((src.take 1) @ X3 ⋆ R)
-        ⟨by omega, hd, by grind, by grind, by simp [h_pre_len, h_src_len]; omega,
-         by simp [h_src_len], by omega, ?_⟩).bind_at (by kaddr memmove) ?_
-      · rw [Mem.At_append_sep (pre.drop 1) (src.take 1) _ (by simp; omega)]
-        ecancel
-      · rintro s₁ ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
-        apply Eventually.done
-        refine ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
+      kcall ih _ (pre.drop 1 ++ src.take 1) (src.drop 1) ((src.take 1) @ X3 ⋆ R)
+        with s₁ ⟨h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
+      · apply Eventually.done
+        refine ⟨rfl, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
         rw [List.append_assoc, List.take_append_drop, ← List.drop_append_of_le_length (by omega),
             List.drop_drop, Nat.add_comm] at h_mem₁
+        ecancel
+      · refine ⟨by omega, hd, by grind, by grind, by simp [h_pre_len, h_src_len]; omega,
+          by simp [h_src_len], by omega, ?_⟩
+        rw [Mem.At_append_sep (pre.drop 1) (src.take 1) _ (by simp; omega)]
         ecancel
 
 private theorem memmove_backward_loop_spec [layout : Layout] [Layout.Valid memmove] (s₀ : MachineData)
@@ -137,18 +137,17 @@ private theorem memmove_backward_loop_spec [layout : Layout] [Layout.Valid memmo
     · rw [Mem.At_take_drop_sep src n src_ptr (by omega) (by omega),
           Mem.At_take_drop_sep post (d - 1) (src_ptr + BitVec.ofNat 64 (n + 1)) (by omega) (by omega)] at h_mem
       sym => kstep; tactic =>
-      refine (ih _ (src.take n) (src.drop n ++ post.take (d - 1))
+      kcall ih _ (src.take n) (src.drop n ++ post.take (d - 1))
         ((src.drop n) @ (dst_ptr + BitVec.ofNat 64 n) ⋆ R)
-        ⟨by omega, hd, by grind, by grind, by grind, h_dst_ptr,
-         by simp [h_src_len], by simp [h_src_len, h_post_len]; omega, by omega, ?_⟩).bind_at
-        (by kaddr memmove) ?_
-      · rw [Mem.At_append_sep (src.drop n) (post.take (d - 1)) _ (by simp; omega)]
-        ecancel
-      · rintro s₁ ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
-        apply Eventually.done
-        refine ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
+        with s₁ ⟨h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
+      · apply Eventually.done
+        refine ⟨rfl, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
         rw [← List.append_assoc, List.take_append_drop, List.take_append, List.take_take,
             Nat.min_eq_left (by omega), ← List.take_append] at h_mem₁
+        ecancel
+      · refine ⟨by omega, hd, by grind, by grind, by grind, h_dst_ptr,
+          by simp [h_src_len], by simp [h_src_len, h_post_len]; omega, by omega, ?_⟩
+        rw [Mem.At_append_sep (src.drop n) (post.take (d - 1)) _ (by simp; omega)]
         ecancel
 
 /-- Result of copying `n` bytes from `src_off` to `dst_off` within a contiguous buffer `buf`
@@ -222,17 +221,16 @@ theorem memmove_correct [layout : Layout] [Layout.Valid memmove] (s₀ : Machine
               List.drop_drop,
               Mem.At_take_drop_sep (buf.drop (dst_off + d)) n _ (by simp; omega) (by simp; omega),
               List.drop_drop] at h_mem
-          refine (memmove_forward_loop_spec _ n d
+          kcall memmove_forward_loop_spec _ n d
             ((buf.drop dst_off).take d) ((buf.drop (dst_off + d)).take n)
             ((buf.take dst_off) @ base ⋆
               (buf.drop (dst_off + d + n)) @
-                (base.toBitVec + BitVec.ofNat 64 dst_off + BitVec.ofNat 64 d + BitVec.ofNat 64 n) ⋆ R)).bind_at
-            (by kaddr memmove) ?_
+                (base.toBitVec + BitVec.ofNat 64 dst_off + BitVec.ofNat 64 d + BitVec.ofNat 64 n) ⋆ R)
             ⟨by omega, by omega, by grind, by grind, by simp; omega, by simp; omega, by omega,
              by ecancel⟩
-          rintro s₁ ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
+            with s₁ ⟨h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
           apply Eventually.done
-          refine ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
+          refine ⟨rfl, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
           rw [memmoveBytes, List.append_assoc,
               Mem.At_append_sep (buf.take dst_off) _ _ (by simp; omega),
               Mem.At_append_sep ((buf.drop (dst_off + d)).take n) _ _ (by simp; omega),
@@ -248,16 +246,15 @@ theorem memmove_correct [layout : Layout] [Layout.Valid memmove] (s₀ : Machine
               List.drop_drop,
               Mem.At_take_drop_sep (buf.drop (src_off + n)) d _ (by simp; omega) (by simp; omega),
               List.drop_drop, show src_off + n + d = src_off + d + n by omega] at h_mem
-          refine (memmove_backward_loop_spec _ n d X1.toBitVec X0.toBitVec
+          kcall memmove_backward_loop_spec _ n d X1.toBitVec X0.toBitVec
             ((buf.drop src_off).take n) ((buf.drop (src_off + n)).take d)
             ((buf.take src_off) @ base ⋆
-              (buf.drop (src_off + d + n)) @ (base.toBitVec + BitVec.ofNat 64 (src_off + d + n)) ⋆ R)).bind_at
-            (by kaddr memmove) ?_
+              (buf.drop (src_off + d + n)) @ (base.toBitVec + BitVec.ofNat 64 (src_off + d + n)) ⋆ R)
             ⟨by omega, by omega, by grind, by grind, by grind, by grind,
              by simp; omega, by simp; omega, by omega, by ecancel⟩
-          rintro s₁ ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
+            with s₁ ⟨h_x0₁, h_x30₁, h_sp₁, h_cs₁, h_mem₁⟩
           apply Eventually.done
-          refine ⟨h_pc₁, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
+          refine ⟨rfl, h_x0₁, h_x30₁, h_sp₁, h_cs₁, ?_⟩
           rw [memmoveBytes, List.append_assoc,
               Mem.At_append_sep (buf.take (src_off + d)) _ _ (by simp; omega),
               Mem.At_append_sep ((buf.drop src_off).take n) _ _ (by simp; omega),
