@@ -5,6 +5,7 @@ Regression tests for the composition and frame tactics (`kcall`, `kloop`, `kloop
 `kloop_next`, `kframe`, `kframe_eqs`, `≡ … except`) on AArch64 examples.
 -/
 
+import all Kraken.AArch64.Examples.Memcmp
 import all Kraken.AArch64.Examples.Memcpy
 import all Kraken.AArch64.Examples.P256Beeu
 import Kraken.Tactics
@@ -222,3 +223,108 @@ example [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s : MachineDa
   kframe_eqs h1_fr
   apply Eventually.done
   exact ⟨rfl, h1_fr_X21⟩
+
+/-! ### Constant-time loops through `kloop`
+
+`memcmp_ct_correct` (see Memcmp.lean) with the loop rule applied by `kloop (pub := …)`: the
+goals are `init`, `body` (with `v pub hv` introduced) and `post`; `kloop_exit` / `kloop_next v' pub'`
+pick the disjunct and discharge the measure/invariant side conditions, `kintro` peels the trace
+witness. -/
+
+theorem memcmp_ct_correct' [layout : Layout] [Layout.Valid memcmp]
+    (p_a p_b : BitVec 64) (n : Nat) :
+    ∃ tr : List Kraken.LeakageEvent,
+      ∀ (s₀ : MachineData) (a b : List UInt8) (R : DataMem → Prop),
+        (layout memcmp).Spec s₀ (trace := some tr)
+          (pre :=
+            s₀.regs.X0.toBitVec = p_a ∧
+            s₀.regs.X1.toBitVec = p_b ∧
+            s₀.regs.X2.toNat = n ∧
+            a.length = n ∧
+            b.length = n ∧
+            (s₀.dmem =⋆ a @ p_a ⋆ b @ p_b ⋆ R))
+          (post := fun st =>
+            st.pc = Int64.ofBitVec s₀.regs.X30.toBitVec ∧
+            st.data.regs.X0.toBitVec = diffAcc a b ∧
+            (st.data.regs.X0 = 0 ↔ a = b) ∧
+            st.data.regs.SP = s₀.regs.SP ∧
+            st.data.regs.CalleeSavedEq s₀.regs ∧
+            (st.data.dmem =⋆ a @ p_a ⋆ b @ p_b ⋆ R)) := by
+  kloop
+    (pubinv := fun v _ => 0 < v)
+    (inv := fun v (a_ptr, b_ptr) s₀ _ (a_bs, b_bs, acc, frame) st =>
+      st.pc = (layout memcmp).label "loop" ∧
+      st.data.regs.X2.toNat = v ∧
+      st.data.regs.X0.toBitVec = a_ptr ∧
+      st.data.regs.X1.toBitVec = b_ptr ∧
+      st.data.regs.X3.toBitVec = acc ∧
+      st.data.regs.X30 = s₀.regs.X30 ∧
+      st.data.regs.SP = s₀.regs.SP ∧
+      st.data.regs.CalleeSavedEq s₀.regs ∧
+      a_bs.length = v ∧
+      b_bs.length = v ∧
+      (st.data.dmem =⋆ a_bs @ a_ptr ⋆ b_bs @ b_ptr ⋆ frame))
+    (exit := fun _ (a_ptr, b_ptr) s₀ _ (a_bs, b_bs, acc, frame) st =>
+      st.pc = (layout memcmp).label "done" ∧
+      st.data.regs.X3.toBitVec = acc ||| diffAcc a_bs b_bs ∧
+      st.data.regs.X30 = s₀.regs.X30 ∧
+      st.data.regs.SP = s₀.regs.SP ∧
+      st.data.regs.CalleeSavedEq s₀.regs ∧
+      a_bs.length = b_bs.length ∧
+      (st.data.dmem =⋆ a_bs @ a_ptr ⋆ b_bs @ b_ptr ⋆ frame))
+    (measure := n)
+    (pub := (p_a, p_b))
+    (ghost := fun _ (a, b, R) => (a, b, 0#64, R))
+    with v ⟨a_ptr, b_ptr⟩ hv
+  · by_cases hn : n = 0
+    · subst hn
+      kloop_exit
+      kintro s ⟨a, b, R⟩ ⟨h_x0, h_x1, h_x2, h_a_len, h_b_len, h_mem⟩
+      kprologue memcmp to "loop" with s
+      kstep
+      kdone
+      obtain rfl := List.eq_nil_of_length_eq_zero h_a_len
+      obtain rfl := List.eq_nil_of_length_eq_zero h_b_len
+      exact ⟨by kaddr memcmp, rfl, rfl, rfl, by grind, rfl, by ecancel⟩
+    · kloop_next
+      refine ⟨by omega, ?_⟩
+      kintro s ⟨a, b, R⟩ ⟨h_x0, h_x1, h_x2, h_a_len, h_b_len, h_mem⟩
+      kprologue memcmp to "loop" with s
+      kstep
+      kdone
+      exact ⟨by kaddr memcmp, by grind, h_x0, h_x1, rfl, rfl, rfl,
+        by grind, h_a_len, h_b_len, by ecancel⟩
+  · by_cases hv1 : v = 1
+    · subst hv1
+      kloop_exit
+      kintro s₀ ⟨a, b, R⟩ ⟨a_bs, b_bs, acc, frame⟩ ⟨s, pc⟩
+        ⟨rfl, h_x2_v, h_x0_v, h_x1_v, h_x3_v, h_x30, h_sp, h_cs, h_a_v, h_b_v, h_mem_v⟩
+      kprologue memcmp at "loop" to "done" with s
+      kstep
+      kdone
+      refine ⟨by kaddr memcmp, ?_, h_x30, h_sp, h_cs, by omega, by ecancel⟩
+      have := diffAcc_one a_bs b_bs h_a_v h_b_v acc
+      grind
+    · kloop_next (v - 1) (a_ptr + 1#64, b_ptr + 1#64)
+      kintro s₀ ⟨a, b, R⟩ ⟨a_bs, b_bs, acc, frame⟩ ⟨s, pc⟩
+        ⟨rfl, h_x2_v, h_x0_v, h_x1_v, h_x3_v, h_x30, h_sp, h_cs, h_a_v, h_b_v, h_mem_v⟩
+      kprologue memcmp at "loop" to "done" with s
+      kstep
+      kdone
+      refine ⟨(a_bs.drop 1, b_bs.drop 1,
+        acc ||| (((BitVec.ofInt 8 (Int.ofBytes (a_bs.take 1))).setWidth 32 ^^^
+                  (BitVec.ofInt 8 (Int.ofBytes (b_bs.take 1))).setWidth 32).setWidth 64),
+        (a_bs.take 1) @ a_ptr ⋆ (b_bs.take 1) @ b_ptr ⋆ frame),
+        ⟨by kaddr memcmp, by grind, by grind, by grind, by grind,
+         h_x30, h_sp, h_cs, by simp [h_a_v], by simp [h_b_v], by ecancel⟩,
+        ?_⟩
+      rintro t_s ⟨hQ_pc, hQ_x3, hQ_x30, hQ_sp, hQ_cs, _, hQ_mem⟩
+      refine ⟨hQ_pc, ?_, hQ_x30, hQ_sp, hQ_cs, by omega, by ecancel⟩
+      rw [hQ_x3]
+      exact diffAcc_step a_bs b_bs (by omega) (by omega) acc
+  · kintro s₀ ⟨a, b, R⟩ ⟨st, pc⟩ ⟨rfl, h_x3, h_x30, h_sp, h_cs, h_ab_len, h_mem_q⟩
+    kprologue memcmp at "done" with st
+    kstep
+    kdone
+    have h_diff := diffAcc_eq_zero_iff a b h_ab_len
+    exact ⟨by grind, by grind, by grind, h_sp, h_cs, by ecancel⟩
