@@ -139,3 +139,7 @@ block_spec loop_exit_preserves beeu_mod_inverse_vartime s
   apply Eventually.done
   exact ⟨rfl, by kframe, h1_mem⟩
 
+-- Views in `≡ … except […]` / `(writes := […])` expand to the registers they read.
+example (r' r : Reg64s) :
+    (r' ≡ r except [beeuX, X13]) = (r' ≡ r except [X3, X4, X5, X6, X7, X13]) := rfl
+
