@@ -720,6 +720,14 @@ private def regNameString (n : Expr) : String :=
     else c.getString!
   | none => "reg"
 
+/-- Present a raw structure projection `x.i` as the projection function `S.f x`. -/
+private def projFnApp (e : Expr) : MetaM Expr := do
+  let .proj S i x := e | return e
+  let env ← getEnv
+  let some fname := (getStructureFields env S)[i]? | return e
+  let some pfn := getProjFnForField? env S fname | return e
+  try mkAppM pfn #[x] catch _ => return e
+
 /-- For `h : RegFile.EqExcept W r' r`, the field equations `r'.f = r.f` (types in reduced,
 projection form) for every register `f ∉ W`, paired with the register's name. -/
 def frameEqsOf (h : Expr) : MetaM (Array (String × Expr)) := do
@@ -734,8 +742,8 @@ def frameEqsOf (h : Expr) : MetaM (Array (String × Expr)) := do
   for n in names do
     if (← findRegIdx? wElems n).isSome then continue
     let hn ← mkNotMemProof nameTy n W
-    let lhs ← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r' n)
-    let rhs ← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r n)
+    let lhs ← projFnApp (← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r' n))
+    let rhs ← projFnApp (← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r n))
     let prf ← mkExpectedTypeHint (mkApp2 h n hn) (← mkEq lhs rhs)
     acc := acc.push (regNameString n, prf)
   return acc
@@ -749,15 +757,48 @@ def frameEqsInContext : TacticM (Array Expr) := withMainContext do
       acc := acc ++ (← frameEqsOf decl.toExpr).map (·.2)
   return acc
 
-/-- `kframe_eqs h`: add the field equations `r'.f = r.f` of `h : r' ≡ r except W` to the context
-(named `h_f`). -/
-elab "kframe_eqs " h:ident : tactic => withMainContext do
+/-- `kframe_eqs h [f, …]`: add the field equations `r'.f = r.f` of `h : r' ≡ r except W` to the
+context (named `h_f`). The optional functions `f : R → α` (derived values such as multi-limb
+integers `Reg64s.beeuB`) are added as `h_f : f r' = f r` when they only read preserved registers
+(proved by unfolding `f` and rewriting with the field equations); the others are reported. -/
+syntax (name := kframeEqs) "kframe_eqs " ident (" [" ident,* "]")? : tactic
+
+elab_rules : tactic
+  | `(tactic| kframe_eqs $h:ident $[[$views?:ident,*]]?) => withMainContext do
   let some decl := (← getLCtx).findFromUserName? h.getId
     | throwErrorAt h "unknown hypothesis `{h}`"
   let eqs ← frameEqsOf decl.toExpr
   if eqs.isEmpty then throwErrorAt h "`{h}` is not a `≡ … except` hypothesis"
-  let hyps ← eqs.mapM fun (nm, prf) => do
+  let mut hyps ← eqs.mapM fun (nm, prf) => do
     pure { userName := h.getId.appendAfter ("_" ++ nm), type := ← inferType prf, value := prf : Hypothesis }
+  if let some vs := views? then
+    let vs : Array Ident := vs.getElems
+    let mainGoals ← getGoals
+    let hType := (← instantiateMVars decl.type).consumeMData
+    let r' := hType.getArg! 3
+    let r := hType.getArg! 4
+    let eqStx ← eqs.mapM fun (_, e) => do
+      let t ← Term.exprToSyntax e
+      `(Lean.Parser.Tactic.simpLemma| $t:term)
+    for v in vs do
+      let f ← Term.elabTerm v none
+      let f ← instantiateMVars f
+      let stmt ← mkEq (← mkAppM' f #[r']) (← mkAppM' f #[r])
+      let g ← mkFreshExprMVar stmt
+      -- unfold `f` (its equation lemma) and rewrite the register fields
+      let closed ← do
+        let s ← saveState
+        try
+          setGoals [g.mvarId!]
+          evalTactic (← `(tactic| (simp only [$v:ident, $eqStx,*]; done)))
+          pure true
+        catch _ => s.restore; pure false
+      setGoals mainGoals
+      unless closed do
+        throwErrorAt v "kframe_eqs: `{v}` reads a register written by the block:{indentExpr stmt}"
+      let nm := v.getId.getString!
+      let value ← instantiateMVars g
+      hyps := hyps.push { userName := h.getId.appendAfter ("_" ++ nm), type := stmt, value }
   let (_, g) ← (← getMainGoal).assertHypotheses hyps
   replaceMainGoal [g]
 
@@ -809,7 +850,8 @@ elab "kframe" : tactic => withKrakenRecDepth <| withMainContext do
       let hn := (← getLCtx).decls.toList.filterMap id |>.reverse |>.find? fun (d : LocalDecl) =>
         d.type.consumeMData.isAppOf ``Not
       -- expose the register projections (`r'.X13 = r.X13`) for rewriting with frame equations
-      let leaf ← leaf.replaceTargetDefEq (← mkEq (← whnfD lhs) (← whnfD rhs))
+      let leaf ← leaf.replaceTargetDefEq
+        (← mkEq (← projFnApp (← whnfD lhs)) (← projFnApp (← whnfD rhs)))
       pure (n, hn, leaf)
     setGoals [leaf]
     if let some i ← findRegIdx? wElems n then
@@ -1411,11 +1453,18 @@ macro_rules
       $[$from?]? $[$exit?]? $[$writes?]? $[$trace?]? $[$pre?]? (post := $post) := $proof) => do
     -- names that must resolve in the user's scope (the architecture's `Layout`/`MachineData`
     -- abbreviations, and the `layout` binder the statement refers to)
-    let st := mkIdent `st
     let layoutTy := mkIdent `Layout
     let layoutValid := mkIdent `Layout.Valid
     let layout := mkIdent `layout
     let machineData := mkIdent `MachineData
+    -- the state binder: the user's own (`fun st => …`) so that the statement contains no
+    -- beta-redex, or a fresh `st` applied to the post otherwise
+    let (st, postBody) : Ident × Term ← match post with
+      | `(fun $x:ident => $body) => pure (x, body)
+      | `(fun ($x:ident : $_) => $body) => pure (x, body)
+      | _ => do
+        let st := mkIdent `st
+        pure (st, ← `(($post) $st))
     let binders ← bs.mapM fun b => do
       -- `blockSpecBinder` node: `(`, identifiers, `:`, type, `)`
       let xs : TSyntaxArray `ident := b.raw[1].getArgs.map (⟨·⟩)
@@ -1433,7 +1482,7 @@ macro_rules
       | `(blockSpecWrites| (writes := [$rs:ident,*])) =>
         conj := conj.push (← `($(st).data.regs ≡ $(s).regs except [$rs,*]))
       | _ => Macro.throwUnsupported
-    conj := conj.push (← `(($post) $st))
+    conj := conj.push postBody
     let body ← conj.pop.foldrM (init := conj.back!) fun c acc => `($c ∧ $acc)
     let postFn ← `(fun $st => $body)
     -- positional application of `Executable.Spec` (named arguments would need unhygienic names)
