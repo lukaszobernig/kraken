@@ -1267,6 +1267,108 @@ elab "kloop_next" vs:(ppSpace colGt term:max)* : tactic => withMainContext do
     setGoals ((← getGoals) ++ side)
 
 --------------------------------------------------------------------------------
+-- `block_spec`: statement DSL for block / function specifications
+
+/-!
+```lean
+block_spec loop_exit beeu_mod_inverse_vartime s₀ (R : DataMem → Prop)
+  from ".Lbeeu_loop" to ".Lbeeu_loop_end"
+  (writes := [X14, X15])
+  (pre := s₀.regs.beeuB = 0)
+  (post := fun st => st.data.dmem = s₀.dmem) := by
+  …
+```
+expands to
+
+```lean
+theorem loop_exit [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s₀ : MachineData)
+    (R : DataMem → Prop) :
+    (layout beeu_mod_inverse_vartime).Spec s₀
+      (pc := (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop")
+      (pre := s₀.regs.beeuB = 0)
+      (post := fun st =>
+        st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop_end" ∧
+        st.data.regs ≡ s₀.regs except [X14, X15] ∧
+        st.data.dmem = s₀.dmem) := by
+  …
+```
+
+* `from` (entry label) is optional: without it the block starts at the program's start address.
+* `to "label"` or `(exit := e)` give the program counter of the final state; without either the
+  post has no pc conjunct.
+* `(writes := [r, …])` adds the frame conjunct `st.data.regs ≡ s₀.regs except [r, …]`
+  (`(writes := [])` means "no register is modified").
+* `(trace := tr)` selects the constant-time (`TracedEventually`) form of `Spec`.
+* `(post := fun st => …)` is mandatory; `(pre := …)` optional. The post may use the state name
+  `st` of the lambda; the generated conjuncts refer to it as `st`.
+-/
+
+syntax blockSpecFrom := &"from " str
+syntax blockSpecTo := &"to " str
+syntax blockSpecExit := atomic("(" &"exit" " := ") term ")"
+syntax blockSpecWrites := atomic("(" &"writes" " := ") "[" ident,* "]" ")"
+syntax blockSpecTrace := atomic("(" &"trace" " := ") term ")"
+syntax blockSpecPre := atomic("(" &"pre" " := ") term ")"
+syntax blockSpecPost := atomic("(" &"post" " := ") term ")"
+
+/-- Explicit typed binders only (`(x y : T)`), so that the `(name := …)` options cannot be
+mistaken for binders with default values. -/
+syntax blockSpecBinder := atomic("(" ident+ " : ") term ")"
+
+syntax (name := blockSpec) declModifiers "block_spec " ident ident ident blockSpecBinder*
+  (blockSpecFrom)? (blockSpecTo <|> blockSpecExit)? (blockSpecWrites)? (blockSpecTrace)?
+  (blockSpecPre)? blockSpecPost " := " term : command
+
+macro_rules
+  | `($mods:declModifiers block_spec $name:ident $prog:ident $s:ident $bs:blockSpecBinder*
+      $[$from?]? $[$exit?]? $[$writes?]? $[$trace?]? $[$pre?]? (post := $post) := $proof) => do
+    -- names that must resolve in the user's scope (the architecture's `Layout`/`MachineData`
+    -- abbreviations, and the `layout` binder the statement refers to)
+    let st := mkIdent `st
+    let layoutTy := mkIdent `Layout
+    let layoutValid := mkIdent `Layout.Valid
+    let layout := mkIdent `layout
+    let machineData := mkIdent `MachineData
+    let binders ← bs.mapM fun b => do
+      -- `blockSpecBinder` node: `(`, identifiers, `:`, type, `)`
+      let xs : TSyntaxArray `ident := b.raw[1].getArgs.map (⟨·⟩)
+      let t : Term := ⟨b.raw[3]⟩
+      `(bracketedBinder| ($xs* : $t))
+    -- post conjuncts: pc, frame, user post (applied to `st`)
+    let mut conj : Array Term := #[]
+    if let some ex := exit? then
+      match ex with
+      | `(blockSpecTo| to $l:str) => conj := conj.push (← `($(st).pc = ($layout $prog).label $l))
+      | `(blockSpecExit| (exit := $e)) => conj := conj.push (← `($(st).pc = $e))
+      | _ => Macro.throwUnsupported
+    if let some w := writes? then
+      match w with
+      | `(blockSpecWrites| (writes := [$rs:ident,*])) =>
+        conj := conj.push (← `($(st).data.regs ≡ $(s).regs except [$rs,*]))
+      | _ => Macro.throwUnsupported
+    conj := conj.push (← `(($post) $st))
+    let body ← conj.pop.foldrM (init := conj.back!) fun c acc => `($c ∧ $acc)
+    let postFn ← `(fun $st => $body)
+    -- positional application of `Executable.Spec` (named arguments would need unhygienic names)
+    let pcTerm : Term ← match from? with
+      | some f => match f with
+        | `(blockSpecFrom| from $l:str) => `(($layout $prog).label $l)
+        | _ => Macro.throwUnsupported
+      | none => `(($layout $prog).startAddr)
+    let traceTerm : Term ← match trace? with
+      | some t => match t with
+        | `(blockSpecTrace| (trace := $tr)) => `(some $tr)
+        | _ => Macro.throwUnsupported
+      | none => `(none)
+    let preTerm : Term ← match pre? with
+      | some pr => match pr with
+        | `(blockSpecPre| (pre := $p)) => pure p
+        | _ => Macro.throwUnsupported
+      | none => `(True)
+    `($mods:declModifiers theorem $name [$layout : $layoutTy] [$layoutValid $prog] ($s : $machineData)
+        $binders* : Kraken.Executable.Spec ($layout $prog) $s $pcTerm $traceTerm $preTerm $postFn := $proof)
+
+--------------------------------------------------------------------------------
 
 open Sym Sym.DSimp
 
