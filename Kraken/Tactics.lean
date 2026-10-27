@@ -1021,7 +1021,7 @@ appearance. -/
 syntax (name := kfinish) "kfinish" ident ("[" Lean.Parser.Tactic.simpLemma,* "]")? : tactic
 
 elab_rules : tactic
-  | `(tactic| kfinish $p:ident $[[$lemmas,*]]?) => withKrakenRecDepth <| withMainContext do
+  | `(tactic| kfinish $p:ident $[[$lemmas,*]]?) => withMainContext do
     let lemmas : Array (TSyntax `Lean.Parser.Tactic.simpLemma) :=
       match lemmas with | some l => l.getElems | none => #[]
     let goalsBefore := (← getUnsolvedGoals).length
@@ -1040,7 +1040,8 @@ elab_rules : tactic
     withMainContext do
     -- the `BitVec`/`UInt64` normal form of `kstep` (ground conditions and arithmetic are folded
     -- by the default simprocs)
-    let nfStx ← (Kraken.Tactic.normalFormLemmas ++ [``Bool.false_eq_true, ``Bool.true_eq_false,
+    let nfStx ← (Kraken.Tactic.normalFormLemmas ++ [``UInt64.toBitVec_add, ``UInt64.toBitVec_sub,
+        ``UInt64.toBitVec_ofNat, ``Bool.false_eq_true, ``Bool.true_eq_false,
         ``beq_self_eq_true, ``bne_self_eq_false]).filterMapM fun n => do
       if (← getEnv).contains n then
         some <$> `(Lean.Parser.Tactic.simpLemma| $(mkIdent n):ident)
@@ -1051,7 +1052,8 @@ elab_rules : tactic
     -- (flag projections `kcond` on hypotheses too, so that carries/conditions in hypotheses and
     -- goal share one normal form)
     evalTactic (← `(tactic| (try simp only [BitVec.shiftLeft_zero, BitVec.zero_or, BitVec.or_zero,
-      BitVec.xor_self, UInt64.toNat_toBitVec, UInt64.toBitVec_ofBitVec, kcond] at *)))
+      BitVec.xor_self, UInt64.toNat_toBitVec, UInt64.toBitVec_ofBitVec, UInt64.toBitVec_add,
+      UInt64.toBitVec_sub, UInt64.toBitVec_ofNat, kcond] at *)))
     -- goal only, deciding ground conditions (`if (1 == 0) = true then … else …`)
     evalTactic (← `(tactic| (try simp +decide only [$nfStx,*])))
     if (← getUnsolvedGoals).isEmpty then return
@@ -1081,24 +1083,53 @@ elab_rules : tactic
       if ← g.isAssigned then continue
       setGoals [g]
       let t := (← instantiateMVars (← g.getType)).consumeMData
-      let closers : List (TSyntax `tactic) ←
-        if t.isAppOf ``Kraken.RegFile.EqExcept || t.isAppOf ``Kraken.RegFile.EqOn then
-          pure [← `(tactic| kframe)]
-        else if mentionsConst t [``Kraken.Executable.label, ``Labels.label, ``Kraken.Executable.addrOf,
-            ``Kraken.Layout.addrOf] then
-          pure [← `(tactic| kaddr $p)]
-        else if mentionsConst t [``Std.ExtHashMap.sep, ``List.At] then
-          pure [← `(tactic| ecancel)]
-        else
-          -- `grind` last: it uses the context (e.g. the case hypothesis of a decided branch) and
-          -- knows the `UInt64`/`BitVec` literal bridge
-          pure [← `(tactic| assumption), ← `(tactic| rfl), ← `(tactic| exact True.intro),
-            ← `(tactic| omega), ← `(tactic| simp), ← `(tactic| grind)]
-      let mut closed := false
-      for tac in closers do
+      if t.isAppOf ``Kraken.RegFile.EqExcept || t.isAppOf ``Kraken.RegFile.EqOn then
+        unless ← tryClose (← `(tactic| kframe)) do remaining := remaining ++ [g]
+      else if mentionsConst t [``Kraken.Executable.label, ``Labels.label, ``Kraken.Executable.addrOf,
+          ``Kraken.Layout.addrOf] then
+        unless ← tryClose (← `(tactic| kaddr $p)) do remaining := remaining ++ [g]
+      else if mentionsConst t [``Std.ExtHashMap.sep, ``List.At] then
+        unless ← tryClose (← `(tactic| ecancel)) do remaining := remaining ++ [g]
+      else
+        -- Fast closers at reducible transparency so non-reducible definitions (`val256`,
+        -- `val320`, large `OfNat` powers) are never unfolded on open user subgoals.
+        let closedFast ← g.withContext do
+          if ← tryCatchRuntimeEx (withReducible g.assumptionCore) (fun _ => pure false) then
+            pure true
+          else if ← tryCatchRuntimeEx (do withReducible g.refl; pure true) (fun _ => pure false) then
+            pure true
+          else
+            tryClose (← `(tactic| exact True.intro))
+        if closedFast then continue
+        let isBignumRel :=
+          (if t.isAppOfArity ``Eq 3 || t.isAppOfArity ``LE.le 4 || t.isAppOfArity ``LT.lt 4 ||
+              t.isAppOfArity ``GE.ge 4 || t.isAppOfArity ``GT.gt 4 then
+            let ty := (t.getArg! 0).consumeMData
+            ty.isConstOf ``Int || ty.isConstOf ``Nat
+          else
+            false) &&
+          mentionsConst t [``Int.ofBytes, ``Nat.ofBytes, ``HMod.hMod, ``HPow.hPow]
+        if !isBignumRel then
+          let closedByDefEq ← withOptions (fun o => maxRecDepth.set o 256) do
+            tryClose (← `(tactic| assumption)) <||> tryClose (← `(tactic| rfl))
+          if closedByDefEq then
+            continue
+        let saved ← saveState
+        let cleanG ← clearSepAndLets g (!isCalleeSavedEqType t)
+        setGoals [cleanG]
+        let runGrind := !isBignumRel
+        let closers : List (TSyntax `tactic) ←
+          if runGrind then
+            pure [← `(tactic| omega), ← `(tactic| simp), ← `(tactic| grind)]
+          else
+            pure [← `(tactic| omega), ← `(tactic| simp)]
+        let mut closed := false
+        for tac in closers do
+          if !closed then
+            closed ← tryClose tac
         if !closed then
-          closed ← tryClose tac
-      unless closed do remaining := remaining ++ [g]
+          saved.restore
+          remaining := remaining ++ [g]
     setGoals remaining
 
 --------------------------------------------------------------------------------
@@ -2719,18 +2750,18 @@ partial def evalSymKStep : Grind.GrindTactic :=
         -- decisions and instantiate metavariables randomly. Abort.
         let mut subGoals := subGoals
         if let some g := starGoal then
-          let addrGoal? ← subGoals.findM? fun (sg : Grind.Goal) => do
-            if sg.mvarId == g.mvarId then return false
-            let t ← instantiateMVars (← sg.mvarId.getType)
-            unless t.isAppOfArity ``Eq 3 do return false
-            return t.appArg!.isMVar
-          let lenGoal? ← subGoals.findM? fun (sg : Grind.Goal) => do
-            if sg.mvarId == g.mvarId then return false
-            let t ← instantiateMVars (← sg.mvarId.getType)
-            unless t.isAppOfArity ``Eq 3 do return false
-            let lhs := t.appFn!.appArg!
-            return lhs.isAppOfArity ``List.length 2 && lhs.appArg!.isMVar
-          let solved ←
+          let (solved, subGoals') ← timed tSpec do
+            let addrGoal? ← subGoals.findM? fun (sg : Grind.Goal) => do
+              if sg.mvarId == g.mvarId then return false
+              let t ← instantiateMVars (← sg.mvarId.getType)
+              unless t.isAppOfArity ``Eq 3 do return false
+              return t.appArg!.isMVar
+            let lenGoal? ← subGoals.findM? fun (sg : Grind.Goal) => do
+              if sg.mvarId == g.mvarId then return false
+              let t ← instantiateMVars (← sg.mvarId.getType)
+              unless t.isAppOfArity ``Eq 3 do return false
+              let lhs := t.appFn!.appArg!
+              return lhs.isAppOfArity ``List.length 2 && lhs.appArg!.isMVar
             if let some addrGoal := addrGoal? then
               let addrGoalType ← instantiateMVars (← addrGoal.mvarId.getType)
               let addr := addrGoalType.appFn!.appArg!
@@ -2813,18 +2844,126 @@ partial def evalSymKStep : Grind.GrindTactic :=
                   if config.debug then
                     logInfo m!"[hb={← IO.getNumHeartbeats}] after Attempt 2 (ok2={ok2})"
                   return ok2
-              let rec peelBitVecAddOffset (e : Expr) : MetaM (Expr × Nat) := do
+              let rec getBitVec64Value? (e : Expr) : MetaM (Option (BitVec 64)) := do
                 let e := e.consumeMData
+                if let some ⟨w, bv⟩ ← getBitVecValue? e then
+                  if h : w = 64 then
+                    return some (h ▸ bv)
+                  else
+                    return none
+                else if e.isAppOfArity ``Neg.neg 3 || e.isAppOfArity ``BitVec.neg 2 then
+                  let a := e.appArg!
+                  return (- ·) <$> (← getBitVec64Value? a)
+                else if e.isAppOfArity ``HAdd.hAdd 6 || e.isAppOfArity ``BitVec.add 3 then
+                  let args := e.getAppArgs
+                  let a := args[args.size - 2]!
+                  let b := args[args.size - 1]!
+                  match ← getBitVec64Value? a, ← getBitVec64Value? b with
+                  | some va, some vb => return some (va + vb)
+                  | _, _ => return none
+                else if e.isAppOfArity ``HSub.hSub 6 || e.isAppOfArity ``BitVec.sub 3 then
+                  let args := e.getAppArgs
+                  let a := args[args.size - 2]!
+                  let b := args[args.size - 1]!
+                  match ← getBitVec64Value? a, ← getBitVec64Value? b with
+                  | some va, some vb => return some (va - vb)
+                  | _, _ => return none
+                else
+                  return none
+              let rec peelBitVecAddSignedOffset (e : Expr) : MetaM (Expr × Int) := do
+                let e ← match e.consumeMData with
+                  | .fvar fvarId =>
+                    match ← fvarId.getValue? with
+                    | some val => pure val.consumeMData
+                    | none => pure (e.consumeMData)
+                  | e' => pure e'
+                if e.isAppOfArity ``HAdd.hAdd 6 || e.isAppOfArity ``BitVec.add 3 then
+                  let args := e.getAppArgs
+                  let a := args[args.size - 2]!
+                  let b := args[args.size - 1]!
+                  if let some bv ← getBitVec64Value? b then
+                    let n := bv.toInt
+                    if n != 0 && -4096 ≤ n && n ≤ 4096 then
+                      let (base, off) ← peelBitVecAddSignedOffset a
+                      return (base, off + n)
+                else if e.isAppOfArity ``HSub.hSub 6 || e.isAppOfArity ``BitVec.sub 3 then
+                  let args := e.getAppArgs
+                  let a := args[args.size - 2]!
+                  let b := args[args.size - 1]!
+                  if let some bv ← getBitVec64Value? b then
+                    let n := bv.toInt
+                    if n != 0 && -4096 ≤ n && n ≤ 4096 then
+                      let (base, off) ← peelBitVecAddSignedOffset a
+                      return (base, off - n)
+                return (e, 0)
+              let peelSingleBitVecAddSignedOffset (e : Expr) : MetaM (Expr × Int × Option Expr) := do
+                let e ← match e.consumeMData with
+                  | .fvar fvarId =>
+                    match ← fvarId.getValue? with
+                    | some val => pure val.consumeMData
+                    | none => pure (e.consumeMData)
+                  | e' => pure e'
                 if e.isAppOfArity ``HAdd.hAdd 6 || e.isAppOfArity ``BitVec.add 3 then
                   let args := e.getAppArgs
                   let a := args[args.size - 2]!
                   let b := args[args.size - 1]!.consumeMData
-                  if let some ⟨64, bv⟩ ← getBitVecValue? b then
-                    let n := bv.toNat
-                    if 0 < n && n ≤ 4096 then
-                      let (base, off) ← peelBitVecAddOffset a
-                      return (base, off + n)
-                return (e, 0)
+                  if let some bv ← getBitVec64Value? b then
+                    let n := bv.toInt
+                    if n != 0 && -4096 ≤ n && n ≤ 4096 then
+                      return (a, n, some b)
+                return (e, 0, none)
+              let tryProveBitVecAddEq (lhs rhs : Expr) : MetaM (Option Expr) := do
+                if lhs == rhs then
+                  return some (← mkEqRefl lhs)
+                let (lhsBase, lhsOff) ← peelBitVecAddSignedOffset lhs
+                let (rhsBase, rhsOff) ← peelBitVecAddSignedOffset rhs
+                if lhsOff != rhsOff then
+                  return none
+                unless ← withReducible (isDefEq lhsBase rhsBase) do
+                  return none
+                let (lhs1, lOff1, lArg1?) ← peelSingleBitVecAddSignedOffset lhs
+                let (rhs1, rOff1, rArg1?) ← peelSingleBitVecAddSignedOffset rhs
+                match lArg1?, rArg1? with
+                | none, none =>
+                  return some (← mkExpectedTypeHint (← mkEqRefl lhs) (← mkEq lhs rhs))
+                | some b, some c =>
+                  if lOff1 == rOff1 && (← withReducible (isDefEq lhs1 rhs1)) then
+                    return some (← mkExpectedTypeHint (← mkEqRefl lhs) (← mkEq lhs rhs))
+                  else
+                    let (lhs2, lOff2, lArg2?) ← peelSingleBitVecAddSignedOffset lhs1
+                    if let some a := lArg2? then
+                      if lOff1 + lOff2 == rOff1 && (← withReducible (isDefEq lhs2 rhs1)) then
+                        let hAdd ← mkExpectedTypeHint (← mkEqRefl c) (← mkEq (← mkAppM ``HAdd.hAdd #[a, b]) c)
+                        let prf := mkAppN (mkConst ``BitVec.add_add_eq_of_add_eq) #[mkNatLit 64, lhs2, a, b, c, hAdd]
+                        return some (← mkExpectedTypeHint prf (← mkEq lhs rhs))
+                    let (rhs2, rOff2, rArg2?) ← peelSingleBitVecAddSignedOffset rhs1
+                    if let some a := rArg2? then
+                      if rOff1 + rOff2 == lOff1 && (← withReducible (isDefEq lhs1 rhs2)) then
+                        let bR := c
+                        let cL := b
+                        let hAdd ← mkExpectedTypeHint (← mkEqRefl cL) (← mkEq (← mkAppM ``HAdd.hAdd #[a, bR]) cL)
+                        let prf := mkAppN (mkConst ``BitVec.add_eq_add_add_of_add_eq) #[mkNatLit 64, lhs1, a, bR, cL, hAdd]
+                        return some (← mkExpectedTypeHint prf (← mkEq lhs rhs))
+                    return none
+                | _, _ =>
+                  return none
+              let rec hasAddOrSub (e : Expr) : Bool :=
+                match e with
+                | .app f a =>
+                  f.isAppOf ``HAdd.hAdd || f.isAppOf ``BitVec.add ||
+                  f.isAppOf ``HSub.hSub || f.isAppOf ``BitVec.sub ||
+                  hasAddOrSub f || hasAddOrSub a
+                | .mdata _ b => hasAddOrSub b
+                | .proj _ _ s => hasAddOrSub s
+                | _ => false
+              let dsimpAddr (e : Expr) : Grind.GrindTacticM Expr :=
+                addrGoal.mvarId.withContext do
+                  let e' ← expandLets e
+                  let e' ← Grind.liftSymM (Sym.preprocessExpr e')
+                  Grind.liftGrindM <|
+                    Sym.dsimp (config := { maxSteps := 100000 })
+                      (methods := { pre := dsimpCore })
+                      e'
               let tryAssignSliceAndCancel (cand : Kraken.Tactic.SepAtCandidate) (off : Nat) (hEq : Expr) : Grind.GrindTacticM Bool := do
                 withConfig (fun c => { c with assignSyntheticOpaque := true }) do
                   let some lenGoal := lenGoal? | return false
@@ -2887,26 +3026,30 @@ partial def evalSymKStep : Grind.GrindTactic :=
                   let sliceAddr ← addrGoal.mvarId.withContext do
                     let wOff ← mkAppM ``BitVec.ofNat #[mkNatLit 64, mkNatLit off]
                     mkAppM ``HAdd.hAdd #[cand.addr, wOff]
-                  let (eqMVarS, eqGoalS) ← simplifyAddrEq sliceAddr
-                  if !(← eqGoalS.mvarId.isAssigned) then
-                    eqGoalS.mvarId.withContext do
-                      let eqT ← instantiateMVars (← eqGoalS.mvarId.getType)
-                      if eqT.isAppOfArity ``Eq 3 then
-                        let lhs := eqT.appFn!.appArg!
-                        let rhs := eqT.appArg!
-                        if ← withReducible (isDefEq lhs rhs) then
-                          eqGoalS.mvarId.assign (← mkEqRefl lhs)
-                  unless ← eqGoalS.mvarId.isAssigned do
-                    discard <| Kraken.Tactic.proveBitVecEqByNorm eqGoalS.mvarId
-                  unless ← eqGoalS.mvarId.isAssigned do
-                    trace[Kraken.kstep] "slice grind on address equality: {← eqGoalS.mvarId.getType}"
-                    let cleanMVarId ← clearSepAndLets eqGoalS.mvarId
-                    let gS ← Grind.liftGrindM (Grind.mkGoal cleanMVarId)
-                    let gS ← Grind.liftGrindM gS.internalizeAll
-                    match ← Grind.liftGrindM gS.grind with
-                    | .closed => pure ()
-                    | .failed _ => failure
-                  let hEqS ← instantiateMVars eqMVarS
+                  let fastEq? ← addrGoal.mvarId.withContext (tryProveBitVecAddEq addr sliceAddr)
+                  let hEqS ← match fastEq? with
+                    | some prf => pure prf
+                    | none =>
+                      let (eqMVarS, eqGoalS) ← simplifyAddrEq sliceAddr
+                      if !(← eqGoalS.mvarId.isAssigned) then
+                        eqGoalS.mvarId.withContext do
+                          let eqT ← instantiateMVars (← eqGoalS.mvarId.getType)
+                          if eqT.isAppOfArity ``Eq 3 then
+                            let lhs := eqT.appFn!.appArg!
+                            let rhs := eqT.appArg!
+                            if let some prf ← tryProveBitVecAddEq lhs rhs then
+                              eqGoalS.mvarId.assign prf
+                      unless ← eqGoalS.mvarId.isAssigned do
+                        discard <| Kraken.Tactic.proveBitVecEqByNorm eqGoalS.mvarId
+                      unless ← eqGoalS.mvarId.isAssigned do
+                        trace[Kraken.kstep] "slice grind on address equality: {← eqGoalS.mvarId.getType}"
+                        let cleanMVarId ← clearSepAndLets eqGoalS.mvarId
+                        let gS ← Grind.liftGrindM (Grind.mkGoal cleanMVarId)
+                        let gS ← Grind.liftGrindM gS.internalizeAll
+                        match ← Grind.liftGrindM gS.grind with
+                        | .closed => pure ()
+                        | .failed _ => failure
+                      instantiateMVars eqMVarS
                   if ← tryAssignSliceAndCancel cand off hEqS then
                     pure true
                   else
@@ -2915,61 +3058,19 @@ partial def evalSymKStep : Grind.GrindTactic :=
                 catch _ =>
                   savedSlice.restore
                   pure false
-              let peelSingleBitVecAddOffset (e : Expr) : MetaM (Expr × Nat) := do
-                let e := e.consumeMData
-                if e.isAppOfArity ``HAdd.hAdd 6 || e.isAppOfArity ``BitVec.add 3 then
-                  let args := e.getAppArgs
-                  let a := args[args.size - 2]!
-                  let b := args[args.size - 1]!.consumeMData
-                  if let some ⟨64, bv⟩ ← getBitVecValue? b then
-                    let n := bv.toNat
-                    if 0 < n && n ≤ 4096 then
-                      return (a, n)
-                return (e, 0)
-              let tryProveBitVecAddEq (lhs rhs : Expr) : MetaM (Option Expr) := do
-                if lhs == rhs then
-                  return some (← mkEqRefl lhs)
-                let (lhsBase, lhsOff) ← peelBitVecAddOffset lhs
-                let (rhsBase, rhsOff) ← peelBitVecAddOffset rhs
-                if lhsOff != rhsOff then
-                  return none
-                let (lhs1, lOff1) ← peelSingleBitVecAddOffset lhs
-                let (rhs1, rOff1) ← peelSingleBitVecAddOffset rhs
-                if lOff1 == lhsOff && rOff1 == rhsOff then
-                  if ← withReducible (isDefEq lhsBase rhsBase <&&> isDefEq lhs rhs) then
-                    return some (← mkExpectedTypeHint (← mkEqRefl lhs) (← mkEq lhs rhs))
-                  else
-                    return none
-                else if lOff1 > 0 && lOff1 < lhsOff && rOff1 == rhsOff && rOff1 > 0 then
-                  let (lhs2, lOff2) ← peelSingleBitVecAddOffset lhs1
-                  if lOff1 + lOff2 == lhsOff && (← withReducible (isDefEq lhs2 rhsBase)) then
-                    let a := (lhs1.getAppArgs)[lhs1.getAppArgs.size - 1]!
-                    let b := (lhs.getAppArgs)[lhs.getAppArgs.size - 1]!
-                    let c := (rhs.getAppArgs)[rhs.getAppArgs.size - 1]!
-                    let hAdd ← mkExpectedTypeHint (← mkEqRefl c) (← mkEq (← mkAppM ``HAdd.hAdd #[a, b]) c)
-                    let prf := mkAppN (mkConst ``BitVec.add_add_eq_of_add_eq) #[mkNatLit 64, lhs2, a, b, c, hAdd]
-                    if lhs2 == rhsBase then
-                      return some prf
-                    else
-                      return some (← mkExpectedTypeHint prf (← mkEq lhs rhs))
-                  else
-                    return none
-                else if rOff1 > 0 && rOff1 < rhsOff && lOff1 == lhsOff && lOff1 > 0 then
-                  let (rhs2, rOff2) ← peelSingleBitVecAddOffset rhs1
-                  if rOff1 + rOff2 == rhsOff && (← withReducible (isDefEq lhsBase rhs2)) then
-                    let a := (rhs1.getAppArgs)[rhs1.getAppArgs.size - 1]!
-                    let b := (rhs.getAppArgs)[rhs.getAppArgs.size - 1]!
-                    let c := (lhs.getAppArgs)[lhs.getAppArgs.size - 1]!
-                    let hAdd ← mkExpectedTypeHint (← mkEqRefl c) (← mkEq (← mkAppM ``HAdd.hAdd #[a, b]) c)
-                    let prf := mkAppN (mkConst ``BitVec.add_eq_add_add_of_add_eq) #[mkNatLit 64, lhsBase, a, b, c, hAdd]
-                    if lhsBase == rhs2 then
-                      return some prf
-                    else
-                      return some (← mkExpectedTypeHint prf (← mkEq lhs rhs))
-                  else
-                    return none
+              let canSliceCandidate (cand : Kraken.Tactic.SepAtCandidate) (off : Nat) : Bool :=
+                if cand.bs.isAppOfArity ``Int.toBytes 2 || cand.bs.isAppOfArity ``Nat.toBytes 2 then
+                  match (cand.bs.getArg! 0).nat? with
+                  | some k => off < k
+                  | none => true
+                else if cand.bs.isAppOfArity ``List.take 3 then
+                  match (cand.bs.getArg! 1).nat? with
+                  | some k => off < k
+                  | none => true
+                else if cand.bs.isAppOfArity ``UInt64.toBytes 1 then
+                  off < 8
                 else
-                  return none
+                  true
               -- Pass 1: fast syntactic / reducible isDefEq / associative offset check across all candidate clauses
               let mut solvedSep := false
               for cand in candidates do
@@ -2985,63 +3086,84 @@ partial def evalSymKStep : Grind.GrindTactic :=
                       saved.restore
                   catch _ =>
                     saved.restore
-              -- Pass 2: unfold local lets + ksimp, then check if closed or reducible isDefEq
+              -- Pass 2: unfold local lets + dsimp/ksimp, then check if closed or reducible isDefEq
               let mut sliceCandidates : Array (Kraken.Tactic.SepAtCandidate × Nat) := #[]
               let mut skipGrindClauseIdxs : Array Nat := #[]
               unless solvedSep do
+                let addrDsimp ← dsimpAddr addr
+                let (lhsBaseDsimp, lhsOffDsimp) ← addrGoal.mvarId.withContext (peelBitVecAddSignedOffset addrDsimp)
+                let lhsHasAddSub := hasAddOrSub lhsBaseDsimp
                 for cand in candidates do
                   unless solvedSep do
                     let saved ← Grind.saveState
                     try
-                      if config.debug then
-                        logInfo m!"[hb={← IO.getNumHeartbeats}] Pass 2 before simplifyAddrEq cand.addr={cand.addr}"
-                      let (eqMVar, eqGoal) ← simplifyAddrEq cand.addr
-                      if config.debug then
-                        logInfo m!"[hb={← IO.getNumHeartbeats}] Pass 2 after simplifyAddrEq"
-                      if !(← eqGoal.mvarId.isAssigned) then
-                        eqGoal.mvarId.withContext do
-                          let eqT ← instantiateMVars (← eqGoal.mvarId.getType)
-                          if eqT.isAppOfArity ``Eq 3 then
-                            let lhs := eqT.appFn!.appArg!
-                            let rhs := eqT.appArg!
-                            if let some prf ← tryProveBitVecAddEq lhs rhs then
-                              eqGoal.mvarId.assign prf
-                      if !(← eqGoal.mvarId.isAssigned) then
-                        discard <| Kraken.Tactic.proveBitVecEqByNorm eqGoal.mvarId
-                      if ← eqGoal.mvarId.isAssigned then
-                        let hEq ← instantiateMVars eqMVar
-                        if ← tryAssignAndCancel cand hEq then
-                          solvedSep := true
-                        else
-                          saved.restore
-                      else
-                        let (sliceOffset?, sameBaseDiffOff) ← eqGoal.mvarId.withContext do
-                          let eqT ← instantiateMVars (← eqGoal.mvarId.getType)
-                          if eqT.isAppOfArity ``Eq 3 then
-                            let (lhsBase, lhsOff) ← peelBitVecAddOffset eqT.appFn!.appArg!
-                            let (rhsBase, rhsOff) ← peelBitVecAddOffset eqT.appArg!
-                            if lhsOff != rhsOff && (← withReducible (isDefEq lhsBase rhsBase)) then
-                              if lhsOff > rhsOff then
-                                pure (some (lhsOff - rhsOff), true)
-                              else
-                                pure (none, true)
-                            else
-                              pure (none, false)
-                          else
-                            pure (none, false)
+                      let candAddrDsimp ← dsimpAddr cand.addr
+                      let (rhsBaseDsimp, rhsOffDsimp) ← addrGoal.mvarId.withContext (peelBitVecAddSignedOffset candAddrDsimp)
+                      let sameBaseDsimp ← addrGoal.mvarId.withContext (withReducible (isDefEq lhsBaseDsimp rhsBaseDsimp))
+                      if sameBaseDsimp && lhsOffDsimp != rhsOffDsimp then
                         saved.restore
-                        if sameBaseDiffOff then
-                          skipGrindClauseIdxs := skipGrindClauseIdxs.push cand.clauseIdx
-                        if let some off := sliceOffset? then
-                          let canSlice :=
-                            if cand.bs.isAppOfArity ``Int.toBytes 2 || cand.bs.isAppOfArity ``Nat.toBytes 2 then
-                              match (cand.bs.getArg! 0).nat? with
-                              | some k => off < k
-                              | none => true
-                            else
-                              true
-                          if canSlice then
+                        skipGrindClauseIdxs := skipGrindClauseIdxs.push cand.clauseIdx
+                        if lhsOffDsimp > rhsOffDsimp then
+                          let off := (lhsOffDsimp - rhsOffDsimp).toNat
+                          if canSliceCandidate cand off then
                             sliceCandidates := sliceCandidates.push (cand, off)
+                      else if !sameBaseDsimp && !lhsHasAddSub && !hasAddOrSub rhsBaseDsimp then
+                        saved.restore
+                      else
+                        if sameBaseDsimp && lhsOffDsimp == rhsOffDsimp then
+                          if let some prfDsimp ← addrGoal.mvarId.withContext (tryProveBitVecAddEq addrDsimp candAddrDsimp) then
+                            let hEq ← addrGoal.mvarId.withContext (mkExpectedTypeHint prfDsimp (← mkEq addr cand.addr))
+                            if ← tryAssignAndCancel cand hEq then
+                              solvedSep := true
+                            else
+                              saved.restore
+                        unless solvedSep do
+                          if config.debug then
+                            logInfo m!"[hb={← IO.getNumHeartbeats}] Pass 2 before simplifyAddrEq cand.addr={cand.addr}"
+                          let (eqMVar, eqGoal) ← simplifyAddrEq cand.addr
+                          if config.debug then
+                            logInfo m!"[hb={← IO.getNumHeartbeats}] Pass 2 after simplifyAddrEq"
+                          if !(← eqGoal.mvarId.isAssigned) then
+                            eqGoal.mvarId.withContext do
+                              let eqT ← instantiateMVars (← eqGoal.mvarId.getType)
+                              if eqT.isAppOfArity ``Eq 3 then
+                                let lhs := eqT.appFn!.appArg!
+                                let rhs := eqT.appArg!
+                                if let some prf ← tryProveBitVecAddEq lhs rhs then
+                                  eqGoal.mvarId.assign prf
+                          let (sliceOffset?, sameBaseDiffOff) ←
+                            if ← eqGoal.mvarId.isAssigned then
+                              pure (none, false)
+                            else
+                              eqGoal.mvarId.withContext do
+                                let eqT ← instantiateMVars (← eqGoal.mvarId.getType)
+                                if eqT.isAppOfArity ``Eq 3 then
+                                  let (lhsBase, lhsOff) ← peelBitVecAddSignedOffset eqT.appFn!.appArg!
+                                  let (rhsBase, rhsOff) ← peelBitVecAddSignedOffset eqT.appArg!
+                                  if lhsOff != rhsOff && (← withReducible (isDefEq lhsBase rhsBase)) then
+                                    if lhsOff > rhsOff then
+                                      pure (some (lhsOff - rhsOff).toNat, true)
+                                    else
+                                      pure (none, true)
+                                  else
+                                    pure (none, false)
+                                else
+                                  pure (none, false)
+                          if !(← eqGoal.mvarId.isAssigned) && !sameBaseDiffOff then
+                            discard <| Kraken.Tactic.proveBitVecEqByNorm eqGoal.mvarId
+                          if ← eqGoal.mvarId.isAssigned then
+                            let hEq ← instantiateMVars eqMVar
+                            if ← tryAssignAndCancel cand hEq then
+                              solvedSep := true
+                            else
+                              saved.restore
+                          else
+                            saved.restore
+                            if sameBaseDiffOff then
+                              skipGrindClauseIdxs := skipGrindClauseIdxs.push cand.clauseIdx
+                            if let some off := sliceOffset? then
+                              if canSliceCandidate cand off then
+                                sliceCandidates := sliceCandidates.push (cand, off)
                     catch _ =>
                       saved.restore
               -- Pass 2b: try slicing multi-word candidates only after exact-address candidates have been checked
@@ -3074,11 +3196,12 @@ partial def evalSymKStep : Grind.GrindTactic :=
                         saved.restore
                     catch _ =>
                       saved.restore
-              pure solvedSep
+              pure (solvedSep, subGoals)
             else
               let (r, g') ← solveIfNotAlready g
-              subGoals := subGoals.map fun sg => if sg.mvarId == g.mvarId then g' else sg
-              pure r
+              let subGoals' := subGoals.map fun sg => if sg.mvarId == g.mvarId then g' else sg
+              pure (r, subGoals')
+          subGoals := subGoals'
           if not solved then
             return (goal, subGoals)
 
@@ -3119,91 +3242,112 @@ partial def evalSymKStep : Grind.GrindTactic :=
         if config.debug then
           logInfo m!"[hb={← IO.getNumHeartbeats}] entering STEP 4 (ite) on {effectsAll.appArg!.getArg! 1}"
         let iteExpr := effectsAll.appArg!
-        let α := iteExpr.getArg! 0
+        let _α := iteExpr.getArg! 0
         let c := iteExpr.getArg! 1
         let inst := iteExpr.getArg! 2
         let t := iteExpr.getArg! 3
         let f := iteExpr.getArg! 4
-        let tryProveIteCond (prop : Expr) : Grind.GrindTacticM (Option Expr) :=
-          goal.mvarId.withContext do
-            -- Fast path: a hypothesis proves the condition up to definitional unfolding (let-bound
-            -- intermediate values, `abbrev`s) and `Bool` negation (`b = false` for `¬ b = true`).
-            -- This avoids expanding the let-shared condition, which can be exponentially large.
-            trace[Kraken.kstep.phase] "ite condition: {prop}"
-            if let some prf ← Kraken.Tactic.assumptionModBool prop then
-              trace[Kraken.kstep] "ite condition by assumption: {prop}"
-              return some prf
-            let saved ← Grind.saveState
-            try
-              let mvar ← mkFreshExprSyntheticOpaqueMVar prop
-              let prop' ← expandLets prop
-              let prop' ← Grind.liftSymM (Sym.preprocessExpr prop')
-              let prop' ← Grind.liftGrindM <|
-                Sym.dsimp (config := { maxSteps := 100000 })
-                  (methods := { pre := evalGround >> kdsimpDecls >> kdsimpMatch >> kdsimpProj >> kbeta })
-                  prop'
-              let mvarId ← mvar.mvarId!.replaceTargetDefEq prop'
-              let mvarId ← do
-                let r ← Grind.liftGrindM (Sym.simpGoal mvarId simpMethods)
-                match r with
-                | .noProgress => pure mvarId
-                | .goal mvarId => pure mvarId
-                | .closed => pure mvarId
-              unless ← mvarId.isAssigned do
-                try
-                  withReducible mvarId.refl
-                catch _ => pure ()
-              -- Rewrite with the hypotheses of the context (e.g. alignment facts) and decide;
-              -- a condition that reduces to `False` is not worth a `grind` call.
-              let mvarId ← do
-                if ← mvarId.isAssigned then pure mvarId else
-                match ← mvarId.withContext (Kraken.Tactic.simpWithHyps mvarId) with
-                | .closed => pure mvarId
-                | .refuted => failure
-                | .goal m => pure m
-              -- A condition that became linear arithmetic (a decided flag, a compare) is settled
-              -- by `omega` with the context, no `grind` needed.
-              unless ← mvarId.isAssigned do
-                if ← mvarId.withContext (Kraken.Tactic.isArithProp (← mvarId.getType)) then
-                  if ← Kraken.Tactic.solveArithGoal mvarId then
-                    trace[Kraken.kstep] "ite condition by omega"
-              unless ← mvarId.isAssigned do
-                trace[Kraken.kstep] "ite grind on: {← mvarId.getType}"
-                let cleanMVarId ← mvarId.withContext do
-                  let mut toClear : Array FVarId := #[]
-                  for localDecl? in (← getLCtx).decls do
-                    if let some localDecl := localDecl? then
-                      if localDecl.hasValue ||
-                         localDecl.type.getAppFn.isConstOf ``Std.ExtHashMap.sep ||
-                         localDecl.type.isAppOf ``Std.ExtHashMap then
-                        toClear := toClear.push localDecl.fvarId
-                  mvarId.tryClearMany toClear
-                let g ← Grind.liftGrindM (Grind.mkGoal cleanMVarId)
-                let g ← Grind.liftGrindM g.internalizeAll
-                match ← Grind.liftGrindM g.grind with
-                | .closed => pure ()
-                | .failed _ => failure
-              let prf ← instantiateMVars mvar
-              return some prf
-            catch _ =>
-              saved.restore
-              return none
+        let notC := mkNot c
         let MD := effectsAll.getArg! 0
         let post := effectsAll.getArg! 1
         let gimmickFn := mkConst ``gimmickId
         let allFn := effectsAll.getAppFn
-        if let some hc ← tryProveIteCond c then
+        let takeTrue (hc : Expr) : Grind.GrindTacticM (Bool × Grind.Goal) := do
           let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_ite_true) #[MD, post, c, inst, hc, t, f]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (mkApp gimmickFn (mkAppN allFn #[MD, post, t])))
           let mvarId ← goal.mvarId.replaceTargetEq rhs eqPrf
           pure (true, { goal with mvarId })
-        else if let some hnc ← tryProveIteCond (mkNot c) then
+        let takeFalse (hnc : Expr) : Grind.GrindTacticM (Bool × Grind.Goal) := do
           let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_ite_false) #[MD, post, c, inst, hnc, t, f]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (mkApp gimmickFn (mkAppN allFn #[MD, post, f])))
           let mvarId ← goal.mvarId.replaceTargetEq rhs eqPrf
           pure (true, { goal with mvarId })
+        -- Fast path: check BOTH `c` and `¬ c` against local hypotheses up to definitional
+        -- unfolding and Bool negation before expanding lets or calling simp/grind on either.
+        if let some hc ← goal.mvarId.withContext (Kraken.Tactic.assumptionModBool c) then
+          trace[Kraken.kstep] "ite condition by assumption: {c}"
+          takeTrue hc
+        else if let some hnc ← goal.mvarId.withContext (Kraken.Tactic.assumptionModBool notC) then
+          trace[Kraken.kstep] "ite negated condition by assumption: {notC}"
+          takeFalse hnc
         else
-          pure (false, goal)
+          let tryProveIteCondSlow (prop : Expr) : Grind.GrindTacticM (Option Expr) :=
+            goal.mvarId.withContext do
+              trace[Kraken.kstep.phase] "ite condition: {prop}"
+              let saved ← Grind.saveState
+              try
+                let mvar ← mkFreshExprSyntheticOpaqueMVar prop
+                let prop' ← expandLets prop
+                let prop' ← Grind.liftSymM (Sym.preprocessExpr prop')
+                let prop' ← Grind.liftGrindM <|
+                  Sym.dsimp (config := { maxSteps := 100000 })
+                    (methods := { pre := evalGround >> kdsimpDecls >> kdsimpMatch >> kdsimpProj >> kbeta })
+                    prop'
+                let mvarId ← mvar.mvarId!.replaceTargetDefEq prop'
+                let mvarId ← do
+                  let r ← Grind.liftGrindM (Sym.simpGoal mvarId simpMethods)
+                  match r with
+                  | .noProgress => pure mvarId
+                  | .goal mvarId => pure mvarId
+                  | .closed => pure mvarId
+                unless ← mvarId.isAssigned do
+                  try
+                    withReducible mvarId.refl
+                  catch _ => pure ()
+                -- Rewrite with the hypotheses of the context (e.g. alignment facts) and decide;
+                -- a condition that reduces to `False` is not worth a `grind` call.
+                let mvarId ← do
+                  if ← mvarId.isAssigned then pure mvarId else
+                  match ← mvarId.withContext (Kraken.Tactic.simpWithHyps mvarId) with
+                  | .closed => pure mvarId
+                  | .refuted => failure
+                  | .goal m => pure m
+                -- A condition that became linear arithmetic (a decided flag, a compare) is settled
+                -- by `omega` with the context, no `grind` needed; if refuted by `omega`, skip `grind`.
+                unless ← mvarId.isAssigned do
+                  let curType ← mvarId.getType
+                  if ← mvarId.withContext (Kraken.Tactic.isArithProp curType) then
+                    if ← Kraken.Tactic.solveArithGoal mvarId then
+                      trace[Kraken.kstep] "ite condition by omega"
+                    else if (← mvarId.withContext (Kraken.Tactic.decideArithProp curType)) == some false then
+                      failure
+                unless ← mvarId.isAssigned do
+                  trace[Kraken.kstep] "ite grind on: {← mvarId.getType}"
+                  let cleanMVarId ← mvarId.withContext do
+                    let mut toClear : Array FVarId := #[]
+                    for localDecl? in (← getLCtx).decls do
+                      if let some localDecl := localDecl? then
+                        if localDecl.hasValue ||
+                           localDecl.type.getAppFn.isConstOf ``Std.ExtHashMap.sep ||
+                           localDecl.type.isAppOf ``Std.ExtHashMap then
+                          toClear := toClear.push localDecl.fvarId
+                    mvarId.tryClearMany toClear
+                  let g ← Grind.liftGrindM (Grind.mkGoal cleanMVarId)
+                  let g ← Grind.liftGrindM g.internalizeAll
+                  match ← Grind.liftGrindM g.grind with
+                  | .closed => pure ()
+                  | .failed _ => failure
+                let prf ← instantiateMVars mvar
+                return some prf
+              catch _ =>
+                saved.restore
+                return none
+          if t.getAppFn.isConstOf ``Kraken.Effects.undefined ||
+             t.getAppFn.isConstOf ``Kraken.Effects.unaligned ||
+             t.getAppFn.isConstOf ``Kraken.Effects.unimplemented then
+            if let some hnc ← tryProveIteCondSlow notC then
+              takeFalse hnc
+            else if let some hc ← tryProveIteCondSlow c then
+              takeTrue hc
+            else
+              pure (false, goal)
+          else
+            if let some hc ← tryProveIteCondSlow c then
+              takeTrue hc
+            else if let some hnc ← tryProveIteCondSlow notC then
+              takeFalse hnc
+            else
+              pure (false, goal)
       else
         pure (false, goal)
 
