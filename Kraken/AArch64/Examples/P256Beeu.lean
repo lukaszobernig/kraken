@@ -363,21 +363,19 @@ Block specifications below are stated with `block_spec`: the registers a block w
 `(writes := […])` frame (`st.data.regs ≡ s.regs except […]`), everything else is preserved, and
 consumers obtain the equations they need with `kframe_eqs h [Reg64s.beeuN, …]`. -/
 
-/-- Multiplier bounding the accumulators at the top of `.Lbeeu_loop`: `X, Y < 2 · N · beeuBound σ τ c`,
-where `σ`/`τ` count the halvings of `X`/`Y` performed so far and `c` counts clamped 63-bit shifts
-(`63 · c ≤ σ + τ`). -/
-def beeuBound (σ τ c : Nat) : Int := ((σ + τ + 2) * 2 ^ c : Nat)
+/-- Multiplier bounding the accumulators at the top of `.Lbeeu_loop`: `X, Y < 2 · N · beeuBound σ τ`,
+where `σ`/`τ` count the halvings of `X`/`Y` performed so far. -/
+def beeuBound (σ τ : Nat) : Int := (σ + τ + 2 : Nat)
 
 /-- Loop invariant at the top of `.Lbeeu_loop`, with ghost counters `σ`/`τ` (total halvings of
-`X`/`Y` performed so far) and `c` (number of clamped 63-bit shifts). Besides the range and modular
-facts, it bounds the 320-bit accumulators in every reachable state:
-- `2^σ · B ≤ N` and `2^τ · A ≤ N` give `σ, τ ≤ 255` while `B, A > 0`, and `63 · c ≤ σ + τ`
-  gives `c ≤ 8`, so `beeuBound σ τ c ≤ 2^17`;
-- `X < 2 · N · beeuBound σ τ c` (and `X < N · beeuBound σ τ c` when `B` is odd, i.e. when `X` has
+`X`/`Y` performed so far). Besides the range and modular facts, it bounds the 320-bit accumulators
+in every reachable state:
+- `2^σ · B ≤ N` and `2^τ · A ≤ N` give `σ, τ ≤ 255` while `B, A > 0`, so `beeuBound σ τ ≤ 512`;
+- `X < 2 · N · beeuBound σ τ` (and `X < N · beeuBound σ τ` when `B` is odd, i.e. when `X` has
   already been halved since its last update), symmetrically for `Y`/`A`.
-Hence `X, Y < 2^18 · N < 2^274`, so `X + N` and `X + Y` never overflow five limbs.
+Hence `X, Y < 1024 · N < 2^266`, so `X + N` and `X + Y` never overflow five limbs.
 Finally `gcd A B = gcd a N` (Euclid's invariant), so the loop exits with `A = gcd a N`. -/
-structure BeeuInv (a N : Int) (σ τ c : Nat) (B A X Y : Int) : Prop where
+structure BeeuInv (a N : Int) (σ τ : Nat) (B A X Y : Int) : Prop where
   N_odd : N % 2 = 1
   gcd_eq : Int.gcd A B = Int.gcd a N
   B_nonneg : 0 ≤ B
@@ -388,11 +386,10 @@ structure BeeuInv (a N : Int) (σ τ c : Nat) (B A X Y : Int) : Prop where
   Y_inv : (a * Y + A) % N = 0
   B_shifted : ((2 ^ σ : Nat) : Int) * B ≤ N
   A_shifted : ((2 ^ τ : Nat) : Int) * A ≤ N
-  clamps : 63 * c ≤ σ + τ
-  X_lt : X < 2 * (N * beeuBound σ τ c)
-  X_lt_odd : B % 2 = 1 → X < N * beeuBound σ τ c
-  Y_lt : Y < 2 * (N * beeuBound σ τ c)
-  Y_lt_odd : A % 2 = 1 → Y < N * beeuBound σ τ c
+  X_lt : X < 2 * (N * beeuBound σ τ)
+  X_lt_odd : B % 2 = 1 → X < N * beeuBound σ τ
+  Y_lt : Y < 2 * (N * beeuBound σ τ)
+  Y_lt_odd : A % 2 = 1 → Y < N * beeuBound σ τ
 
 /-! ## Multi-Limb Arithmetic Lemmas for Loop Steps -/
 
@@ -1116,49 +1113,18 @@ block_spec beeu_loop_end_to_return_correct beeu_mod_inverse_vartime s
 
 /-! ## Accumulator Bound Invariant (reachable-state bound on `X` and `Y`) -/
 
-theorem beeuBound_pos (σ τ c : Nat) : 0 < beeuBound σ τ c := by
-  unfold beeuBound
-  have := Nat.two_pow_pos c
-  exact_mod_cast Nat.mul_pos (by omega) this
+theorem beeuBound_pos (σ τ : Nat) : 0 < beeuBound σ τ := by
+  unfold beeuBound; omega
 
-theorem beeuBound_mono {σ τ c σ' τ' c' : Nat} (hσ : σ ≤ σ') (hτ : τ ≤ τ') (hc : c ≤ c') :
-    beeuBound σ τ c ≤ beeuBound σ' τ' c' := by
-  unfold beeuBound
-  exact_mod_cast Nat.mul_le_mul (by omega) (Nat.pow_le_pow_right (by decide) hc)
+theorem beeuBound_add (σ τ k₁ k₂ : Nat) :
+    beeuBound (σ + k₁) (τ + k₂) = beeuBound σ τ + k₁ + k₂ := by
+  unfold beeuBound; omega
 
-theorem beeuBound_add_left (σ τ c k : Nat) :
-    beeuBound σ τ c + k ≤ beeuBound (σ + k) τ c := by
-  unfold beeuBound
-  have h1 : 1 ≤ 2 ^ c := Nat.two_pow_pos c
-  have : (σ + τ + 2) * 2 ^ c + k ≤ (σ + k + τ + 2) * 2 ^ c := by
-    have : (σ + k + τ + 2) * 2 ^ c = (σ + τ + 2) * 2 ^ c + k * 2 ^ c := by
-      rw [show σ + k + τ + 2 = (σ + τ + 2) + k by omega, Nat.add_mul]
-    rw [this]
-    have : k ≤ k * 2 ^ c := Nat.le_mul_of_pos_right k h1
-    omega
-  exact_mod_cast this
+theorem beeuBound_le (σ τ : Nat) (hσ : σ ≤ 255) (hτ : τ ≤ 255) :
+    beeuBound σ τ ≤ 512 := by
+  unfold beeuBound; omega
 
-theorem beeuBound_add_right (σ τ c k : Nat) :
-    beeuBound σ τ c + k ≤ beeuBound σ (τ + k) c := by
-  have := beeuBound_add_left σ τ c k
-  have h : beeuBound (σ + k) τ c = beeuBound σ (τ + k) c := by
-    unfold beeuBound; rw [show σ + k + τ = σ + (τ + k) by omega]
-  rw [← h]; exact this
-
-theorem beeuBound_succ (σ τ c : Nat) : beeuBound σ τ (c + 1) = 2 * beeuBound σ τ c := by
-  unfold beeuBound
-  rw [Nat.pow_succ, Int.natCast_mul, Int.natCast_mul, Int.natCast_mul]
-  grind
-
-theorem beeuBound_le (σ τ c : Nat) (hσ : σ ≤ 255) (hτ : τ ≤ 255) (hc : c ≤ 8) :
-    beeuBound σ τ c ≤ 131072 := by
-  have h1 : (σ + τ + 2) * 2 ^ c ≤ 512 * 2 ^ 8 :=
-    Nat.mul_le_mul (by omega) (Nat.pow_le_pow_right (by decide) hc)
-  have h2 : (σ + τ + 2) * 2 ^ c ≤ 131072 := Nat.le_trans h1 (by decide)
-  unfold beeuBound
-  exact Int.ofNat_le.mpr h2
-
-theorem beeuBound_zero : beeuBound 0 0 0 = 2 := by decide
+theorem beeuBound_zero : beeuBound 0 0 = 2 := rfl
 
 /-- After `k ≥ 1` corrected halvings (`p = 2^k`), `X' < N·(M+1)` whenever `X < 2·N·M`. -/
 theorem shift_bound_step (X X' N M : Int) (p : Nat) (hp : 2 ≤ p) (hN : 0 ≤ N) (hM : 0 ≤ M)
@@ -1172,6 +1138,19 @@ theorem shift_bound_step (X X' N M : Int) (p : Nat) (hp : 2 ≤ p) (hN : 0 ≤ N
     Int.mul_le_mul_of_nonneg_right (by omega) (Int.mul_nonneg hN hM)
   grind
 
+/-- After a clamped `k = 63` shift, `X₁ < 2·N` whenever `X < 2·N·M` with `M ≤ 512`. -/
+theorem shift_clamped_bound (X X₁ N M : Int) (hN : 0 ≤ N) (hM : M ≤ 512)
+    (hX : X < 2 * (N * M))
+    (h : ((2 ^ 63 : Nat) : Int) * X₁ ≤ X + (((2 ^ 63 : Nat) : Int) - 1) * N) :
+    X₁ < N * 2 := by
+  have hM_le : N * M ≤ N * 512 := Int.mul_le_mul_of_nonneg_left hM hN
+  rcases Int.lt_or_le X₁ (N * 2) with hlt | hle
+  · exact hlt
+  exfalso
+  have h1 : ((2 ^ 63 : Nat) : Int) * (N * 2) ≤ ((2 ^ 63 : Nat) : Int) * X₁ :=
+    Int.mul_le_mul_of_nonneg_left hle (by decide)
+  omega
+
 theorem update_bound_even (X₁ Y₁ N M M₂ : Int) (k₁ k₂ : Nat) (hN : 0 ≤ N)
     (hX : X₁ < N * (M + k₁)) (hY : Y₁ < N * (M + k₂)) (hM₂ : M + k₁ + k₂ ≤ M₂) :
     X₁ + Y₁ < 2 * (N * M₂) := by
@@ -1179,12 +1158,26 @@ theorem update_bound_even (X₁ Y₁ N M M₂ : Int) (k₁ k₂ : Nat) (hN : 0 �
     Int.mul_le_mul_of_nonneg_left (by omega) hN
   grind
 
-theorem update_bound_odd (X₁ Y₁ N M M₂ : Int) (k₁ k₂ : Nat) (hN : 0 ≤ N)
-    (hX : X₁ < N * (M + k₁)) (hY : Y₁ < N * (M + k₂)) (hM₂ : 2 * (M + k₁ + k₂) ≤ M₂) :
+/-- When the difference after the shift phase is odd, at least one shift was clamped (`k₁ = 63` or
+`k₂ = 63`), resetting that accumulator below `2·N` while increasing `beeuBound` by at least `63`,
+so `X₁ + Y₁ < N · (M + k₁ + k₂)` without doubling `M`. -/
+theorem update_bound_clamped (X X₁ Y Y₁ N M M₂ : Int) (k₁ k₂ : Nat)
+    (hN : 0 ≤ N) (hM_le : M ≤ 512)
+    (hX : X < 2 * (N * M)) (hY : Y < 2 * (N * M))
+    (hX₁ : X₁ < N * (M + k₁)) (hY₁ : Y₁ < N * (M + k₂))
+    (hX_bnd : ((2 ^ k₁ : Nat) : Int) * X₁ ≤ X + (((2 ^ k₁ : Nat) : Int) - 1) * N)
+    (hY_bnd : ((2 ^ k₂ : Nat) : Int) * Y₁ ≤ Y + (((2 ^ k₂ : Nat) : Int) - 1) * N)
+    (hclamp : k₁ = 63 ∨ k₂ = 63) (hM₂ : M + k₁ + k₂ ≤ M₂) :
     X₁ + Y₁ < N * M₂ := by
-  have : N * (M + k₁ + (M + k₂)) ≤ N * M₂ :=
-    Int.mul_le_mul_of_nonneg_left (by omega) hN
-  grind
+  rcases hclamp with rfl | rfl
+  · have hX2 := shift_clamped_bound X X₁ N M hN hM_le hX hX_bnd
+    have : N * (2 + (M + k₂)) ≤ N * M₂ :=
+      Int.mul_le_mul_of_nonneg_left (by omega) hN
+    grind
+  · have hY2 := shift_clamped_bound Y Y₁ N M hN hM_le hY hY_bnd
+    have : N * ((M + k₁) + 2) ≤ N * M₂ :=
+      Int.mul_le_mul_of_nonneg_left (by omega) hN
+    grind
 
 theorem bound_mono_right (N M M' Z : Int) (hN : 0 ≤ N) (h : Z < N * M) (hM : M ≤ M') : Z < N * M' := by
   have := Int.mul_le_mul_of_nonneg_left hM hN
@@ -1266,33 +1259,32 @@ theorem two_pow_le_imp_le_255 (σ : Nat) (N : Int) (h : ((2 ^ σ : Nat) : Int) �
   have := (Nat.pow_lt_pow_iff_right (by decide : 1 < 2)).mp h2
   omega
 
-theorem BeeuInv.sigma_le {a N : Int} {σ τ c : Nat} {B A X Y : Int}
-    (h : BeeuInv a N σ τ c B A X Y) (hB : 0 < B) (hN : N < 256 ^ 32) : σ ≤ 255 := by
+theorem BeeuInv.sigma_le {a N : Int} {σ τ : Nat} {B A X Y : Int}
+    (h : BeeuInv a N σ τ B A X Y) (hB : 0 < B) (hN : N < 256 ^ 32) : σ ≤ 255 := by
   have h0 : (0 : Int) ≤ ((2 ^ σ : Nat) : Int) := by exact_mod_cast Nat.zero_le _
   have h1 := Int.mul_le_mul_of_nonneg_left (show (1 : Int) ≤ B by omega) h0
   have h2 := h.B_shifted
   exact two_pow_le_imp_le_255 σ N (by omega) hN
 
-theorem BeeuInv.tau_le {a N : Int} {σ τ c : Nat} {B A X Y : Int}
-    (h : BeeuInv a N σ τ c B A X Y) (hN : N < 256 ^ 32) : τ ≤ 255 := by
+theorem BeeuInv.tau_le {a N : Int} {σ τ : Nat} {B A X Y : Int}
+    (h : BeeuInv a N σ τ B A X Y) (hN : N < 256 ^ 32) : τ ≤ 255 := by
   have h0 : (0 : Int) ≤ ((2 ^ τ : Nat) : Int) := by exact_mod_cast Nat.zero_le _
   have h1 := Int.mul_le_mul_of_nonneg_left (show (1 : Int) ≤ A by have := h.A_pos; omega) h0
   have h2 := h.A_shifted
   exact two_pow_le_imp_le_255 τ N (by omega) hN
 
 /-- The absolute bounds needed by the per-phase lemmas: `X, Y < 2^319`. -/
-theorem BeeuInv.bounds {a N : Int} {σ τ c : Nat} {B A X Y : Int}
-    (h : BeeuInv a N σ τ c B A X Y) (hB : 0 < B) (hN : N < 256 ^ 32) :
-    X < 256 ^ 40 / 2 ∧ Y < 256 ^ 40 / 2 := by
+theorem BeeuInv.bounds {a N : Int} {σ τ : Nat} {B A X Y : Int}
+    (h : BeeuInv a N σ τ B A X Y) (hB : 0 < B) (hN : N < 256 ^ 32) :
+    X < 256 ^ 40 / 2 ∧ Y < 256 ^ 40 / 2 ∧ beeuBound σ τ ≤ 512 := by
   have hσ := h.sigma_le hB hN
   have hτ := h.tau_le hN
-  have hc : c ≤ 8 := by have := h.clamps; omega
-  have hM := beeuBound_le σ τ c hσ hτ hc
+  have hM := beeuBound_le σ τ hσ hτ
   have hN0 : 0 ≤ N := by have := h.A_pos; have := h.A_le; omega
-  have h1 : N * beeuBound σ τ c ≤ N * 131072 := Int.mul_le_mul_of_nonneg_left hM hN0
+  have h1 : N * beeuBound σ τ ≤ N * 512 := Int.mul_le_mul_of_nonneg_left hM hN0
   have hX := h.X_lt
   have hY := h.Y_lt
-  omega
+  exact ⟨by omega, by omega, hM⟩
 
 theorem pow2_mul_bound_step (m : Nat) (x x' n z : Int)
     (h_inv : ((2 ^ m : Nat) : Int) * x ≤ z + (((2 ^ m : Nat) : Int) - 1) * n)
@@ -1923,27 +1915,27 @@ block_spec beeu_shift_A_Y_correct beeu_mod_inverse_vartime s (a : Int)
 /-- One full iteration of `.Lbeeu_loop` when `0 < B`:
     executes `beeu_shift_B_X`, `beeu_shift_A_Y`, and `.Lbeeu_update_B_X_or_A_Y`,
     returning to `.Lbeeu_loop` with strictly smaller `(B + A).toNat` and re-establishing
-    the loop invariant `BeeuInv` for updated ghost counters `σ' τ' c'`. -/
-block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c : Nat)
+    the loop invariant `BeeuInv` for updated ghost counters `σ' τ'`. -/
+block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ : Nat)
   from ".Lbeeu_loop" to ".Lbeeu_loop"
   (preserves := [SP, X29, beeuN])
   (pre :=
     0 < s.regs.beeuB ∧
-    BeeuInv a s.regs.beeuN σ τ c s.regs.beeuB s.regs.beeuA s.regs.beeuX s.regs.beeuY)
+    BeeuInv a s.regs.beeuN σ τ s.regs.beeuB s.regs.beeuA s.regs.beeuX s.regs.beeuY)
   (post := fun st =>
     st.data.dmem = s.dmem ∧
     st.data.regs.beeuA ≤ s.regs.beeuA ∧
     (st.data.regs.beeuB + st.data.regs.beeuA).toNat <
       (s.regs.beeuB + s.regs.beeuA).toNat ∧
-    ∃ σ' τ' c' : Nat,
-      BeeuInv a s.regs.beeuN σ' τ' c' st.data.regs.beeuB st.data.regs.beeuA
+    ∃ σ' τ' : Nat,
+      BeeuInv a s.regs.beeuN σ' τ' st.data.regs.beeuB st.data.regs.beeuA
         st.data.regs.beeuX st.data.regs.beeuY) := by
   rintro ⟨hB_pos, hI⟩
   have hN_lt : s.regs.beeuN < 256 ^ 32 := val256_lt _ _ _ _
   have hN_pos : 0 < s.regs.beeuN := by have := hI.A_pos; have := hI.A_le; omega
   have hN0 : 0 ≤ s.regs.beeuN := Int.le_of_lt hN_pos
-  have hM0 : 0 ≤ beeuBound σ τ c := Int.le_of_lt (beeuBound_pos σ τ c)
-  obtain ⟨hX_lt, hY_lt⟩ := hI.bounds hB_pos hN_lt
+  have hM0 : 0 ≤ beeuBound σ τ := Int.le_of_lt (beeuBound_pos σ τ)
+  obtain ⟨hX_lt, hY_lt, hM_512⟩ := hI.bounds hB_pos hN_lt
   -- Phase 1: shift B and X.
   kcall beeu_shift_B_X_correct s a ⟨hB_pos, hI.N_odd, hX_lt, hI.X_inv⟩
     with st1 ⟨h1_fr, h1_dmem, h1_B_pos, h1_B_le, h1_X_lt, h1_X_inv,
@@ -1962,10 +1954,10 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
   rw [h1_fr_beeuY, h1_fr_beeuN] at h2_Y_bnd
   rw [h1_fr_beeuN] at h2_Y_inv
   -- Quantitative bounds after the shift phases, relative to the loop-top multiplier `M`.
-  have hX₂ : st2.regs.beeuX < s.regs.beeuN * (beeuBound σ τ c + k₁) := by
+  have hX₂ : st2.regs.beeuX < s.regs.beeuN * (beeuBound σ τ + k₁) := by
     rw [h2_X]
     exact shift_phase_bound _ _ _ _ _ k₁ hN0 hM0 hI.X_lt hI.X_lt_odd h1_k₁_pos h1_X_bnd
-  have hY₂ : st2.regs.beeuY < s.regs.beeuN * (beeuBound σ τ c + k₂) :=
+  have hY₂ : st2.regs.beeuY < s.regs.beeuN * (beeuBound σ τ + k₂) :=
     shift_phase_bound _ _ _ _ _ k₂ hN0 hM0 hI.Y_lt hI.Y_lt_odd h2_k₂_pos h2_Y_bnd
   -- Phase 3: the update step.
   have h_xy_lt : st2.regs.beeuX + st2.regs.beeuY < 256 ^ 40 := by omega
@@ -1976,6 +1968,8 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
   have h2_B_le : st2.regs.beeuB ≤ s.regs.beeuB := h2_B.symm ▸ h1_B_le
   have h2_X_inv : (a * st2.regs.beeuX - st2.regs.beeuB) % s.regs.beeuN = 0 := by
     rw [h2_X, h2_B]; exact h1_X_inv
+  have h2_X_bnd : ((2 ^ k₁ : Nat) : Int) * st2.regs.beeuX ≤
+      s.regs.beeuX + (((2 ^ k₁ : Nat) : Int) - 1) * s.regs.beeuN := h2_X ▸ h1_X_bnd
   have hI_B_le := hI.B_le
   have hI_A_le := hI.A_le
   have hI_B_nonneg := hI.B_nonneg
@@ -1991,49 +1985,14 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
   have hg2 : Int.gcd st2.regs.beeuA st2.regs.beeuB = Int.gcd a s.regs.beeuN := by
     rw [Int.gcd_comm, Int.gcd_of_two_pow_mul_odd _ _ _ k₂ h2_A_shift hg_odd', Int.gcd_comm, hg1,
       hI.gcd_eq]
-  -- New ghost state: `σ + k₁`, `τ + k₂`, `c + dB + dA` with `dB`/`dA` flagging clamped shifts.
-  obtain ⟨dB, hdB⟩ : ∃ dB : Nat, dB = if st2.regs.beeuB % 2 = 0 then 1 else 0 := ⟨_, rfl⟩
-  obtain ⟨dA, hdA⟩ : ∃ dA : Nat, dA = if st2.regs.beeuA % 2 = 0 then 1 else 0 := ⟨_, rfl⟩
-  have hdB_le : dB ≤ 1 := by rw [hdB]; split <;> omega
-  have hdA_le : dA ≤ 1 := by rw [hdA]; split <;> omega
-  have hdB_clamp : dB = 1 → k₁ = 63 := by
-    intro h; rw [hdB] at h; split at h
-    · exact h1_clamp (h2_B ▸ ‹_›)
-    · omega
-  have hdA_clamp : dA = 1 → k₂ = 63 := by
-    intro h; rw [hdA] at h; split at h
-    · exact h2_clamp ‹_›
-    · omega
-  have hM_le : beeuBound σ τ c + k₁ + k₂ ≤ beeuBound (σ + k₁) (τ + k₂) (c + dB + dA) := by
-    have h1 := beeuBound_add_left σ τ c k₁
-    have h2 := beeuBound_add_right (σ + k₁) τ c k₂
-    have h3 := beeuBound_mono (Nat.le_refl (σ + k₁)) (Nat.le_refl (τ + k₂))
-      (show c ≤ c + dB + dA by omega)
-    omega
-  have hM_le2 : 1 ≤ dB + dA →
-      2 * (beeuBound σ τ c + k₁ + k₂) ≤ beeuBound (σ + k₁) (τ + k₂) (c + dB + dA) := by
-    intro hd
-    have h1 := beeuBound_add_left σ τ c k₁
-    have h2 := beeuBound_add_right (σ + k₁) τ c k₂
-    have h3 := beeuBound_mono (Nat.le_refl (σ + k₁)) (Nat.le_refl (τ + k₂))
-      (show c + 1 ≤ c + dB + dA by omega)
-    have h4 := beeuBound_succ (σ + k₁) (τ + k₂) c
-    omega
-  have h_clamps : 63 * (c + dB + dA) ≤ (σ + k₁) + (τ + k₂) := by
-    have := hI.clamps
-    rcases Nat.eq_zero_or_pos dB with h0 | h1 <;> rcases Nat.eq_zero_or_pos dA with h0' | h1'
-    · omega
-    · have := hdA_clamp (by omega); omega
-    · have := hdB_clamp (by omega); omega
-    · have := hdA_clamp (by omega); have := hdB_clamp (by omega); omega
-  have h_parity_d : (st2.regs.beeuB - st2.regs.beeuA) % 2 = 1 ∨
-      (st2.regs.beeuA - st2.regs.beeuB) % 2 = 1 → 1 ≤ dB + dA := by
+  have hM_eq := beeuBound_add σ τ k₁ k₂
+  have h_parity_clamp : (st2.regs.beeuB - st2.regs.beeuA) % 2 = 1 ∨
+      (st2.regs.beeuA - st2.regs.beeuB) % 2 = 1 → k₁ = 63 ∨ k₂ = 63 := by
     intro h
     have hBe : st2.regs.beeuB % 2 = 0 ∨ st2.regs.beeuA % 2 = 0 := by omega
-    rw [hdB, hdA]
-    rcases hBe with h | h
-    · simp only [h, ↓reduceIte]; omega
-    · simp only [h, ↓reduceIte]; omega
+    rcases hBe with hB0 | hA0
+    · exact Or.inl (h1_clamp (h2_B ▸ hB0))
+    · exact Or.inr (h2_clamp hA0)
   -- Shifted-multiple facts for B and A.
   have hpow_σ : ((2 ^ (σ + k₁) : Nat) : Int) = ((2 ^ σ : Nat) : Int) * ((2 ^ k₁ : Nat) : Int) := by
     rw [Nat.pow_add, Int.natCast_mul]
@@ -2061,10 +2020,10 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
           Int.mul_le_mul_of_nonneg_left (Int.mul_le_mul_of_nonneg_left hA₃ h2k₂) h2τ
       _ = ((2 ^ τ : Nat) : Int) * s.regs.beeuA := by rw [h2_A_shift]
       _ ≤ s.regs.beeuN := hI.A_shifted
-  have hM'0 : 0 ≤ s.regs.beeuN * beeuBound (σ + k₁) (τ + k₂) (c + dB + dA) :=
-    Int.mul_nonneg hN0 (Int.le_of_lt (beeuBound_pos _ _ _))
+  have hM'0 : 0 ≤ s.regs.beeuN * beeuBound (σ + k₁) (τ + k₂) :=
+    Int.mul_nonneg hN0 (Int.le_of_lt (beeuBound_pos _ _))
   refine ⟨rfl, by kframe, h3_dmem.trans (h2_dmem.trans h1_dmem), ?_, ?_,
-    σ + k₁, τ + k₂, c + dB + dA, ?_⟩
+    σ + k₁, τ + k₂, ?_⟩
   all_goals by_cases h_ge : st2.regs.beeuB ≥ st2.regs.beeuA
   all_goals simp only [h_ge, ↓reduceIte] at h3_branch
   all_goals rcases h3_branch with ⟨hB', hA', hX', hY'⟩
@@ -2073,7 +2032,7 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
   · omega
   · omega
   · -- B ≥ A: B := B − A, X := X + Y
-    refine ⟨hI.N_odd, ?_, by omega, by omega, by omega, by omega, ?_, ?_, ?_, ?_, h_clamps, ?_, ?_, ?_, ?_⟩
+    refine ⟨hI.N_odd, ?_, by omega, by omega, by omega, by omega, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · rw [hA', hB', Int.gcd_sub_self_right]; exact hg2
     · have h_lin : a * fin.regs.beeuX - fin.regs.beeuB =
           (a * st2.regs.beeuX - st2.regs.beeuB) + (a * st2.regs.beeuY + st2.regs.beeuA) := by
@@ -2083,20 +2042,20 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
     · exact hB_shifted' _ (by omega)
     · exact hA_shifted' _ (by omega)
     · rw [hX']
-      exact update_bound_even _ _ _ _ _ k₁ k₂ hN0 hX₂ hY₂ hM_le
+      exact update_bound_even _ _ _ _ _ k₁ k₂ hN0 hX₂ hY₂ (by omega)
     · intro h_odd
       rw [hX']
-      have hd : 1 ≤ dB + dA := h_parity_d (Or.inl (hB' ▸ h_odd))
-      exact update_bound_odd _ _ _ _ _ k₁ k₂ hN0 hX₂ hY₂ (hM_le2 hd)
+      exact update_bound_clamped _ _ _ _ _ _ _ k₁ k₂ hN0 hM_512 hI.X_lt hI.Y_lt hX₂ hY₂
+        h2_X_bnd h2_Y_bnd (h_parity_clamp (Or.inl (hB' ▸ h_odd))) (by omega)
     · rw [hY']
       have := bound_mono_right _ _ _ _ hN0 hY₂
-        (by omega : beeuBound σ τ c + k₂ ≤ beeuBound (σ + k₁) (τ + k₂) (c + dB + dA))
+        (by omega : beeuBound σ τ + k₂ ≤ beeuBound (σ + k₁) (τ + k₂))
       omega
     · intro _
       rw [hY']
       exact bound_mono_right _ _ _ _ hN0 hY₂ (by omega)
   · -- B < A: A := A − B, Y := Y + X
-    refine ⟨hI.N_odd, ?_, by omega, by omega, by omega, by omega, ?_, ?_, ?_, ?_, h_clamps, ?_, ?_, ?_, ?_⟩
+    refine ⟨hI.N_odd, ?_, by omega, by omega, by omega, by omega, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · rw [hA', hB', Int.gcd_sub_self_left]; exact hg2
     · rw [hX', hB']; exact h2_X_inv
     · have h_lin : a * fin.regs.beeuY + fin.regs.beeuA =
@@ -2107,20 +2066,20 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
     · exact hA_shifted' _ (by omega)
     · rw [hX']
       have := bound_mono_right _ _ _ _ hN0 hX₂
-        (by omega : beeuBound σ τ c + k₁ ≤ beeuBound (σ + k₁) (τ + k₂) (c + dB + dA))
+        (by omega : beeuBound σ τ + k₁ ≤ beeuBound (σ + k₁) (τ + k₂))
       omega
     · intro _
       rw [hX']
       exact bound_mono_right _ _ _ _ hN0 hX₂ (by omega)
     · rw [hY']
-      have := update_bound_even st2.regs.beeuY st2.regs.beeuX s.regs.beeuN (beeuBound σ τ c)
-        (beeuBound (σ + k₁) (τ + k₂) (c + dB + dA)) k₂ k₁ hN0 hY₂ hX₂ (by omega)
+      have := update_bound_even st2.regs.beeuY st2.regs.beeuX s.regs.beeuN (beeuBound σ τ)
+        (beeuBound (σ + k₁) (τ + k₂)) k₂ k₁ hN0 hY₂ hX₂ (by omega)
       omega
     · intro h_odd
       rw [hY']
-      have hd : 1 ≤ dB + dA := h_parity_d (Or.inr (hA' ▸ h_odd))
-      have := update_bound_odd st2.regs.beeuY st2.regs.beeuX s.regs.beeuN (beeuBound σ τ c)
-        (beeuBound (σ + k₁) (τ + k₂) (c + dB + dA)) k₂ k₁ hN0 hY₂ hX₂ (by have := hM_le2 hd; omega)
+      have := update_bound_clamped s.regs.beeuX st2.regs.beeuX s.regs.beeuY st2.regs.beeuY
+        s.regs.beeuN (beeuBound σ τ) (beeuBound (σ + k₁) (τ + k₂)) k₁ k₂ hN0 hM_512
+        hI.X_lt hI.Y_lt hX₂ hY₂ h2_X_bnd h2_Y_bnd (h_parity_clamp (Or.inr (hA' ▸ h_odd))) (by omega)
       omega
 
 /-- Full verification of the outer binary extended Euclidean loop (`.Lbeeu_loop` to `.Lbeeu_loop_end`):
@@ -2130,7 +2089,7 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
 block_spec beeu_loop_correct beeu_mod_inverse_vartime s (a : Int)
   from ".Lbeeu_loop" to ".Lbeeu_loop_end"
   (preserves := [SP, X29, beeuN])
-  (pre := BeeuInv a s.regs.beeuN 0 0 0 s.regs.beeuB s.regs.beeuA s.regs.beeuX s.regs.beeuY)
+  (pre := BeeuInv a s.regs.beeuN 0 0 s.regs.beeuB s.regs.beeuA s.regs.beeuX s.regs.beeuY)
   (post := fun st =>
     st.data.dmem = s.dmem ∧
     0 < st.data.regs.beeuA ∧
@@ -2139,16 +2098,16 @@ block_spec beeu_loop_correct beeu_mod_inverse_vartime s (a : Int)
     (st.data.regs.beeuA = 1 ↔ Int.gcd a s.regs.beeuN = 1)) := by
   intro hI
   kloop at ".Lbeeu_loop" (preserves := [SP, X29, beeuN])
-    (inv := fun v (σ, τ, c) st =>
+    (inv := fun v (σ, τ) st =>
       st.data.dmem = s.dmem ∧
       st.data.regs.beeuA ≤ s.regs.beeuA ∧
       (st.data.regs.beeuB + st.data.regs.beeuA).toNat = v ∧
-      BeeuInv a s.regs.beeuN σ τ c st.data.regs.beeuB st.data.regs.beeuA
+      BeeuInv a s.regs.beeuN σ τ st.data.regs.beeuB st.data.regs.beeuA
         st.data.regs.beeuX st.data.regs.beeuY)
     (measure := (s.regs.beeuB + s.regs.beeuA).toNat)
-    (ghost := ((0 : Nat), (0 : Nat), (0 : Nat)))
+    (ghost := ((0 : Nat), (0 : Nat)))
     (state := st_data)
-    with v ⟨σ, τ, c⟩ ⟨hst_dmem, hst_A_le, hst_v, hst_I⟩
+    with v ⟨σ, τ⟩ ⟨hst_dmem, hst_A_le, hst_v, hst_I⟩
   · exact ⟨rfl, Int.le_refl _, rfl, hI⟩
   · by_cases hB0 : st_data.regs.beeuB = 0
     · kcall beeu_loop_exit_when_B_zero st_data hB0 with fin ⟨h_fr', h_dmem'⟩
@@ -2167,12 +2126,12 @@ block_spec beeu_loop_correct beeu_mod_inverse_vartime s (a : Int)
         · intro h; rw [← hg]; omega
         · intro h; rw [← hg] at h; omega
     · have hst_B_pos : 0 < st_data.regs.beeuB := by have := hst_I.B_nonneg; omega
-      have hst_I' : BeeuInv a st_data.regs.beeuN σ τ c st_data.regs.beeuB st_data.regs.beeuA
+      have hst_I' : BeeuInv a st_data.regs.beeuN σ τ st_data.regs.beeuB st_data.regs.beeuA
           st_data.regs.beeuX st_data.regs.beeuY := by
         rw [h_fr_beeuN]; exact hst_I
-      kcall beeu_loop_body_correct st_data a σ τ c ⟨hst_B_pos, hst_I'⟩
-        with mid ⟨h_fr', h_dmem', h_A_le', h_lt', σ', τ', c', hI'⟩
-      kloop_next (mid.regs.beeuB + mid.regs.beeuA).toNat (σ', τ', c')
+      kcall beeu_loop_body_correct st_data a σ τ ⟨hst_B_pos, hst_I'⟩
+        with mid ⟨h_fr', h_dmem', h_A_le', h_lt', σ', τ', hI'⟩
+      kloop_next (mid.regs.beeuB + mid.regs.beeuA).toNat (σ', τ')
       refine ⟨h_dmem'.trans hst_dmem, Int.le_trans h_A_le' hst_A_le, rfl, ?_⟩
       rw [← h_fr_beeuN]
       exact hI'
@@ -2303,11 +2262,11 @@ block_spec beeu_mod_inverse_vartime_correct beeu_mod_inverse_vartime s₀
     rw [h1_X, h1_B]; change (a * 1 - a) % st1.regs.beeuN = 0; simp
   have h1_Y_inv : (a * st1.regs.beeuY + st1.regs.beeuA) % st1.regs.beeuN = 0 := by
     rw [h1_Y, h1_A, h1_N]; change (a * 0 + n) % n = 0; simp
-  have h1_I : BeeuInv a st1.regs.beeuN 0 0 0 st1.regs.beeuB st1.regs.beeuA
+  have h1_I : BeeuInv a st1.regs.beeuN 0 0 st1.regs.beeuB st1.regs.beeuA
       st1.regs.beeuX st1.regs.beeuY := by
     rw [h1_B, h1_A, h1_N, h1_X, h1_Y]
     refine ⟨h_n_odd, Int.gcd_comm _ _, h_a_nonneg, h_a_le, h_n_pos, Int.le_refl _, ?_, ?_, ?_, ?_,
-      by omega, ?_, ?_, ?_, ?_⟩
+      ?_, ?_, ?_, ?_⟩
     · change (a * 1 - a) % n = 0; simp
     · change (a * 0 + n) % n = 0; simp
     · simp only [Nat.pow_zero, Int.natCast_one, Int.one_mul]; exact h_a_le
