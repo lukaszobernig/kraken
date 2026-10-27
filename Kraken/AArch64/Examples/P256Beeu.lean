@@ -979,8 +979,7 @@ block_spec beeu_loop_exit_when_B_zero beeu_mod_inverse_vartime s₀
 
 block_spec beeu_update_step_correct beeu_mod_inverse_vartime s₀
   from ".Lbeeu_update_B_X_or_A_Y" to ".Lbeeu_loop"
-  (writes := [X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X14, X15, X19, X20,
-    X21, X22, X23, X24, X25, X26, X27, X28])
+  (preserves := [SP, X29, beeuN])
   (pre := s₀.regs.beeuX + s₀.regs.beeuY < 256 ^ 40)
   (post := fun st =>
     st.data.dmem = s₀.dmem ∧
@@ -1187,21 +1186,20 @@ block_spec beeu_reduction_to_return_correct beeu_mod_inverse_vartime s
   kloop
     (inv := fun v st =>
       st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_reduction_loop" ∧
-      st.data.regs ≡ s.regs except [X3, X4, X5, X6, X7, X8, X9, X10, X11, X12] ∧
+      st.data.regs ≡ s.regs on [SP, X29, X14, beeuN] ∧
       st.data.dmem = s.dmem ∧
-      st.data.regs.X14 = 0 ∧
       st.data.regs.beeuY % s.regs.beeuN = s.regs.beeuY % s.regs.beeuN ∧
       st.data.regs.beeuY.toNat = v)
     (measure := s.regs.beeuY.toNat)
     (state := st_data)
-    with v _ ⟨hst_fr, hst_dmem, hst_x14, hst_Y_mod, hst_v⟩
-  · exact ⟨rfl, by kframe, rfl, h_x14, rfl, rfl⟩
-  · kframe_eqs hst_fr [Reg64s.beeuN]
+    with v _ ⟨hst_fr, hst_dmem, hst_Y_mod, hst_v⟩
+  · exact ⟨rfl, by kframe, rfl, rfl, rfl⟩
+  · kframe_eqs hst_fr
+    have hst_x14 : st_data.regs.X14 = 0 := hst_fr_X14.trans h_x14
     by_cases h_ge : st_data.regs.beeuY ≥ st_data.regs.beeuN
     · kcall beeu_reduction_step_ge_correct st_data ⟨hst_x14, h_ge⟩ with mid ⟨h_fr', h_dmem', h_Y'⟩
-      kframe_eqs h_fr'
       kloop_next mid.regs.beeuY.toNat
-      refine ⟨rfl, by kframe, h_dmem'.trans hst_dmem, h_fr'_X14.trans hst_x14, ?_, rfl⟩
+      refine ⟨rfl, by kframe, h_dmem'.trans hst_dmem, ?_, rfl⟩
       rw [h_Y', hst_fr_beeuN, Int.sub_emod, Int.emod_self, Int.sub_zero, Int.emod_emod, hst_Y_mod]
     · have h_lt : st_data.regs.beeuY < st_data.regs.beeuN := Int.lt_of_not_ge h_ge
       have h_N_lt : st_data.regs.beeuN < 256 ^ 32 := val256_lt _ _ _ _
@@ -2003,7 +2001,7 @@ theorem shift_A_Y_mod_inv (k : Nat) (a A A' Y Y' n : Int)
     shifts `B` right by `k = ctzClamped(b0)` bits and divides `X` by `2^k` modulo `N`. -/
 block_spec beeu_shift_B_X_correct beeu_mod_inverse_vartime s (a : Int)
   from ".Lbeeu_loop" to ".Lbeeu_shift_A_Y"
-  (writes := [X3, X4, X5, X6, X7, X13, X14, X15, X19, X20, X25, X26, X27, X28])
+  (preserves := [SP, X29, beeuN, beeuA, beeuY])
   (pre :=
     0 < s.regs.beeuB ∧
     s.regs.beeuN % 2 = 1 ∧
@@ -2065,7 +2063,7 @@ block_spec beeu_shift_B_X_correct beeu_mod_inverse_vartime s (a : Int)
     shifts `A` right by `k = ctzClamped(a0)` bits and divides `Y` by `2^k` modulo `N`. -/
 block_spec beeu_shift_A_Y_correct beeu_mod_inverse_vartime s (a : Int)
   from ".Lbeeu_shift_A_Y" to ".Lbeeu_update_B_X_or_A_Y"
-  (writes := [X8, X9, X10, X11, X12, X13, X14, X15, X19, X20, X21, X22, X23, X24])
+  (preserves := [SP, X29, beeuN, beeuB, beeuX])
   (pre :=
     0 < s.regs.beeuA ∧
     s.regs.beeuN % 2 = 1 ∧
@@ -2131,8 +2129,7 @@ block_spec beeu_shift_A_Y_correct beeu_mod_inverse_vartime s (a : Int)
     the loop invariant `BeeuInv` for updated ghost counters `σ' τ' c'`. -/
 block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c : Nat)
   from ".Lbeeu_loop" to ".Lbeeu_loop"
-  (writes := [X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X19, X20,
-    X21, X22, X23, X24, X25, X26, X27, X28])
+  (preserves := [SP, X29, beeuN])
   (pre :=
     0 < s.regs.beeuB ∧
     BeeuInv a s.regs.beeuN σ τ c s.regs.beeuB s.regs.beeuA s.regs.beeuX s.regs.beeuY)
@@ -2154,14 +2151,14 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
   kcall beeu_shift_B_X_correct s a ⟨hB_pos, hI.N_odd, hX_lt, hI.X_inv⟩
     with st1 ⟨h1_fr, h1_dmem, h1_B_pos, h1_B_le, h1_X_lt, h1_X_inv,
       k₁, hk₁_le, h1_B_shift, h1_X_bnd, h1_k₁_pos, h1_clamp⟩
-  kframe_eqs h1_fr [Reg64s.beeuA, Reg64s.beeuY, Reg64s.beeuN]
+  kframe_eqs h1_fr
   -- Phase 2: shift A and Y.
   kcall beeu_shift_A_Y_correct st1 a
       ⟨h1_fr_beeuA.symm ▸ hI.A_pos, h1_fr_beeuN.symm ▸ hI.N_odd, h1_fr_beeuY.symm ▸ hY_lt, by
         rw [h1_fr_beeuY, h1_fr_beeuA, h1_fr_beeuN]; exact hI.Y_inv⟩
     with st2 ⟨h2_fr, h2_dmem, h2_A_pos, h2_A_le, h2_Y_lt, h2_Y_inv,
       k₂, hk₂_le, h2_A_shift, h2_Y_bnd, h2_k₂_pos, h2_clamp⟩
-  kframe_eqs h2_fr [Reg64s.beeuB, Reg64s.beeuX]
+  kframe_eqs h2_fr
   have h2_B := h2_fr_beeuB
   have h2_X := h2_fr_beeuX
   rw [h1_fr_beeuA] at h2_A_shift h2_k₂_pos h2_A_le
@@ -2335,8 +2332,7 @@ block_spec beeu_loop_body_correct beeu_mod_inverse_vartime s (a : Int) (σ τ c 
     `(a * Y + A) % N = 0`, and `A = 1 ↔ gcd a N = 1`. -/
 block_spec beeu_loop_correct beeu_mod_inverse_vartime s (a : Int)
   from ".Lbeeu_loop" to ".Lbeeu_loop_end"
-  (writes := [X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X19, X20,
-    X21, X22, X23, X24, X25, X26, X27, X28])
+  (preserves := [SP, X29, beeuN])
   (pre := BeeuInv a s.regs.beeuN 0 0 0 s.regs.beeuB s.regs.beeuA s.regs.beeuX s.regs.beeuY)
   (post := fun st =>
     st.data.dmem = s.dmem ∧
@@ -2348,8 +2344,7 @@ block_spec beeu_loop_correct beeu_mod_inverse_vartime s (a : Int)
   kloop
     (inv := fun v (σ, τ, c) st =>
       st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop" ∧
-      st.data.regs ≡ s.regs except [X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15,
-        X19, X20, X21, X22, X23, X24, X25, X26, X27, X28] ∧
+      st.data.regs ≡ s.regs on [SP, X29, beeuN] ∧
       st.data.dmem = s.dmem ∧
       st.data.regs.beeuA ≤ s.regs.beeuA ∧
       (st.data.regs.beeuB + st.data.regs.beeuA).toNat = v ∧
@@ -2360,7 +2355,7 @@ block_spec beeu_loop_correct beeu_mod_inverse_vartime s (a : Int)
     (state := st_data)
     with v ⟨σ, τ, c⟩ ⟨hst_fr, hst_dmem, hst_A_le, hst_v, hst_I⟩
   · exact ⟨rfl, by kframe, rfl, Int.le_refl _, rfl, hI⟩
-  · kframe_eqs hst_fr [Reg64s.beeuN]
+  · kframe_eqs hst_fr
     by_cases hB0 : st_data.regs.beeuB = 0
     · kcall beeu_loop_exit_when_B_zero st_data hB0 with fin ⟨h_fr', h_dmem'⟩
       kframe_eqs h_fr' [Reg64s.beeuA, Reg64s.beeuY]
@@ -2529,7 +2524,7 @@ block_spec beeu_mod_inverse_vartime_correct beeu_mod_inverse_vartime s₀
     · rw [beeuBound_zero]; omega
     · intro _; rw [beeuBound_zero]; omega
   kcall beeu_loop_correct st1 a h1_I with st2 ⟨h2_fr, h2_dmem, h2_A_pos, h2_A_le, h2_Y_inv, h2_gcd⟩
-  kframe_eqs h2_fr [Reg64s.beeuN]
+  kframe_eqs h2_fr
   rw [h1_N] at h2_gcd
   have h2_sp_eq : st2.regs.SP = UInt64.ofBitVec sp' :=
     UInt64.eq_of_toBitVec_eq (by rw [h2_fr_SP]; exact h1_sp)

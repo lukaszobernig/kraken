@@ -127,17 +127,15 @@ block_spec extr_lsr_correct' extr_lsr s₀ (n : Nat) (hn : n = 5)
   sym => kstep; tactic =>
   kfinish extr_lsr
 
--- A consumer composes a `block_spec` lemma with `kcall` as usual.
-example [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s : MachineData)
-  (hB : s.regs.beeuB = 0) :
-    (layout beeu_mod_inverse_vartime).Spec s
-      (pc := (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop")
-      (post := fun st =>
-        st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop_end" ∧
-        st.data.regs.X21 = s.regs.X21) := by
-  intro _
+-- A consumer composes a `block_spec` lemma with `kcall` as usual, and can narrow an `except`
+-- frame into a `preserves` (`≡ … on […]`) frame over registers and derived views.
+block_spec loop_exit_preserves beeu_mod_inverse_vartime s
+  from ".Lbeeu_loop" to ".Lbeeu_loop_end"
+  (preserves := [SP, X29, beeuN, beeuA, beeuY])
+  (pre := s.regs.beeuB = 0)
+  (post := fun st => st.data.dmem = s.dmem) := by
+  intro hB
   kcall beeu_loop_exit_when_B_zero s hB with st1 ⟨h1_fr, h1_mem⟩
-  kframe_eqs h1_fr
   apply Eventually.done
-  exact ⟨rfl, h1_fr_X21⟩
+  exact ⟨rfl, by kframe, h1_mem⟩
 

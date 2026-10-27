@@ -728,39 +728,85 @@ private def projFnApp (e : Expr) : MetaM Expr := do
   let some pfn := getProjFnForField? env S fname | return e
   try mkAppM pfn #[x] catch _ => return e
 
-/-- For `h : RegFile.EqExcept W r' r`, the field equations `r'.f = r.f` (types in reduced,
-projection form) for every register `f ∉ W`, paired with the register's name. -/
+/-- For `h : RegFile.EqExcept W r' r` or `h : RegFile.EqOn vs r' r`, the field/view equations
+`r'.f = r.f` (types in reduced, projection form), paired with the register/view's short name. -/
 def frameEqsOf (h : Expr) : MetaM (Array (String × Expr)) := do
   let hType := (← instantiateMVars (← inferType h)).consumeMData
-  unless hType.isAppOfArity ``Kraken.RegFile.EqExcept 5 do return #[]
-  let args := hType.getAppArgs
-  let R := args[0]!; let inst := args[1]!; let W := args[2]!; let r' := args[3]!; let r := args[4]!
-  let nameTy ← whnfD (mkApp2 (mkConst ``Kraken.RegFile.Name) R inst)
-  let names ← literalListElems (mkApp2 (mkConst ``Kraken.RegFile.names) R inst)
-  let wElems ← literalListElems W
-  let mut acc := #[]
-  for n in names do
-    if (← findRegIdx? wElems n).isSome then continue
-    let hn ← mkNotMemProof nameTy n W
-    let lhs ← projFnApp (← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r' n))
-    let rhs ← projFnApp (← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r n))
-    let prf ← mkExpectedTypeHint (mkApp2 h n hn) (← mkEq lhs rhs)
-    acc := acc.push (regNameString n, prf)
-  return acc
+  if hType.isAppOfArity ``Kraken.RegFile.EqExcept 5 then
+    let args := hType.getAppArgs
+    let R := args[0]!; let inst := args[1]!; let W := args[2]!; let r' := args[3]!; let r := args[4]!
+    let nameTy ← whnfD (mkApp2 (mkConst ``Kraken.RegFile.Name) R inst)
+    let names ← literalListElems (mkApp2 (mkConst ``Kraken.RegFile.names) R inst)
+    let wElems ← literalListElems W
+    let mut acc := #[]
+    for n in names do
+      if (← findRegIdx? wElems n).isSome then continue
+      let hn ← mkNotMemProof nameTy n W
+      let lhs ← projFnApp (← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r' n))
+      let rhs ← projFnApp (← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst r n))
+      let prf ← mkExpectedTypeHint (mkApp2 h n hn) (← mkEq lhs rhs)
+      acc := acc.push (regNameString n, prf)
+    return acc
+  else if hType.isAppOfArity ``Kraken.RegFile.EqOn 4 then
+    let args := hType.getAppArgs
+    let R := args[0]!; let vs := args[1]!; let r' := args[2]!; let r := args[3]!
+    let viewTy := mkApp (mkConst ``Kraken.RegFile.View) R
+    let vElems ← literalListElems vs
+    let mut acc := #[]
+    for idx in [0:vElems.size] do
+      let v := vElems[idx]!
+      let f := if v.isAppOfArity ``Kraken.RegFile.View.of 3 then v.getArg! 2
+               else mkProj ``Kraken.RegFile.View 1 v
+      let nm := match f.getAppFn.constName? with
+        | some c => c.getString!
+        | none => s!"view{idx}"
+      let mem ← mkMemProof viewTy v vs idx
+      let lhs := mkApp f r'
+      let rhs := mkApp f r
+      let prf ← mkExpectedTypeHint (mkApp2 h v mem) (← mkEq lhs rhs)
+      acc := acc.push (nm, prf)
+    return acc
+  else
+    return #[]
 
-/-- Field equations of all `RegFile.EqExcept` hypotheses in the local context. -/
+/-- Field/view equations of all `RegFile.EqExcept` and `RegFile.EqOn` hypotheses in context. -/
 def frameEqsInContext : TacticM (Array Expr) := withMainContext do
   let mut acc := #[]
   for decl in (← getLCtx) do
     if decl.isImplementationDetail then continue
-    if decl.type.consumeMData.isAppOf ``Kraken.RegFile.EqExcept then
+    let t := decl.type.consumeMData
+    if t.isAppOf ``Kraken.RegFile.EqExcept || t.isAppOf ``Kraken.RegFile.EqOn then
       acc := acc ++ (← frameEqsOf decl.toExpr).map (·.2)
   return acc
 
-/-- `kframe_eqs h [f, …]`: add the field equations `r'.f = r.f` of `h : r' ≡ r except W` to the
-context (named `h_f`). The optional functions `f : R → α` (derived values such as multi-limb
-integers `Reg64s.beeuB`) are added as `h_f : f r' = f r` when they only read preserved registers
-(proved by unfolding `f` and rewriting with the field equations); the others are reported. -/
+/-- Try to prove `f r' = f r` from the field equations `eqs` of a frame hypothesis by unfolding `f`. -/
+private def proveViewEq? (f r' r : Expr) (eqs : Array (String × Expr)) : TacticM (Option (Expr × Expr)) := do
+  let some fName := f.getAppFn.constName? | return none
+  let mainGoals ← getGoals
+  let stmt ← mkEq (← mkAppM' f #[r']) (← mkAppM' f #[r])
+  let g ← mkFreshExprMVar stmt
+  let eqStx ← eqs.mapM fun (_, e) => do
+    let t ← Term.exprToSyntax e
+    `(Lean.Parser.Tactic.simpLemma| $t:term)
+  let vId := mkIdent fName
+  let closed ← do
+    let s ← saveState
+    try
+      setGoals [g.mvarId!]
+      evalTactic (← `(tactic| (simp only [$vId:ident, $eqStx,*]; done)))
+      pure true
+    catch _ => s.restore; pure false
+  setGoals mainGoals
+  if closed then
+    return some (stmt, ← instantiateMVars g)
+  else
+    return none
+
+/-- `kframe_eqs h [f, …]`: add the field/view equations `r'.f = r.f` of `h : r' ≡ r except W` or
+`h : r' ≡ r on V` to the context (named `h_f`). The optional functions `f : R → α` (derived values
+such as multi-limb integers `Reg64s.beeuB`) are added as `h_f : f r' = f r` when they only read
+preserved registers (proved by unfolding `f` and rewriting with the field equations); the others
+are reported. -/
 syntax (name := kframeEqs) "kframe_eqs " ident (" [" ident,* "]")? : tactic
 
 elab_rules : tactic
@@ -768,36 +814,24 @@ elab_rules : tactic
   let some decl := (← getLCtx).findFromUserName? h.getId
     | throwErrorAt h "unknown hypothesis `{h}`"
   let eqs ← frameEqsOf decl.toExpr
-  if eqs.isEmpty then throwErrorAt h "`{h}` is not a `≡ … except` hypothesis"
+  if eqs.isEmpty then throwErrorAt h "`{h}` is not a `≡ … except` or `≡ … on` hypothesis"
   let mut hyps ← eqs.mapM fun (nm, prf) => do
     pure { userName := h.getId.appendAfter ("_" ++ nm), type := ← inferType prf, value := prf : Hypothesis }
   if let some vs := views? then
     let vs : Array Ident := vs.getElems
-    let mainGoals ← getGoals
     let hType := (← instantiateMVars decl.type).consumeMData
-    let r' := hType.getArg! 3
-    let r := hType.getArg! 4
-    let eqStx ← eqs.mapM fun (_, e) => do
-      let t ← Term.exprToSyntax e
-      `(Lean.Parser.Tactic.simpLemma| $t:term)
+    let hArgs := hType.getAppArgs
+    let r' := hArgs[hArgs.size - 2]!
+    let r := hArgs[hArgs.size - 1]!
     for v in vs do
+      let nm := v.getId.getString!
+      if eqs.any (fun (n, _) => n == nm) then continue
       let f ← Term.elabTerm v none
       let f ← instantiateMVars f
-      let stmt ← mkEq (← mkAppM' f #[r']) (← mkAppM' f #[r])
-      let g ← mkFreshExprMVar stmt
-      -- unfold `f` (its equation lemma) and rewrite the register fields
-      let closed ← do
-        let s ← saveState
-        try
-          setGoals [g.mvarId!]
-          evalTactic (← `(tactic| (simp only [$v:ident, $eqStx,*]; done)))
-          pure true
-        catch _ => s.restore; pure false
-      setGoals mainGoals
-      unless closed do
-        throwErrorAt v "kframe_eqs: `{v}` reads a register written by the block:{indentExpr stmt}"
-      let nm := v.getId.getString!
-      let value ← instantiateMVars g
+      let some (stmt, value) ← proveViewEq? f r' r eqs
+        | do
+          let stmt ← mkEq (← mkAppM' f #[r']) (← mkAppM' f #[r])
+          throwErrorAt v "kframe_eqs: `{v}` reads a register written by the block:{indentExpr stmt}"
       hyps := hyps.push { userName := h.getId.appendAfter ("_" ++ nm), type := stmt, value }
   let (_, g) ← (← getMainGoal).assertHypotheses hyps
   replaceMainGoal [g]
@@ -816,14 +850,67 @@ private partial def casesRegName (g : MVarId) (fvar : FVarId) : MetaM (List MVar
               return ← casesRegName sg.mvarId f.fvarId!
     return [sg.mvarId]
 
-/-- Prove a goal `r' ≡ r except W`: for every register, the two sides are either definitionally
-equal (`rfl`, after rewriting with the frame equations of `≡ … except` hypotheses in the context)
-or the register is in `W`. Leaves the equations it cannot close, which point at registers missing
-from `W`. -/
+/-- Prove a goal `r' ≡ r except W` or `r' ≡ r on V`:
+- For `r' ≡ r except W`, each register not in `W` is closed by `rfl` or by rewriting with the
+  frame equations of `≡ … except` / `≡ … on` hypotheses in the context; registers that cannot be
+  closed are left as goals and reported in an info message (`kframe: add to writes: […]`).
+- For `r' ≡ r on V`, each register or derived view in `V` is proved preserved by `rfl`, by
+  rewriting with frame equations in the context (including view equations derived from `≡ … except`
+  hypotheses), or by unfolding the view and rewriting. -/
 elab "kframe" : tactic => withKrakenRecDepth <| withMainContext do
   let target := (← instantiateMVars (← getMainTarget)).consumeMData
+  if target.isAppOfArity ``Kraken.RegFile.EqOn 4 then
+    if ← tryClose (← `(tactic| apply Kraken.RegFile.EqOn.refl)) then return
+    let args := target.getAppArgs
+    let vs := args[1]!; let r' := args[2]!; let r := args[3]!
+    let vElems ← literalListElems vs
+    let mut eqs ← frameEqsInContext
+    -- For any `≡ … except` hypothesis in context and any derived view `f` in `vs`, derive `f r_a = f r_b`.
+    for decl in (← getLCtx) do
+      if decl.isImplementationDetail then continue
+      let dt := (← instantiateMVars decl.type).consumeMData
+      if dt.isAppOfArity ``Kraken.RegFile.EqExcept 5 then
+        let hEqs ← frameEqsOf decl.toExpr
+        let ra := dt.getArg! 3; let rb := dt.getArg! 4
+        for v in vElems do
+          if v.isAppOfArity ``Kraken.RegFile.View.of 3 then
+            let f := v.getArg! 2
+            if let some c := f.getAppFn.constName? then
+              unless hEqs.any (fun (nm, _) => nm == c.getString!) do
+                if let some (_, prf) ← proveViewEq? f ra rb hEqs then
+                  eqs := eqs.push prf
+    let eqStx ← eqs.mapM fun e => do
+      let t ← Term.exprToSyntax e
+      `(Lean.Parser.Tactic.simpLemma| $t:term)
+    let mut cur ← getMainGoal
+    let mut leaves : Array (Expr × MVarId) := #[]
+    for v in vElems do
+      let [gHead, gTail] ← cur.apply (mkConst ``Kraken.RegFile.EqOn.cons)
+        | throwError "kframe: unexpected goals from `EqOn.cons`"
+      let f := if v.isAppOfArity ``Kraken.RegFile.View.of 3 then v.getArg! 2
+               else mkProj ``Kraken.RegFile.View 1 v
+      let gHead ← gHead.replaceTargetDefEq (← mkEq (mkApp f r') (mkApp f r))
+      leaves := leaves.push (f, gHead)
+      cur := gTail
+    discard <| cur.apply (mkConst ``Kraken.RegFile.EqOn.nil)
+    let mut remaining := #[]
+    for (f, leaf) in leaves do
+      setGoals [leaf]
+      if ← tryClose (← `(tactic| with_reducible rfl)) then continue
+      if ← tryClose (← `(tactic| rfl)) then continue
+      if !eqStx.isEmpty then
+        if ← tryClose (← `(tactic| (simp only [$eqStx,*]; done))) then continue
+        if ← tryClose (← `(tactic| (simp only [$eqStx,*]; rfl))) then continue
+      if let some fName := f.getAppFn.constName? then
+        let fId := mkIdent fName
+        if ← tryClose (← `(tactic| (simp only [$fId:ident, $eqStx,*]; done))) then continue
+        if ← tryClose (← `(tactic| (simp only [$fId:ident, $eqStx,*]; rfl))) then continue
+      remaining := remaining.push leaf
+    setGoals remaining.toList
+    return
   unless target.isAppOfArity ``Kraken.RegFile.EqExcept 5 do
-    throwError "kframe: expected a goal `r' ≡ r except W`, got{indentExpr target}"
+    throwError "kframe: expected a goal `r' ≡ r except W` or `r' ≡ r on V`, got{indentExpr target}"
+  if ← tryClose (← `(tactic| apply Kraken.RegFile.EqExcept.refl)) then return
   let args := target.getAppArgs
   let R := args[0]!; let inst := args[1]!; let W := args[2]!
   let nameTy ← whnfD (mkApp2 (mkConst ``Kraken.RegFile.Name) R inst)
@@ -838,6 +925,7 @@ elab "kframe" : tactic => withKrakenRecDepth <| withMainContext do
   let (fvars, g) ← g.introN 2 [`n, `hn]
   let leaves ← casesRegName g fvars[0]!
   let mut remaining := #[]
+  let mut missingNames : Array String := #[]
   for leaf in leaves do
     setGoals [leaf]
     if ← tryClose (← `(tactic| with_reducible rfl)) then continue
@@ -867,7 +955,10 @@ elab "kframe" : tactic => withKrakenRecDepth <| withMainContext do
     if !eqStx.isEmpty then
       if ← tryClose (← `(tactic| (simp only [$eqStx,*]; done))) then continue
       if ← tryClose (← `(tactic| (simp only [$eqStx,*]; rfl))) then continue
+    missingNames := missingNames.push (regNameString n)
     remaining := remaining.push leaf
+  if !missingNames.isEmpty then
+    logInfo m!"kframe: add to writes: [{String.intercalate ", " missingNames.toList}]"
   setGoals remaining.toList
 
 /-- Finish a post-`kstep` goal: apply `Eventually.done` if needed, zeta-reduce and normalise the
@@ -931,7 +1022,7 @@ elab_rules : tactic
       setGoals [g]
       let t := (← instantiateMVars (← g.getType)).consumeMData
       let closers : List (TSyntax `tactic) ←
-        if t.isAppOf ``Kraken.RegFile.EqExcept then
+        if t.isAppOf ``Kraken.RegFile.EqExcept || t.isAppOf ``Kraken.RegFile.EqOn then
           pure [← `(tactic| kframe)]
         else if mentionsConst t [``Kraken.Executable.label, ``Labels.label, ``Kraken.Executable.addrOf,
             ``Kraken.Layout.addrOf] then
@@ -1427,6 +1518,8 @@ theorem loop_exit [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s�
   post has no pc conjunct.
 * `(writes := [r, …])` adds the frame conjunct `st.data.regs ≡ s₀.regs except [r, …]`
   (`(writes := [])` means "no register is modified").
+* `(preserves := [r, …])` adds the dual frame conjunct `st.data.regs ≡ s₀.regs on [r, …]`,
+  where each entry may be a register name or a derived view on the register file (e.g. `beeuN`).
 * `(trace := tr)` selects the constant-time (`TracedEventually`) form of `Spec`.
 * `(post := fun st => …)` is mandatory; `(pre := …)` optional. The post may use the state name
   `st` of the lambda; the generated conjuncts refer to it as `st`.
@@ -1436,6 +1529,7 @@ syntax blockSpecFrom := &"from " str
 syntax blockSpecTo := &"to " str
 syntax blockSpecExit := atomic("(" &"exit" " := ") term ")"
 syntax blockSpecWrites := atomic("(" &"writes" " := ") "[" ident,* "]" ")"
+syntax blockSpecPreserves := atomic("(" &"preserves" " := ") "[" ident,* "]" ")"
 syntax blockSpecTrace := atomic("(" &"trace" " := ") term ")"
 syntax blockSpecPre := atomic("(" &"pre" " := ") term ")"
 syntax blockSpecPost := atomic("(" &"post" " := ") term ")"
@@ -1445,12 +1539,12 @@ mistaken for binders with default values. -/
 syntax blockSpecBinder := atomic("(" ident+ " : ") term ")"
 
 syntax (name := blockSpec) declModifiers "block_spec " ident ident ident blockSpecBinder*
-  (blockSpecFrom)? (blockSpecTo <|> blockSpecExit)? (blockSpecWrites)? (blockSpecTrace)?
-  (blockSpecPre)? blockSpecPost " := " term : command
+  (blockSpecFrom)? (blockSpecTo <|> blockSpecExit)? (blockSpecWrites <|> blockSpecPreserves)?
+  (blockSpecTrace)? (blockSpecPre)? blockSpecPost " := " term : command
 
 macro_rules
   | `($mods:declModifiers block_spec $name:ident $prog:ident $s:ident $bs:blockSpecBinder*
-      $[$from?]? $[$exit?]? $[$writes?]? $[$trace?]? $[$pre?]? (post := $post) := $proof) => do
+      $[$from?]? $[$exit?]? $[$frame?]? $[$trace?]? $[$pre?]? (post := $post) := $proof) => do
     -- names that must resolve in the user's scope (the architecture's `Layout`/`MachineData`
     -- abbreviations, and the `layout` binder the statement refers to)
     let layoutTy := mkIdent `Layout
@@ -1477,10 +1571,12 @@ macro_rules
       | `(blockSpecTo| to $l:str) => conj := conj.push (← `($(st).pc = ($layout $prog).label $l))
       | `(blockSpecExit| (exit := $e)) => conj := conj.push (← `($(st).pc = $e))
       | _ => Macro.throwUnsupported
-    if let some w := writes? then
-      match w with
+    if let some fr := frame? then
+      match fr with
       | `(blockSpecWrites| (writes := [$rs:ident,*])) =>
         conj := conj.push (← `($(st).data.regs ≡ $(s).regs except [$rs,*]))
+      | `(blockSpecPreserves| (preserves := [$rs:ident,*])) =>
+        conj := conj.push (← `($(st).data.regs ≡ $(s).regs on [$rs,*]))
       | _ => Macro.throwUnsupported
     conj := conj.push postBody
     let body ← conj.pop.foldrM (init := conj.back!) fun c acc => `($c ∧ $acc)
