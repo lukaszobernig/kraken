@@ -92,50 +92,51 @@ theorem p3_correct [layout: Layout] [Layout.Valid p3] (s: MachineData):
   unfold p3_spec at *
   kprologue p3 to "start"
   sym => kstep; tactic =>
-  apply reg_dec_loop (step1 (layout p3)) _ _
-    (fun i st =>
+  kloop
+    (inv := fun i st =>
       st.pc = (layout p3).label "start" ∧
       st.data.regs.rbx.toNat = i ∧
       i ≤ s.regs.rbx.toNat ∧
       st.data.regs.rdx.toNat = 2 ^ (2 ^ (s.regs.rbx.toNat - i)) ∧
       (i < s.regs.rbx.toNat → st.data.regs.rax = 0))
-    s.regs.rbx.toNat
-  refine ⟨⟨by kaddr p3, rfl, Nat.le_refl _, by simp; decide, fun h => absurd h (Nat.lt_irrefl _)⟩, ?_, ?_⟩
-  · rintro ⟨state, pc⟩ ⟨rfl, h_rbx_zero, h_rbx_le, h_inv, h_rax⟩
-    kprologue p3 at "start" with state
-    sym => kstep; tactic =>
-    kprologue p3 at "_end"
-    sym => kstep; tactic =>
-    apply Eventually.done
-    exact ⟨by dsimp; rw [h_inv, Nat.sub_zero], fun h_pos => h_rax h_pos⟩
-  · rintro ⟨state, pc⟩ k hk_nz ⟨rfl, h_rbx_k, h_k_le, h_inv, _⟩
-    kprologue p3 at "start" to "_end" with state
-    sym => kstep; tactic =>
-    rename_i _ b_mul v_mul _ _ _
-    apply Eventually.done
-    have h_pow_eq : rdx.toNat * rdx.toNat = 2 ^ 2 ^ (s.regs.rbx.toNat - (k - 1)) := by
-      rw [h_inv, show s.regs.rbx.toNat - (k - 1) = (s.regs.rbx.toNat - k) + 1 by omega]
-      rw [← Nat.pow_two, ← Nat.pow_mul, ← Nat.pow_succ]
-    have h_prod_lt : rdx.toNat * rdx.toNat < 2 ^ 64 := by
-      rw [h_pow_eq]
-      refine Nat.lt_of_le_of_lt ?_ h_bounds
-      apply Nat.pow_le_pow_right (by decide)
-      apply Nat.pow_le_pow_right (by decide)
-      omega
-    have hv_mul : v_mul = ↑(rdx.toNat * rdx.toNat) := by
-      dsimp [v_mul, b_mul, BitVec.unsigned] <;> grind
-    dsimp only
-    refine ⟨by kaddr p3, by grind, by omega, ?_, ?_⟩
-    · rw [hv_mul, ← h_pow_eq]
-      change (BitVec.ofNat 64 (rdx.toNat * rdx.toNat)).toNat = rdx.toNat * rdx.toNat
-      rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt h_prod_lt]
-    · intro _
-      rw [hv_mul]
-      change ({ toBitVec := BitVec.ofNat 64 ((rdx.toNat * rdx.toNat) >>> 64) } : UInt64) = 0
-      have h_shr : (rdx.toNat * rdx.toNat) >>> 64 = 0 :=
-        Nat.shiftRight_eq_div_pow _ _ ▸ Nat.div_eq_of_lt h_prod_lt
-      rw [h_shr]
-      rfl
+    (measure := s.regs.rbx.toNat)
+    (state := state)
+    with k _ ⟨h_rbx_k, h_k_le, h_inv, h_rax⟩
+  · exact ⟨by kaddr p3, rfl, Nat.le_refl _, by simp; decide, fun h => absurd h (Nat.lt_irrefl _)⟩
+  · by_cases hk : k = 0
+    · subst hk
+      kprologue p3 at "start" with state
+      sym => kstep; tactic =>
+      kprologue p3 at "_end"
+      sym => kstep; tactic =>
+      kloop_exit
+      exact ⟨by rw [h_inv, Nat.sub_zero], fun h_pos => h_rax h_pos⟩
+    · kprologue p3 at "start" to "_end" with state
+      sym => kstep; tactic =>
+      rename_i _ b_mul v_mul _ _ _
+      have h_pow_eq : rdx.toNat * rdx.toNat = 2 ^ 2 ^ (s.regs.rbx.toNat - (k - 1)) := by
+        rw [h_inv, show s.regs.rbx.toNat - (k - 1) = (s.regs.rbx.toNat - k) + 1 by omega]
+        rw [← Nat.pow_two, ← Nat.pow_mul, ← Nat.pow_succ]
+      have h_prod_lt : rdx.toNat * rdx.toNat < 2 ^ 64 := by
+        rw [h_pow_eq]
+        refine Nat.lt_of_le_of_lt ?_ h_bounds
+        apply Nat.pow_le_pow_right (by decide)
+        apply Nat.pow_le_pow_right (by decide)
+        omega
+      have hv_mul : v_mul = ↑(rdx.toNat * rdx.toNat) := by
+        dsimp [v_mul, b_mul, BitVec.unsigned] <;> grind
+      kloop_next (k - 1)
+      refine ⟨by kaddr p3, by grind, by omega, ?_, ?_⟩
+      · rw [hv_mul, ← h_pow_eq]
+        change (BitVec.ofNat 64 (rdx.toNat * rdx.toNat)).toNat = rdx.toNat * rdx.toNat
+        rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt h_prod_lt]
+      · intro _
+        rw [hv_mul]
+        change ({ toBitVec := BitVec.ofNat 64 ((rdx.toNat * rdx.toNat) >>> 64) } : UInt64) = 0
+        have h_shr : (rdx.toNat * rdx.toNat) >>> 64 = 0 :=
+          Nat.shiftRight_eq_div_pow _ _ ▸ Nat.div_eq_of_lt h_prod_lt
+        rw [h_shr]
+        rfl
 
 def p4 := eval% parse("start: mov $2, %rax
 dec %rax")
@@ -294,8 +295,8 @@ theorem memset_loop_correct [layout : Layout] [Layout.Valid memset_loop] (s₀ :
         st.data.regs.rdi.toBitVec = s₀.regs.rdi.toBitVec + BitVec.ofNat 64 (8 * n) ∧
         (st.data.dmem =⋆ (List.replicate (8 * n) 0) @ s₀.regs.rdi ⋆ R)) := by
   rintro ⟨hn, h_rcx, h_len, h_bound, h_mem⟩
-  apply tailrec_loop (step1 (layout memset_loop)) _ ⟨s₀, layout.start⟩
-    (P := fun v (ptr, bs, frame) st =>
+  kloop
+    (inv := fun v (ptr, bs, frame) st =>
       st.pc = layout.start ∧
       0 < v ∧
       st.data.regs.rcx.toNat = v ∧
@@ -303,36 +304,32 @@ theorem memset_loop_correct [layout : Layout] [Layout.Valid memset_loop] (s₀ :
       bs.length = 8 * v ∧
       bs.length ≤ 2 ^ 64 ∧
       (st.data.dmem =⋆ bs @ ptr ⋆ frame))
-    (Q := fun v (ptr, _, frame) st =>
+    (exit := fun v (ptr, _, frame) st =>
       st.data.regs.rcx = 0 ∧
       st.data.regs.rdi.toBitVec = ptr + BitVec.ofNat 64 (8 * v) ∧
       (st.data.dmem =⋆ (List.replicate (8 * v) 0) @ ptr ⋆ frame))
-    (lt := (· < ·))
-    (Hwf := Nat.lt_wfRel.wf)
-    (v0 := n)
-    (g0 := (s₀.regs.rdi.toBitVec, buf, R))
-  · exact ⟨rfl, hn, h_rcx, rfl, h_len, h_bound, h_mem⟩
-  · rintro v ⟨ptr, bs, frame⟩ ⟨s, pc⟩ ⟨rfl, hv, h_rcx, rfl, h_bs_len, h_bs_bound, h_mem⟩
-    by_cases hv1 : v = 1
+    (measure := n)
+    (ghost := (s₀.regs.rdi.toBitVec, buf, R))
+    (state := s)
+    with v ⟨ptr, bs, frame⟩ ⟨hv, h_rcx, rfl, h_bs_len, h_bs_bound, h_mem⟩
+  · kloop_next
+    exact ⟨rfl, hn, h_rcx, rfl, h_len, h_bound, h_mem⟩
+  · by_cases hv1 : v = 1
     · subst hv1
       kprologue memset_loop with s
       sym => kstep; tactic =>
-      apply Eventually.done
-      exact Or.inl ⟨by grind, by grind, by ecancel⟩
+      kloop_exit
+      exact ⟨by grind, by grind, by ecancel⟩
     · kprologue memset_loop with s
       rw [Mem.At_take_drop_sep bs 8 rdi.toBitVec (by omega) h_bs_bound] at h_mem
       sym => kstep; tactic =>
-      apply Eventually.done
-      refine Or.inr ⟨v - 1, rdi.toBitVec + 8#64, bs.drop 8,
-        (List.replicate 8 0) @ rdi ⋆ frame,
-        ⟨rfl, by grind, by grind, by grind, by simp [h_bs_len]; omega, by simp; omega, by ecancel⟩,
-        by omega, ?_⟩
-      intro t_s hQ_rcx hQ_rdi hQ_mem
+      kloop_next (v - 1) (rdi.toBitVec + 8#64, bs.drop 8, (List.replicate 8 0) @ rdi ⋆ frame)
+      · exact ⟨rfl, by grind, by grind, by grind, by simp [h_bs_len]; omega, by simp; omega, by ecancel⟩
+      rintro t_s ⟨hQ_rcx, hQ_rdi, hQ_mem⟩
       refine ⟨hQ_rcx, by grind, ?_⟩
       rw [Mem.At_take_drop_sep _ 8 _ (by simp; omega) (by simp; omega)]
       ecancel
-  · intro st hQ
-    exact hQ
+  · exact Eventually.done _ hs
 
 -- Example 11: Composable basic blocks (both standalone subprograms and per-block lemmas)
 
@@ -395,8 +392,7 @@ theorem swap_and_add_correct [layout : Layout] [Layout.Valid swap_and_add] (s₀
   intro h_mem
   refine step1_subprog 0 (swap_mem_block_spec s₀ x y R) h_mem (by rfl) (by kaddr swap_and_add) ?_
   rintro s₁ ⟨h_rax, h_rcx, -, -, h_mem₁⟩
-  refine (swap_and_add_finish_spec s₁).bind_at (by kaddr swap_and_add) ?_
-  rintro ⟨s₂, _⟩ ⟨h_rax₂, h_dmem₂⟩
+  kcall swap_and_add_finish_spec s₁ with s₂ ⟨h_rax₂, h_dmem₂⟩
   apply Eventually.done
   exact ⟨by grind, h_dmem₂ ▸ h_mem₁⟩
 
@@ -451,7 +447,6 @@ theorem swap_and_add_ct_correct [layout : Layout] [Layout.Valid swap_and_add] (x
   refine step1_subprog_traced 0 ((swap_mem_block_ct_spec x_ptr y_ptr).choose_spec s₀ x y R)
     ⟨h_rdi, h_rsi, h_mem⟩ (by rfl) (by kaddr swap_and_add) ?_
   rintro s₁ ⟨h_rax, h_rcx, -, -, h_mem₁⟩
-  refine (swap_and_add_finish_ct_spec.choose_spec s₁).bind_at_traced (by kaddr swap_and_add) ?_
-  rintro ⟨s₂, _⟩ ⟨h_rax₂, h_dmem₂⟩
+  kcall swap_and_add_finish_ct_spec.choose_spec s₁ with s₂ ⟨h_rax₂, h_dmem₂⟩
   kdone
   exact ⟨by grind, h_dmem₂ ▸ h_mem₁⟩

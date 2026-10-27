@@ -405,7 +405,7 @@ elab_rules : tactic
                    ext
                    ext
                    arg 2
-                   simp)
+                   dsimp only)
                conv =>
                  arg 2
                  (try rw [Kraken.Executable.startAddr_apply])
@@ -546,7 +546,7 @@ elab_rules : tactic
                    ext
                    ext
                    arg 2
-                   simp)
+                   dsimp only)
                conv =>
                  arg 2
                  (try rw [Kraken.Executable.startAddr_apply])
@@ -861,6 +861,7 @@ elab_rules : tactic
       BitVec.xor_self, UInt64.toNat_toBitVec, UInt64.toBitVec_ofBitVec, kcond] at *)))
     -- goal only, deciding ground conditions (`if (1 == 0) = true then … else …`)
     evalTactic (← `(tactic| (try simp +decide only [$nfStx,*])))
+    if (← getUnsolvedGoals).isEmpty then return
     -- Apply the extra lemmas to the goal and to every hypothesis that is not itself one of them.
     let lemmaNames : Array Name := lemmas.filterMap fun l =>
       match l.raw.find? (·.isIdent) with
@@ -1295,10 +1296,10 @@ elab "kloop_next" vs:(ppSpace colGt term:max)* : tactic => withMainContext do
     let unitStx ← `(Unit.unit)
     let (v', g') ← match vs with
       | #[v'] =>
-        if ghostType?.any (·.isConstOf ``Unit) then
+        if ghostType?.any (fun t => t.isConstOf ``Unit || t.isConstOf ``PUnit) then
           pure (v', unitStx)
         else
-          throwError "kloop_next: the loop has a ghost state; use `kloop_next v' g'`"
+          throwError "kloop_next: the loop has a ghost state; use `kloop_next v' g'`{indentExpr rhs}"
       | #[v', g'] => pure (v', g')
       | _ => throwError "kloop_next: expected `kloop_next v' [g']`"
     -- Constant-time loop (`tailrec_loop_cps_traced`): `∃ v' pub', lt v' v ∧ Inv v' pub' ∧ ∃ tr, …`.
