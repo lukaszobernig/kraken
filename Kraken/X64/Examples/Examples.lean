@@ -16,7 +16,6 @@ import Kraken.Eval
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
-import Std.Tactic.BVDecide
 import Kraken.X64.OmniSemantics
 import Kraken.X64.Parser
 import Kraken.X64.PrettyPrint

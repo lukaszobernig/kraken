@@ -11,7 +11,6 @@ import Kraken.AArch64.Semantics
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
-import Std.Tactic.BVDecide
 public import Lean.Elab.Tactic
 
 open Kraken.AArch64
@@ -497,25 +496,16 @@ theorem extr_sem_eq (hi lo : UInt64) :
     hi.toBitVec <<< (64 - 1) ||| lo.toBitVec >>> 1 = extr1Word hi lo := rfl
 
 theorem ubfm_lsr1_sem_eq (x : UInt64) :
-    BitVec.setWidth 64 (BitVec.extractLsb' 0 63 (x.toBitVec >>> 1)) = x.toBitVec >>> 1 := by
-  bv_decide
-
-theorem extr1_eq_add_bv (hi lo : BitVec 64) :
-    (hi <<< 63) ||| (lo >>> 1) = (lo >>> 1) + 0x8000000000000000#64 * (hi &&& 1#64) := by
-  bv_decide
+    BitVec.setWidth 64 (BitVec.extractLsb' 0 63 (x.toBitVec >>> 1)) = x.toBitVec >>> 1 :=
+  BitVec.setWidth_extractLsb'_ushiftRight x.toBitVec (by decide)
 
 theorem extr1Word_toNat (hi lo : UInt64) :
     (UInt64.ofBitVec (extr1Word hi lo)).toNat =
       lo.toNat / 2 + 2 ^ 63 * (hi.toNat % 2) := by
   dsimp only [extr1Word]
-  rw [UInt64.toNat_ofBitVec, extr1_eq_add_bv, BitVec.toNat_add, BitVec.toNat_mul]
-  have h_shr : (lo.toBitVec >>> 1).toNat = lo.toNat / 2 :=
-    UInt64.toNat_ofBitVec_ushiftRight_one lo
-  have h_and : (hi.toBitVec &&& 1#64).toNat = hi.toNat % 2 :=
-    UInt64.toNat_ofBitVec_and_one hi
-  have h_lt : lo.toNat < 2 ^ 64 := lo.toBitVec.isLt
-  have h_pow : (0x8000000000000000#64).toNat = 2 ^ 63 := rfl
-  rw [h_shr, h_and, h_pow]
+  rw [UInt64.toNat_ofBitVec, BitVec.or_comm,
+    BitVec.toNat_funnel_nat' lo.toBitVec hi.toBitVec (k := 1) (m := 63) rfl,
+    UInt64.toNat_toBitVec, UInt64.toNat_toBitVec]
   omega
 
 theorem shift1_val320 (x0 x1 x2 x3 x4 : UInt64) :
@@ -566,16 +556,16 @@ def shift256TopWord (hi : UInt64) (k : BitVec 64) : BitVec 64 :=
   hi.toBitVec.ushiftRight (k.toNat % 64)
 
 theorem clz_reverse_or_one_le_63 (b0 : BitVec 64) :
-    (b0.reverse ||| 1#64).clz ≤ 63#64 := by
-  bv_decide
+    (b0.reverse ||| 1#64).clz ≤ 63#64 :=
+  BitVec.clz_reverse_or_one_le_63 b0
 
 theorem clz_reverse_or_one_mask_zero (b0 : BitVec 64) :
-    b0 &&& ((1#64 <<< (((b0.reverse ||| 1#64).clz) % 64#64)) - 1#64) = 0#64 := by
-  bv_decide
+    b0 &&& ((1#64 <<< (((b0.reverse ||| 1#64).clz) % 64#64)) - 1#64) = 0#64 :=
+  BitVec.and_mask_clz_reverse_or_one b0
 
 /-! The two 128-bit funnel-shift identities are proved by `Nat` arithmetic with the generic
-shift/mask lemmas of `Kraken.BitVecArith` (a 128-bit `bv_decide` costs ~5 s each; see the policy
-note there). -/
+shift/mask lemmas of `Kraken.BitVecArith` (a 128-bit `bv_decide` would cost ~5 s each and add a
+trusted certificate axiom; see the policy note there). -/
 
 theorem shift256_limb_bv128 (lo hi k : BitVec 64) (hk1 : 1#64 ≤ k) (hk63 : k ≤ 63#64) :
     ((1#64 <<< (k % 64#64)).setWidth 128) *
@@ -651,13 +641,19 @@ theorem shift256_top_bv128 (hi k : BitVec 64) (hk63 : k ≤ 63#64) :
   omega
 
 theorem ctzClamped_eq_zero_imp_odd (b0 : BitVec 64) (h : (b0.reverse ||| 1#64).clz = 0#64) :
-    b0.getLsbD 0 = true := by
-  revert h; bv_decide
+    b0.getLsbD 0 = true :=
+  BitVec.getLsbD_zero_of_clz_reverse_or_one_eq_zero (by decide) h
 
 theorem shift256Word_lsb_or_clamped (b0 b1 : BitVec 64) :
     let k := (b0.reverse ||| 1#64).clz
     ((b0 >>> (k % 64#64)) ||| (b1 <<< ((0#64 - k) % 64#64))).getLsbD 0 = true ∨ k = 63#64 := by
-  bv_decide
+  intro k
+  have hk63 : k ≤ 63#64 := BitVec.clz_reverse_or_one_le_63 b0
+  rw [BitVec.getLsbD_or, BitVec.ushiftRight_eq', BitVec.getLsbD_ushiftRight,
+    BitVec.umod_64_eq_self hk63, Nat.add_zero]
+  rcases BitVec.getLsbD_clz_reverse_or_one_64 b0 with h | h
+  · exact Or.inl (by rw [h, Bool.true_or])
+  · exact Or.inr h
 
 theorem one_shiftLeft_toNat (k : BitVec 64) (hk63 : k ≤ 63#64) :
     (1#64 <<< (k % 64#64)).toNat = 2 ^ k.toNat := by
