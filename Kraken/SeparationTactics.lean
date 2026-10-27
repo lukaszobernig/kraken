@@ -1,5 +1,6 @@
 module
 
+public import Kraken.Attribute
 public import Kraken.BitVecArith
 public import Kraken.Mem
 public import Kraken.Separation
@@ -440,6 +441,18 @@ def reduceNatGround : Simp.Simproc := fun e => do
   let some n ← (Meta.evalNat e).run | return .continue
   return .done { expr := mkRawNatLit n }
 
+/-- Fold a closed `BitVec.ofInt w i` into the literal `BitVec.ofNat w n` (raw literals). Immediate
+operands reach the state as `BitVec.ofInt w (Int64.toInt imm)`; `Sym` evaluates the `Int` but not
+the conversion, so without this `x - BitVec.ofInt 64 1` would stay instead of `x - 1#64`. The
+result is definitionally equal to the input. -/
+def reduceBitVecOfIntGround : Simp.Simproc := fun e => do
+  let_expr BitVec.ofInt w i := e | return .continue
+  if e.hasFVar || e.hasMVar then return .continue
+  let some w ← (Meta.evalNat w).run | return .continue
+  let some i ← getIntValue? i | return .continue
+  let n := (i % (2 ^ w : Nat)).toNat
+  return .done { expr := mkApp2 (mkConst ``BitVec.ofNat) (mkRawNatLit w) (mkRawNatLit n) }
+
 /-- Bring a (small) term into the normal form with the standard simplifier, which, unlike the
 `Sym` simplifier, matches raw natural-number literals against `OfNat` numerals. Closed conditions
 (`1 ≤ 63`, `(1 == 0) = true`) are decided so that ground `if`s disappear, and closed `Nat`
@@ -459,7 +472,10 @@ def simpNormalForm (e : Expr) : MetaM (Option (Expr × Expr)) := do
         post := fun e => do
           match ← reduceNatGround e with
           | .done r => return .done r
-          | _ => methods.post e }
+          | _ =>
+            match ← reduceBitVecOfIntGround e with
+            | .done r => return .done r
+            | _ => methods.post e }
       let (r, _) ← Simp.main e ctx (methods := methods)
       if r.expr == e then return none
       let prf ← r.getProof
@@ -542,10 +558,18 @@ def simpWithHyps (g : MVarId) : MetaM SimpWithHypsResult := g.withContext do
         thms ← thms.add (.fvar decl.fvarId) #[] decl.toExpr
     for n in [``bne_self_eq_false, ``beq_self_eq_true, ``Bool.false_eq_true, ``Bool.true_eq_false,
         ``Bool.not_false, ``Bool.not_true, ``decide_eq_true_eq, ``bne_iff_ne, ``beq_iff_eq,
-        ``ne_eq, ``not_true_eq_false, ``not_false_eq_true] do
+        ``ne_eq, ``not_true_eq_false, ``not_false_eq_true,
+        -- `Bool` combinations of decided flags to `Prop`, and the `UInt64`/`BitVec` bridge, so that
+        -- a condition such as `(!decide (b.toBitVec.toNat ≤ a.toBitVec.toNat)) = true` becomes the
+        -- arithmetic fact `a.toNat < b.toNat`
+        ``Bool.not_eq_true', ``decide_eq_false_iff_not, ``Bool.and_eq_true, ``Bool.or_eq_true,
+        ``Nat.not_le, ``Nat.not_lt, ``Int.not_le, ``Int.not_lt, ``UInt64.toNat_toBitVec] do
       if (← getEnv).contains n then thms ← thms.addConst n
     thms ← simpOnlyBuiltinThms thms
-    let ctx ← Simp.mkContext {} (simpTheorems := #[thms]) (congrTheorems := ← getSimpCongrTheorems)
+    -- flag projections and the compare idiom (`@[kcond]`), e.g. `(subs a b).c = decide (b ≤ a)`
+    let kcond ← kcondExt.getTheorems
+    let ctx ← Simp.mkContext {} (simpTheorems := #[thms, kcond])
+      (congrTheorems := ← getSimpCongrTheorems)
     let (r, _) ← simpGoal g ctx (simprocs := #[← Simp.getSimprocs])
     match r with
     | none => return .closed

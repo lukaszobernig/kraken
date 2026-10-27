@@ -38,3 +38,10 @@ open Lean.Meta
 
 initialize ksimpExt : Sym.Simp.SymSimpExtension ←
   Sym.Simp.registerSymSimpAttr `ksimp "simp theorems used by kstep"
+
+/-- Simp lemmas that present processor flags and branch conditions at the value level, e.g.
+`(StatusFlags.subs a b).c = decide (b.toNat ≤ a.toNat)`. They are used by `kstep` when it
+decides a branch condition and by `kfinish`, but not while stepping, so that the flag functions
+(`StatusFlags.subs a b`, …) stay folded in the symbolic state. -/
+initialize kcondExt : SimpExtension ←
+  registerSimpAttr `kcond "simp lemmas presenting flags and branch conditions at the value level"

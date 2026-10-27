@@ -111,7 +111,7 @@ theorem p3_correct [layout: Layout] [Layout.Valid p3] (s: MachineData):
   · rintro ⟨state, pc⟩ k hk_nz ⟨rfl, h_rbx_k, h_k_le, h_inv, _⟩
     kprologue p3 at "start" to "_end" with state
     sym => kstep; tactic =>
-    rename_i b_mul v_mul _ _ _ _
+    rename_i _ b_mul v_mul _ _ _
     apply Eventually.done
     have h_pow_eq : rdx.toNat * rdx.toNat = 2 ^ 2 ^ (s.regs.rbx.toNat - (k - 1)) := by
       rw [h_inv, show s.regs.rbx.toNat - (k - 1) = (s.regs.rbx.toNat - k) + 1 by omega]

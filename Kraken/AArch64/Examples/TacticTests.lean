@@ -145,3 +145,37 @@ theorem extr_lsr_correct [layout : Layout] [Layout.Valid extr_lsr] (s₀ : Machi
   kprologue extr_lsr with s₀
   sym => kstep; tactic =>
   kfinish extr_lsr
+
+/-! ### Flags as an abstraction boundary
+
+`subs`/`cmp` leave `status := StatusFlags.subs a b` in the state; the branch condition `b.lo` is
+decided from a value-level hypothesis (`X0.toNat < X1.toNat`) through the `@[kcond]` projection
+`(subs a b).c = decide (b.toNat ≤ a.toNat)`, and the post can talk about the flags by name. -/
+
+def cmp_branch : Program := parseAArch64("
+  subs x2, x0, x1
+  b.lo less
+  mov x3, #1
+  b done
+less:
+  mov x3, #0
+done:
+  nop
+")
+
+theorem cmp_branch_correct [layout : Layout] [Layout.Valid cmp_branch] (s₀ : MachineData) :
+    (layout cmp_branch).Spec s₀
+      (post := fun st =>
+        st.data.regs.X3.toNat = (if s₀.regs.X0.toNat < s₀.regs.X1.toNat then 0 else 1) ∧
+        st.data.status = StatusFlags.subs s₀.regs.X0.toBitVec s₀.regs.X1.toBitVec ∧
+        st.data.regs ≡ s₀.regs except [X2, X3]) := by
+  kprologue cmp_branch with s₀
+  by_cases h : X0.toNat < X1.toNat
+  · sym => kstep; tactic =>          -- `b.lo` taken: decided from `h` through `subs_c`
+    kprologue cmp_branch at "less"
+    sym => kstep; tactic =>
+    kfinish cmp_branch
+  · sym => kstep; tactic =>          -- not taken
+    kprologue cmp_branch at "done"
+    sym => kstep; tactic =>
+    kfinish cmp_branch

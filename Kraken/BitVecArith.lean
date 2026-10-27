@@ -1,5 +1,7 @@
 module
 
+import Kraken.Attribute
+
 /-!
 # 64-bit shift / mask arithmetic
 
@@ -232,6 +234,191 @@ theorem and_mask_clz_reverse_or_one (x : BitVec 64) :
   apply BitVec.eq_of_toNat_eq
   rw [umod_64_eq_self hk63, toNat_and_mask x hk63, toNat_mod_two_pow_clz_reverse_or_one x (by decide)]
   rfl
+
+
+/-! ### Flags at the value level
+
+Helpers for presenting processor flags (carry, borrow, overflow, condition codes) as decided
+value-level facts: `BitVec` addition/subtraction as `Nat` case disjunctions (without `Nat`
+subtraction, so `omega` can use them directly), `Int.bmod` facts for signed overflow, and the
+compare idiom. -/
+
+/-- `(x + y).toNat` is the exact sum, or the exact sum minus `2^w` on carry-out. -/
+theorem toNat_add_cases (x y : BitVec w) :
+    (x.toNat + y.toNat < 2 ^ w ∧ (x + y).toNat = x.toNat + y.toNat) ∨
+    (2 ^ w ≤ x.toNat + y.toNat ∧ (x + y).toNat + 2 ^ w = x.toNat + y.toNat) := by
+  have hx := x.isLt
+  have hy := y.isLt
+  by_cases h : x.toNat + y.toNat < 2 ^ w
+  · exact Or.inl ⟨h, BitVec.toNat_add_of_lt h⟩
+  · refine Or.inr ⟨by omega, ?_⟩
+    rw [BitVec.toNat_add, Nat.mod_eq_sub_mod (by omega), Nat.mod_eq_of_lt (by omega)]
+    omega
+
+/-- `(x - y).toNat` is the exact difference, or the exact difference plus `2^w` on borrow. -/
+theorem toNat_sub_cases (x y : BitVec w) :
+    (y.toNat ≤ x.toNat ∧ (x - y).toNat + y.toNat = x.toNat) ∨
+    (x.toNat < y.toNat ∧ (x - y).toNat + y.toNat = x.toNat + 2 ^ w) := by
+  have hx := x.isLt
+  have hy := y.isLt
+  by_cases h : y.toNat ≤ x.toNat
+  · exact Or.inl ⟨h, by rw [BitVec.toNat_sub_of_le (BitVec.le_def.mpr h)]; omega⟩
+  · refine Or.inr ⟨by omega, ?_⟩
+    rw [BitVec.toNat_sub_of_lt (BitVec.lt_def.mpr (by omega))]
+    omega
+
+theorem toNat_ofNat_toNat_bool (hw : 0 < w) (c : Bool) :
+    (BitVec.ofNat w c.toNat).toNat = c.toNat := by
+  rw [BitVec.toNat_ofNat]
+  cases c
+  · simp
+  · exact Nat.mod_eq_of_lt (Nat.one_lt_two_pow (by omega))
+
+/-- `x.bmod (2^w) = x` iff `x` is a representable signed `w`-bit value (`0 < w`). -/
+theorem _root_.Int.bmod_two_pow_eq_self_iff (hw : 0 < w) (x : Int) :
+    x.bmod (2 ^ w) = x ↔ -2 ^ (w - 1) ≤ x ∧ x < 2 ^ (w - 1) := by
+  obtain ⟨w, rfl⟩ : ∃ w', w = w' + 1 := ⟨w - 1, by omega⟩
+  have h2 : (2 ^ (w + 1) : Nat) = 2 * 2 ^ w := by rw [Nat.pow_succ]; omega
+  have hlo := Int.le_bmod (x := x) (m := 2 ^ (w + 1)) (Nat.two_pow_pos _)
+  have hhi := Int.bmod_lt (x := x) (m := 2 ^ (w + 1)) (Nat.two_pow_pos _)
+  simp only [Nat.add_one_sub_one]
+  constructor
+  · intro h
+    rw [h] at hlo hhi
+    push_cast [h2] at hlo hhi
+    omega
+  · rintro ⟨h1, h3⟩
+    apply Int.bmod_eq_of_le
+    · push_cast [h2]; omega
+    · push_cast [h2]; omega
+
+theorem toInt_ofNat_toNat_bool (hw : 1 < w) (c : Bool) :
+    (BitVec.ofNat w c.toNat).toInt = c.toNat := by
+  rw [BitVec.toInt_eq_toNat_bmod, BitVec.toNat_ofNat_toNat_bool (by omega)]
+  have hn : 2 ≤ 2 ^ (w - 1) := Nat.one_lt_two_pow (by omega)
+  have hi : (2 : Int) ≤ 2 ^ (w - 1) := by exact_mod_cast hn
+  rw [(Int.bmod_two_pow_eq_self_iff (by omega) _).mpr]
+  cases c <;> simp <;> omega
+
+
+/-- Signed subtraction overflow as a decided range test (not a simp lemma: the `v`/`of` flag
+projections present the flag as `ssubOverflow a b`, which simp's numeral folding leaves alone). -/
+theorem ssubOverflow_eq_decide (a b : BitVec w) :
+    BitVec.ssubOverflow a b =
+      decide (a.toInt - b.toInt < -2 ^ (w - 1) ∨ 2 ^ (w - 1) ≤ a.toInt - b.toInt) := by
+  simp only [BitVec.ssubOverflow, ge_iff_le, Bool.decide_or, Bool.or_comm]
+
+/-- Signed addition overflow as a decided range test. -/
+theorem saddOverflow_eq_decide (a b : BitVec w) :
+    BitVec.saddOverflow a b =
+      decide (a.toInt + b.toInt < -2 ^ (w - 1) ∨ 2 ^ (w - 1) ≤ a.toInt + b.toInt) := by
+  simp only [BitVec.saddOverflow, ge_iff_le, Bool.decide_or, Bool.or_comm]
+
+section
+variable (a b : BitVec w)
+
+/-! ### The compare idiom: condition codes after `cmp a, b` (`subs`/`sub` flags)
+
+A condition code unfolds to a `Bool` combination of the flag projections (`(subs a b).n != …`);
+these `@[kcond]` lemmas fold the combinations back into one decided comparison
+(`b.lo` ↦ `decide (a.toNat < b.toNat)`, `b.lt` ↦ `decide (a.toInt < b.toInt)`, …). They are
+stated on the simp normal form of the projections, so they apply after them. -/
+
+/-- `LT`: `n ≠ v` after `cmp a, b` is the signed comparison. -/
+@[simp, kcond] theorem cmp_lt :
+    ((a - b).msb != BitVec.ssubOverflow a b) = decide (a.toInt < b.toInt) := by
+  rw [ssubOverflow_eq_decide]
+  rcases w with _ | w
+  · simp [BitVec.of_length_zero]
+  · rw [Bool.eq_iff_iff]
+    have h1 := BitVec.toInt_sub_toInt_lt_twoPow_iff (x := a) (y := b)
+    have h2 := BitVec.twoPow_le_toInt_sub_toInt_iff (x := a) (y := b)
+    have hself := Int.bmod_two_pow_eq_self_iff (w := w + 1) (by omega) (a.toInt - b.toInt)
+    simp only [Nat.add_one_sub_one] at h1 h2 hself ⊢
+    simp only [BitVec.msb_eq_toInt, BitVec.toInt_sub, bne_iff_ne, ne_eq, decide_eq_true_eq,
+      decide_eq_decide]
+    omega
+
+/-- `GE`: `n = v` after `cmp a, b`. -/
+@[simp, kcond] theorem cmp_ge :
+    ((a - b).msb == BitVec.ssubOverflow a b) = decide (b.toInt ≤ a.toInt) := by
+  rw [ssubOverflow_eq_decide]
+  rcases w with _ | w
+  · simp [BitVec.of_length_zero]
+  · rw [Bool.eq_iff_iff]
+    have h1 := BitVec.toInt_sub_toInt_lt_twoPow_iff (x := a) (y := b)
+    have h2 := BitVec.twoPow_le_toInt_sub_toInt_iff (x := a) (y := b)
+    have hself := Int.bmod_two_pow_eq_self_iff (w := w + 1) (by omega) (a.toInt - b.toInt)
+    simp only [Nat.add_one_sub_one] at h1 h2 hself ⊢
+    simp only [BitVec.msb_eq_toInt, BitVec.toInt_sub, beq_iff_eq, decide_eq_true_eq,
+      decide_eq_decide]
+    omega
+
+/-- `GT`: `¬z ∧ n = v` after `cmp a, b` (stated on the simp normal form of the projections). -/
+@[simp, kcond] theorem cmp_gt :
+    (!decide (a = b) && decide (b.toInt ≤ a.toInt)) = decide (b.toInt < a.toInt) := by
+  rw [Bool.eq_iff_iff]
+  simp only [Bool.and_eq_true, Bool.not_eq_true', decide_eq_false_iff_not, decide_eq_true_eq]
+  constructor
+  · rintro ⟨hne, hle⟩
+    rcases Int.lt_or_eq_of_le hle with h | h
+    · exact h
+    · exact absurd (BitVec.toInt_inj.mp h.symm) hne
+  · intro h
+    exact ⟨fun heq => by subst heq; omega, Int.le_of_lt h⟩
+
+/-- `LE`: `z ∨ n ≠ v` after `cmp a, b`. -/
+@[simp, kcond] theorem cmp_le :
+    (decide (a = b) || decide (a.toInt < b.toInt)) = decide (a.toInt ≤ b.toInt) := by
+  rw [Bool.eq_iff_iff]
+  simp only [Bool.or_eq_true, decide_eq_true_eq]
+  constructor
+  · rintro (h | h)
+    · subst h; omega
+    · exact Int.le_of_lt h
+  · intro h
+    rcases Int.lt_or_eq_of_le h with h | h
+    · exact Or.inr h
+    · exact Or.inl (BitVec.toInt_inj.mp h)
+
+/-- `HI`: `c ∧ ¬z` after `cmp a, b`. -/
+@[simp, kcond] theorem cmp_hi :
+    (decide (b.toNat ≤ a.toNat) && !decide (a = b)) = decide (b.toNat < a.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [Bool.and_eq_true, Bool.not_eq_true', decide_eq_false_iff_not, decide_eq_true_eq,
+    ← BitVec.toNat_inj]
+  omega
+
+/-- `LS`: `¬c ∨ z` after `cmp a, b`. -/
+@[simp, kcond] theorem cmp_ls :
+    (!decide (b.toNat ≤ a.toNat) || decide (a = b)) = decide (a.toNat ≤ b.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [Bool.or_eq_true, Bool.not_eq_true', decide_eq_false_iff_not, decide_eq_true_eq,
+    ← BitVec.toNat_inj]
+  omega
+
+
+/-- `BE`/`LS` with the borrow flag (x86 `cf` after `cmp a, b` is `decide (a.toNat < b.toNat)`). -/
+@[simp, kcond] theorem cmp_be :
+    (decide (a.toNat < b.toNat) || decide (a = b)) = decide (a.toNat ≤ b.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [Bool.or_eq_true, decide_eq_true_eq, ← BitVec.toNat_inj]
+  omega
+
+/-- `A`/`HI` with the borrow flag. -/
+@[simp, kcond] theorem cmp_a :
+    (!decide (a.toNat < b.toNat) && !decide (a = b)) = decide (b.toNat < a.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [Bool.and_eq_true, Bool.not_eq_true', decide_eq_false_iff_not, decide_eq_true_eq,
+    ← BitVec.toNat_inj]
+  omega
+
+/-- `LE` with the disjuncts in the x86 order (`(sf != of) || zf`). -/
+@[simp, kcond] theorem cmp_le' :
+    (decide (a.toInt < b.toInt) || decide (a = b)) = decide (a.toInt ≤ b.toInt) := by
+  rw [Bool.or_comm]; exact cmp_le a b
+
+end
 
 end BitVec
 

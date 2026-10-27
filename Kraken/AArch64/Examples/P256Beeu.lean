@@ -1058,9 +1058,6 @@ theorem beeu_epilogue_err_correct [layout : Layout] [Layout.Valid beeu_mod_inver
   subst h_x29
   sym => kstep; tactic =>
   kfinish beeu_mod_inverse_vartime [BitVec.ofInt_ofBytes_toBytes_64, Reg64s.CalleeSavedEq]
-  apply UInt64.eq_of_toBitVec_eq
-  change (r₀.SP.toBitVec + 18446744073709551504#64 + 0#64) + 112#64 = r₀.SP.toBitVec
-  grind
 
 theorem beeu_reduction_and_store_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) (sp' out_p : BitVec 64) (o0 o1 o2 o3 : UInt64) (R : DataMem → Prop) :
@@ -1094,15 +1091,11 @@ theorem beeu_reduction_and_store_correct [layout : Layout] [Layout.Valid beeu_mo
   have h_carry4 := sub256_carry_of_lt X8 X9 X10 X11 X0 X1 X2 X30 h_lt
   have h_le : val256 X0 X1 X2 X30 ≥ val256 X8 X9 X10 X11 := Int.le_of_lt h_lt
   have h_sub := sub256_val_of_ge X0 X1 X2 X30 X8 X9 X10 X11 h_le
-  have h_zero_sbc :
-      (((0#64 - 0#64 - BitVec.ofNat 64 (!false).toNat).toNat : Int) ==
-        ((0#64).toNat : Int) - ((0#64).toNat : Int) - 1) = false := by
-    decide
+  have h_zero_sbc : (StatusFlags.sbcs 0#64 0#64 false).c = false := by decide
   sym => kstep; tactic =>
   apply Eventually.done
   dsimp +zetaDelta only [sub0Carry, sbcCarry, sub0Word, sbcWord] at *
-  simp only [UInt64.toNat_toBitVec,
-    h_carry4, h_zero_sbc, Bool.false_eq_true, ↓reduceIte] at *
+  simp only [h_carry4, h_zero_sbc] at *
   refine ⟨by kaddr beeu_mod_inverse_vartime, rfl, trivial, trivial, _, _, _, _, h_sub, by ecancel⟩
 
 theorem beeu_finish_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
@@ -1128,9 +1121,6 @@ theorem beeu_finish_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_var
   subst h_x29
   sym => kstep; tactic =>
   kfinish beeu_mod_inverse_vartime [BitVec.ofInt_ofBytes_toBytes_64, Reg64s.CalleeSavedEq]
-  apply UInt64.eq_of_toBitVec_eq
-  change (r₀.SP.toBitVec + 18446744073709551504#64 + 0#64) + 112#64 = r₀.SP.toBitVec
-  grind
 
 theorem beeu_loop_end_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
     (s : MachineData) :
@@ -1153,7 +1143,6 @@ theorem beeu_loop_end_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
     have ⟨h21, h22, h23, h24⟩ := val256_eq_one_limbs X21 X22 X23 X24 hA
     sym => kstep; tactic =>
     kfinish beeu_mod_inverse_vartime
-    rw [h21, h22, h23, h24]; decide
   · simp only [hA, ↓reduceIte]
     dsimp only [Reg64s.beeuA] at hA
     kprologue beeu_mod_inverse_vartime at ".Lbeeu_loop_end" to ".Lbeeu_reduction_loop" with s
@@ -1658,7 +1647,6 @@ theorem beeu_shift1_0_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
       rw [← val320_emod_two X3 X4 X5 X6 X7]; exact h_x_even
     sym => kstep; tactic =>
     kfinish beeu_mod_inverse_vartime [extr_sem_eq]
-    rw [UInt64.toNat_ofBitVec, h_x13_bv]; rfl
   · simp only [h1, ↓reduceIte]
     have h_gt1 : 1 < s.regs.X13.toNat := by omega
     kprologue beeu_mod_inverse_vartime at ".Lshift1_0" to ".Lbeeu_shift_A_Y" with s
@@ -1841,7 +1829,6 @@ theorem beeu_shift1_1_correct [layout : Layout] [Layout.Valid beeu_mod_inverse_v
       rw [← val320_emod_two X8 X9 X10 X11 X12]; exact h_y_even
     sym => kstep; tactic =>
     kfinish beeu_mod_inverse_vartime [extr_sem_eq]
-    rw [UInt64.toNat_ofBitVec, h_x13_bv]; rfl
   · simp only [h1, ↓reduceIte]
     have h_gt1 : 1 < s.regs.X13.toNat := by omega
     kprologue beeu_mod_inverse_vartime at ".Lshift1_1" to ".Lbeeu_update_B_X_or_A_Y" with s
