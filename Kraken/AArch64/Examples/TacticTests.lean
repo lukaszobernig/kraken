@@ -43,11 +43,11 @@ example [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s : MachineDa
         st.data.regs.beeuA = s.regs.beeuA) := by
   intro _
   kcall loop_exit_frame s hB with st1 ⟨h1_fr, h1_mem⟩
-  kframe_eqs h1_fr
+  kframe_eqs h1_fr [Reg64s.beeuA]   -- field equations `h1_fr_X21 …` and `h1_fr_beeuA`
   apply Eventually.done
   refine ⟨rfl, ?_, ?_⟩
   · kframe
-  · simp only [Reg64s.beeuA, h1_fr_X21, h1_fr_X22, h1_fr_X23, h1_fr_X24]
+  · exact h1_fr_beeuA
 
 
 /-! ### `kstep` normal form of instruction residues
