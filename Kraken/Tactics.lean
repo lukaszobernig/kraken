@@ -7,6 +7,7 @@ Core tactics and theorems for stepping through Kraken assembly proofs.
 -/
 
 public import Kraken.Attribute
+public import Kraken.BitVecArith
 public import Kraken.Frame
 public import Kraken.Layout
 public import Kraken.OmniSemantics
