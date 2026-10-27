@@ -93,8 +93,9 @@ open Lean Meta Elab Term
 namespace Kraken.RegFile
 
 /-- `r' ≡ r except [a, b, …]`: `r'` and `r` agree on all registers but `a, b, …`
-(see `Kraken.RegFile.EqExcept`). The names are constructors of the register-name type of
-`r'`/`r` (possibly nested one level, e.g. `X13` for `XRegOrSp.reg XReg.X13`). -/
+(see `Kraken.RegFile.EqExcept`). Each entry may be a constructor of the register-name type of
+`r'`/`r` (possibly nested one level, e.g. `X13` for `XRegOrSp.reg XReg.X13`) or a derived view
+`f : R → α` (e.g. `beeuX`, which expands to the registers `[X3, X4, X5, X6, X7]` it reads). -/
 syntax:50 term:51 " ≡ " term:51 " except " "[" ident,* "]" : term
 
 /-- `r' ≡ r on [a, b, …]`: `r'` and `r` agree on the listed registers or derived views
@@ -103,13 +104,13 @@ type `R` first (`R.<name>`), or elaborated directly as a function `R → α`. -/
 syntax:50 term:51 " ≡ " term:51 " on " "[" ident,* "]" : term
 
 /-- Resolve a register name against the constructors of `nameTy` (one level of nesting allowed). -/
-private def resolveRegName (nameTy : Lean.Name) (id : Ident) : MetaM Expr := do
+private def resolveRegName? (nameTy : Lean.Name) (id : Ident) : MetaM (Option Expr) := do
   let s := id.getId.toString
   let info ← getConstInfoInduct nameTy
   for c in info.ctors do
     let cinfo ← getConstInfoCtor c
     if c.getString! == s && cinfo.numFields == 0 then
-      return mkConst c
+      return some (mkConst c)
   for c in info.ctors do
     let cinfo ← getConstInfoCtor c
     if cinfo.numFields == 1 then
@@ -121,8 +122,8 @@ private def resolveRegName (nameTy : Lean.Name) (id : Ident) : MetaM Expr := do
             for c' in innerInd.ctors do
               let c'info ← getConstInfoCtor c'
               if c'.getString! == s && c'info.numFields == 0 then
-                return mkApp (mkConst c) (mkConst c')
-  throwErrorAt id "unknown register `{s}` for register names of type `{nameTy}`"
+                return some (mkApp (mkConst c) (mkConst c'))
+  return none
 
 /-- Resolve a register projection or derived view `id` on register-file type `R` into `View.of f`. -/
 private def resolveView (R : Expr) (id : Ident) : TermElabM Expr := do
@@ -143,6 +144,40 @@ private def resolveView (R : Expr) (id : Ident) : TermElabM Expr := do
       s.restore
   throwErrorAt id "unknown register or view `{id.getId}` on `{R}`"
 
+/-- Unroll a literal list expression into its elements. -/
+private partial def literalListElems (l : Expr) : MetaM (Array Expr) := do
+  let mut acc := #[]
+  let mut cur ← whnfD l
+  while cur.isAppOfArity ``List.cons 3 do
+    acc := acc.push (cur.getArg! 1)
+    cur ← whnfD (cur.getArg! 2)
+  return acc
+
+/-- Resolve an entry of `≡ … except […]` / `(writes := […])` to one or more register names:
+either a single register constructor of `nameTy`, or the registers read by a view `f : R → α`. -/
+private def resolveRegOrViewNames (R inst : Expr) (nameTy : Lean.Name) (id : Ident) :
+    TermElabM (Array Expr) := do
+  if let some reg ← (resolveRegName? nameTy id : MetaM (Option Expr)) then
+    return #[reg]
+  let v ← resolveView R id
+  let f := v.getArg! 2
+  let names ← literalListElems (mkApp2 (mkConst ``Kraken.RegFile.names) R inst)
+  withLocalDeclD `r R fun rVar => do
+    let body ← Meta.transform (mkApp f rVar) (pre := fun e => do
+      let e := e.headBeta
+      if e.getAppArgs.contains rVar then
+        if let some e' ← unfoldDefinition? e then
+          return .visit e'.headBeta
+      return .continue)
+    let mut regs := #[]
+    for n in names do
+      let projRaw ← whnfD (mkApp4 (mkConst ``Kraken.RegFile.get) R inst rVar n)
+      if (body.find? (· == projRaw)).isSome then
+        regs := regs.push n
+    if regs.isEmpty then
+      throwErrorAt id "view `{id.getId}` does not read any registers of `{R}`"
+    return regs
+
 elab_rules : term
   | `($r':term ≡ $r:term except [$ns:ident,*]) => do
     let r' ← elabTerm r' none
@@ -152,7 +187,12 @@ elab_rules : term
     let nameTyE ← whnf (mkApp2 (mkConst ``Kraken.RegFile.Name) R inst)
     let .const nameTy _ := nameTyE.getAppFn
       | throwError "`≡ … except` : register names of `{R}` are not an inductive type ({nameTyE})"
-    let elems ← ns.getElems.mapM fun id => (resolveRegName nameTy id : MetaM Expr)
+    let elemGroups ← ns.getElems.mapM fun id => resolveRegOrViewNames R inst nameTy id
+    let mut elems : Array Expr := #[]
+    for grp in elemGroups do
+      for reg in grp do
+        unless elems.contains reg do
+          elems := elems.push reg
     let W ← mkListLit nameTyE elems.toList
     return mkAppN (mkConst ``Kraken.RegFile.EqExcept) #[R, inst, W, r', r]
   | `($r':term ≡ $r:term on [$ns:ident,*]) => do
