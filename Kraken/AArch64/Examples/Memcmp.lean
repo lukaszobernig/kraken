@@ -124,10 +124,9 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
             st.data.regs.SP = s₀.regs.SP ∧
             st.data.regs.CalleeSavedEq s₀.regs ∧
             (st.data.dmem =⋆ a @ p_a ⋆ b @ p_b ⋆ R)) := by
-  kpack_secrets
-  apply tailrec_loop_cps_traced (layout memcmp)
-    (Inv := fun v _ => 0 < v)
-    (P := fun v (a_ptr, b_ptr) s₀ _ (a_bs, b_bs, acc, frame) st =>
+  kloop
+    (pubinv := fun v _ => 0 < v)
+    (inv := fun v (a_ptr, b_ptr) s₀ _ (a_bs, b_bs, acc, frame) st =>
       st.pc = (layout memcmp).label "loop" ∧
       st.data.regs.X2.toNat = v ∧
       st.data.regs.X0.toBitVec = a_ptr ∧
@@ -139,7 +138,7 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
       a_bs.length = v ∧
       b_bs.length = v ∧
       (st.data.dmem =⋆ a_bs @ a_ptr ⋆ b_bs @ b_ptr ⋆ frame))
-    (Q := fun _ (a_ptr, b_ptr) s₀ _ (a_bs, b_bs, acc, frame) st =>
+    (exit := fun _ (a_ptr, b_ptr) s₀ _ (a_bs, b_bs, acc, frame) st =>
       st.pc = (layout memcmp).label "done" ∧
       st.data.regs.X3.toBitVec = acc ||| diffAcc a_bs b_bs ∧
       st.data.regs.X30 = s₀.regs.X30 ∧
@@ -147,12 +146,13 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
       st.data.regs.CalleeSavedEq s₀.regs ∧
       a_bs.length = b_bs.length ∧
       (st.data.dmem =⋆ a_bs @ a_ptr ⋆ b_bs @ b_ptr ⋆ frame))
-    (v0 := n)
-    (pub0 := (p_a, p_b))
-    (g0 := fun _ (a, b, R) => (a, b, 0#64, R))
+    (measure := n)
+    (pub := (p_a, p_b))
+    (ghost := fun _ (a, b, R) => (a, b, 0#64, R))
+    with v ⟨a_ptr, b_ptr⟩ hv
   · by_cases hn : n = 0
     · subst hn
-      left
+      kloop_exit
       kintro s ⟨a, b, R⟩ ⟨h_x0, h_x1, h_x2, h_a_len, h_b_len, h_mem⟩
       kprologue memcmp to "loop" with s
       kstep
@@ -160,7 +160,7 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
       obtain rfl := List.eq_nil_of_length_eq_zero h_a_len
       obtain rfl := List.eq_nil_of_length_eq_zero h_b_len
       exact ⟨by kaddr memcmp, rfl, rfl, rfl, by grind, rfl, by ecancel⟩
-    · right
+    · kloop_next
       refine ⟨by omega, ?_⟩
       kintro s ⟨a, b, R⟩ ⟨h_x0, h_x1, h_x2, h_a_len, h_b_len, h_mem⟩
       kprologue memcmp to "loop" with s
@@ -168,10 +168,9 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
       kdone
       exact ⟨by kaddr memcmp, by grind, h_x0, h_x1, rfl, rfl, rfl,
         by grind, h_a_len, h_b_len, by ecancel⟩
-  · rintro v ⟨a_ptr, b_ptr⟩ hv
-    by_cases hv1 : v = 1
+  · by_cases hv1 : v = 1
     · subst hv1
-      left
+      kloop_exit
       kintro s₀ ⟨a, b, R⟩ ⟨a_bs, b_bs, acc, frame⟩ ⟨s, pc⟩
         ⟨rfl, h_x2_v, h_x0_v, h_x1_v, h_x3_v, h_x30, h_sp, h_cs, h_a_v, h_b_v, h_mem_v⟩
       kprologue memcmp at "loop" to "done" with s
@@ -180,8 +179,7 @@ theorem memcmp_ct_correct [layout : Layout] [Layout.Valid memcmp]
       refine ⟨by kaddr memcmp, ?_, h_x30, h_sp, h_cs, by omega, by ecancel⟩
       have := diffAcc_one a_bs b_bs h_a_v h_b_v acc
       grind
-    · right
-      refine ⟨v - 1, (a_ptr + 1#64, b_ptr + 1#64), by omega, by omega, ?_⟩
+    · kloop_next (v - 1) (a_ptr + 1#64, b_ptr + 1#64)
       kintro s₀ ⟨a, b, R⟩ ⟨a_bs, b_bs, acc, frame⟩ ⟨s, pc⟩
         ⟨rfl, h_x2_v, h_x0_v, h_x1_v, h_x3_v, h_x30, h_sp, h_cs, h_a_v, h_b_v, h_mem_v⟩
       kprologue memcmp at "loop" to "done" with s

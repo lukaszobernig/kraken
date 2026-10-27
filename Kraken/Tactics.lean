@@ -1022,9 +1022,10 @@ elab_rules : tactic
       throwError "kcall: the goal must be an `Eventually` (introduce the specification first, e.g. with `kintro`):{indentExpr target}"
     let traced := (target.getArg! 1).consumeMData.getAppFn'.constName? == some ``step1Traced
     let prog? := findLayoutProg? target
-    -- Elaborate the call and instantiate its leading hypotheses with metavariables.
-    let callExpr ← Tactic.elabTerm e none
-    Term.synthesizeSyntheticMVarsNoPostponing
+    -- Elaborate the call and instantiate its leading hypotheses with metavariables. Tactic blocks
+    -- inside `e` (e.g. `⟨by omega, by grind⟩` precondition proofs) are postponed until the call's
+    -- initial state has been unified with the current state, so that they see concrete registers.
+    let callExpr ← Tactic.elabTerm e none (mayPostpone := true)
     let callType ← instantiateMVars (← inferType callExpr)
     let (args, _, _) ← forallMetaTelescopeReducing callType
     let callProof := mkAppN callExpr args
@@ -1040,6 +1041,7 @@ elab_rules : tactic
     -- `apply` returns the two new goals first, followed by any other unassigned metavariables
     -- occurring in the term (the `pre` holes, handled below, and holes already present in the goal).
     let newGoals ← goal.apply partialApp
+    Term.synthesizeSyntheticMVarsNoPostponing
     let hpcGoal :: kGoal :: _ := newGoals
       | throwError "kcall: unexpected goals after applying {thm}"
     -- Program-counter side condition.
