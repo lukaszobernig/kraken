@@ -123,8 +123,7 @@ theorem p3_correct [layout: Layout] [Layout.Valid p3] (s: MachineData):
       apply Nat.pow_le_pow_right (by decide)
       omega
     have hv_mul : v_mul = ↑(rdx.toNat * rdx.toNat) := by
-      dsimp [v_mul, b_mul, BitVec.unsigned]
-      grind
+      dsimp [v_mul, b_mul, BitVec.unsigned] <;> grind
     dsimp only
     refine ⟨by kaddr p3, by grind, by omega, ?_, ?_⟩
     · rw [hv_mul, ← h_pow_eq]
