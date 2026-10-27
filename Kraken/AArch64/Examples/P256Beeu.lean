@@ -304,17 +304,17 @@ def Words256At (w0 w1 w2 w3 : UInt64) (p : BitVec 64) : DataMem → Prop :=
 @[simp, ksimp, grind =]
 theorem sp_sub_112_mod_16 (sp : BitVec 64) :
     (sp + 18446744073709551504#64) % 16#64 = sp % 16#64 := by
-  bv_decide
+  grind
 
 @[simp, ksimp, grind =]
 theorem sp_sub_112_add_zero (sp : BitVec 64) :
     sp + 18446744073709551504#64 + 0#64 = sp + 18446744073709551504#64 := by
-  bv_decide
+  grind
 
 @[simp, ksimp, grind =]
 theorem sp_add_112_cancel (sp : BitVec 64) :
     sp + 18446744073709551504#64 + 112#64 = sp := by
-  bv_decide
+  grind
 
 theorem Int.ofBytes_32_split (bs : List UInt8) (h : bs.length = 32) :
     Int.ofBytes bs =
@@ -451,7 +451,7 @@ theorem val256_eq_one_limbs (w0 w1 w2 w3 : UInt64) (h : val256 w0 w1 w2 w3 = 1) 
 theorem or4_sub_one_eq_zero_iff (x0 x1 x2 x3 : BitVec 64) :
     ((x0 - 1#64 ||| x1 ||| x2 ||| x3) = 0#64) ↔
       (x0 = 1#64 ∧ x1 = 0#64 ∧ x2 = 0#64 ∧ x3 = 0#64) := by
-  bv_decide
+  grind
 
 theorem val256_ne_one_or_ne_zero (w0 w1 w2 w3 : UInt64) (h : val256 w0 w1 w2 w3 ≠ 1) :
     ((w0.toBitVec - 1#64 ||| w1.toBitVec ||| w2.toBitVec ||| w3.toBitVec) == 0#64) = false := by
@@ -475,7 +475,7 @@ theorem val320_lt_256_pow_32 (w0 w1 w2 w3 w4 : UInt64) (h : val320 w0 w1 w2 w3 w
 theorem or4_eq_zero_iff (x0 x1 x2 x3 : BitVec 64) :
     ((x0 ||| x1 ||| x2 ||| x3) = 0#64) ↔
       (x0 = 0#64 ∧ x1 = 0#64 ∧ x2 = 0#64 ∧ x3 = 0#64) := by
-  bv_decide
+  grind
 
 theorem val256_pos_or_ne_zero (w0 w1 w2 w3 : UInt64) (h : 0 < val256 w0 w1 w2 w3) :
     ((w0.toBitVec ||| w1.toBitVec ||| w2.toBitVec ||| w3.toBitVec) == 0#64) = false := by
@@ -535,17 +535,15 @@ theorem shift1_val320 (x0 x1 x2 x3 x4 : UInt64) :
 
 theorem getLsbD_zero_eq_false_mod2 (x : UInt64) (h : x.toBitVec.getLsbD 0 = false) :
     x.toNat % 2 = 0 := by
-  have h_bv : (x.toBitVec &&& 1#64) = 0#64 := by revert h; bv_decide
-  have h_and := UInt64.toNat_ofBitVec_and_one x
-  rw [UInt64.toNat_ofBitVec, h_bv] at h_and
-  exact h_and.symm
+  simp only [BitVec.getLsbD, Nat.testBit_zero, decide_eq_false_iff_not] at h
+  rw [← UInt64.toNat_toBitVec]
+  omega
 
 theorem getLsbD_zero_eq_true_mod2 (x : UInt64) (h : x.toBitVec.getLsbD 0 = true) :
     x.toNat % 2 = 1 := by
-  have h_bv : (x.toBitVec &&& 1#64) = 1#64 := by revert h; bv_decide
-  have h_and := UInt64.toNat_ofBitVec_and_one x
-  rw [UInt64.toNat_ofBitVec, h_bv] at h_and
-  exact h_and.symm
+  simp only [BitVec.getLsbD, Nat.testBit_zero, decide_eq_true_eq] at h
+  rw [← UInt64.toNat_toBitVec]
+  exact h
 
 theorem val320_emod_two (x0 x1 x2 x3 x4 : UInt64) :
     val320 x0 x1 x2 x3 x4 % 2 = (x0.toNat % 2 : Int) := by
@@ -575,19 +573,82 @@ theorem clz_reverse_or_one_mask_zero (b0 : BitVec 64) :
     b0 &&& ((1#64 <<< (((b0.reverse ||| 1#64).clz) % 64#64)) - 1#64) = 0#64 := by
   bv_decide
 
+/-! The two 128-bit funnel-shift identities are proved by `Nat` arithmetic with the generic
+shift/mask lemmas of `Kraken.BitVecArith` (a 128-bit `bv_decide` costs ~5 s each; see the policy
+note there). -/
+
 theorem shift256_limb_bv128 (lo hi k : BitVec 64) (hk1 : 1#64 ≤ k) (hk63 : k ≤ 63#64) :
     ((1#64 <<< (k % 64#64)).setWidth 128) *
       (((lo >>> (k % 64#64)) ||| (hi <<< ((0#64 - k) % 64#64))).setWidth 128) +
       (lo &&& ((1#64 <<< (k % 64#64)) - 1#64)).setWidth 128 =
       lo.setWidth 128 +
       0x10000000000000000#128 * ((hi &&& ((1#64 <<< (k % 64#64)) - 1#64)).setWidth 128) := by
-  bv_decide
+  apply BitVec.eq_of_toNat_eq
+  have hk := BitVec.toNat_le_63 hk63
+  have hk1' := BitVec.one_le_toNat hk1
+  simp only [BitVec.toNat_add, BitVec.toNat_mul, BitVec.toNat_setWidth, BitVec.toNat_ofNat,
+    BitVec.toNat_funnel lo hi hk1 hk63]
+  simp only [BitVec.umod_64_eq_self hk63, BitVec.toNat_one_shiftLeft hk63,
+    BitVec.toNat_and_mask _ hk63]
+  have hPpos : 0 < 2 ^ k.toNat := Nat.two_pow_pos _
+  have hPlt := BitVec.two_pow_le_two_pow_63 hk63
+  have hpq := BitVec.two_pow_mul_two_pow_sub hk63
+  have h64 : 18446744073709551616 % 2 ^ 128 = 2 ^ 64 := by decide
+  rw [h64]
+  have hlo := lo.isLt
+  have hhi := hi.isLt
+  have hQle : 2 ^ (64 - k.toNat) ≤ 2 ^ 63 := Nat.pow_le_pow_right (by decide) (by omega)
+  have hdm := Nat.div_add_mod lo.toNat (2 ^ k.toNat)
+  have hC : lo.toNat % 2 ^ k.toNat < 2 ^ k.toNat := Nat.mod_lt _ (Nat.two_pow_pos _)
+  have hB : hi.toNat % 2 ^ k.toNat < 2 ^ k.toNat := Nat.mod_lt _ (Nat.two_pow_pos _)
+  have hA : lo.toNat / 2 ^ k.toNat < 2 ^ (64 - k.toNat) := by
+    rw [Nat.div_lt_iff_lt_mul (Nat.two_pow_pos _), Nat.mul_comm, hpq]; exact hlo
+  generalize 2 ^ k.toNat = P at *
+  generalize 2 ^ (64 - k.toNat) = Q at *
+  generalize lo.toNat / P = A at *
+  generalize lo.toNat % P = C at *
+  generalize hi.toNat % P = B at *
+  generalize lo.toNat = L at *
+  have hsum : A + B * Q < 2 ^ 64 := by
+    have : (B + 1) * Q ≤ P * Q := Nat.mul_le_mul_right _ hB
+    rw [hpq, Nat.add_mul, Nat.one_mul] at this
+    omega
+  have hkey : P * (A + B * Q) + C = L + 2 ^ 64 * B := by
+    rw [← hpq]; grind
+  have hbig : L + 2 ^ 64 * B < 2 ^ 128 := by
+    have : 2 ^ 64 * B ≤ 2 ^ 64 * 2 ^ 63 := Nat.mul_le_mul_left _ (by omega)
+    omega
+  rw [Nat.mod_eq_of_lt (a := P) (by omega), Nat.mod_eq_of_lt (a := A + B * Q) (by omega),
+    Nat.mod_eq_of_lt (a := P * (A + B * Q)) (by omega), Nat.mod_eq_of_lt (a := C) (by omega),
+    Nat.mod_eq_of_lt (a := L) (by omega), Nat.mod_eq_of_lt (a := B) (by omega),
+    Nat.mod_eq_of_lt (a := 2 ^ 64 * B) (by omega), Nat.mod_eq_of_lt (by omega),
+    Nat.mod_eq_of_lt (by omega)]
+  exact hkey
 
 theorem shift256_top_bv128 (hi k : BitVec 64) (hk63 : k ≤ 63#64) :
     ((1#64 <<< (k % 64#64)).setWidth 128) * ((hi >>> (k % 64#64)).setWidth 128) +
       (hi &&& ((1#64 <<< (k % 64#64)) - 1#64)).setWidth 128 =
       hi.setWidth 128 := by
-  bv_decide
+  apply BitVec.eq_of_toNat_eq
+  have hk := BitVec.toNat_le_63 hk63
+  simp only [BitVec.toNat_add, BitVec.toNat_mul, BitVec.toNat_setWidth,
+    BitVec.umod_64_eq_self hk63, BitVec.toNat_one_shiftLeft hk63, BitVec.toNat_and_mask _ hk63,
+    BitVec.toNat_ushiftRight_bv]
+  have hPpos : 0 < 2 ^ k.toNat := Nat.two_pow_pos _
+  have hPlt := BitVec.two_pow_le_two_pow_63 hk63
+  have hhi := hi.isLt
+  have hdm := Nat.div_add_mod hi.toNat (2 ^ k.toNat)
+  have hC : hi.toNat % 2 ^ k.toNat < 2 ^ k.toNat := Nat.mod_lt _ (Nat.two_pow_pos _)
+  have hdiv : hi.toNat / 2 ^ k.toNat ≤ hi.toNat := Nat.div_le_self _ _
+  generalize 2 ^ k.toNat = P at *
+  generalize hi.toNat / P = A at *
+  generalize hi.toNat % P = C at *
+  generalize hi.toNat = H at *
+  have hPA : P * A ≤ H := by omega
+  rw [Nat.mod_eq_of_lt (a := P) (by omega), Nat.mod_eq_of_lt (a := A) (by omega),
+    Nat.mod_eq_of_lt (a := P * A) (by omega), Nat.mod_eq_of_lt (a := C) (by omega),
+    Nat.mod_eq_of_lt (a := H) (by omega), Nat.mod_eq_of_lt (by omega)]
+  omega
 
 theorem ctzClamped_eq_zero_imp_odd (b0 : BitVec 64) (h : (b0.reverse ||| 1#64).clz = 0#64) :
     b0.getLsbD 0 = true := by
@@ -1047,7 +1108,7 @@ theorem beeu_reduction_and_store_correct [layout : Layout] [Layout.Valid beeu_mo
   sym => kstep; tactic =>
   apply Eventually.done
   dsimp +zetaDelta only [sub0Carry, sbcCarry, sub0Word, sbcWord] at *
-  simp only [BitVec.shiftLeft_zero, UInt64.toNat_toBitVec,
+  simp only [UInt64.toNat_toBitVec,
     h_carry4, h_zero_sbc, Bool.false_eq_true, ↓reduceIte] at *
   refine ⟨by kaddr beeu_mod_inverse_vartime, rfl, trivial, trivial, _, _, _, _, h_sub, by ecancel⟩
 

@@ -51,8 +51,8 @@ theorem arith_shift_correct [layout : Layout] [Layout.Valid arith_shift] (d : Ma
   kprologue arith_shift with d
   sym => kstep; tactic =>
   apply Eventually.done
-  simp (config := { zetaDelta := true }) only [BitVec.shiftLeft_zero]
-  bv_decide
+  simp (config := { zetaDelta := true }) only
+  grind
 
 -- Example 4: Stepping through control flow (branch not taken)
 def controlflow : Program := parseAArch64("
