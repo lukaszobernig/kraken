@@ -1803,13 +1803,18 @@ partial def evalSymKStep : Grind.GrindTactic :=
     if v.hasLooseBVars then return goal
     -- only register-sized values (not memories or byte lists)
     unless ← Kraken.Tactic.isWordType ty do return goal
+    -- inline let-bound atoms (`lsb := 1`, `val1 := X4.toBitVec`) so that ground conditions and
+    -- shift amounts of the residue are closed terms the normal form can decide and fold
+    let v₀ ← Kraken.Tactic.inlineAtomicLets v
     -- stuck `match`es (e.g. the operand width inside instance arguments) block lemma matching
-    let v₁ ← Kraken.Tactic.reduceStuckMatchers v
+    let v₁ ← Kraken.Tactic.reduceStuckMatchers v₀
     let (v', h?) ← match ← Kraken.Tactic.simpNormalForm v₁ with
       | none => pure (v₁, none)
       | some (v', h) => pure (v', some h)
     if v' == v then return goal
     trace[Kraken.kstep.phase] "simpLetValue {n} := {v} ↦ {v'}"
+    -- `v`, `v₀` and `v₁` are definitionally equal (zeta-delta, matcher reduction), so a proof of
+    -- `v₁ = v'` also proves `v = v'`
     let h ← match h? with
       | some h => pure h
       | none => mkExpectedTypeHint (← mkEqRefl v) (← mkEq v v')

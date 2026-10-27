@@ -119,3 +119,29 @@ example [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s : MachineDa
   · kframe
   · simp only [Reg64s.beeuA, h1_fr_X21, h1_fr_X22, h1_fr_X23, h1_fr_X24]
 
+
+/-! ### `kstep` normal form of instruction residues
+
+`extr`/`ubfm`(`lsr #k`) leave `if`s over ground conditions, unfolded shift amounts (`64 - 1`) and
+`setWidth`/`extractLsb'` wrappers in their results. `kstep` now decides the conditions, folds the
+arithmetic and applies the `lsr #k` rule when the value is introduced, so the register values are
+`X1.toBitVec <<< 63 ||| X2.toBitVec >>> 1` and `X3.toBitVec >>> 5` and the post can be stated
+against them directly, with no bridging lemmas. -/
+
+def extr_lsr : Program := parseAArch64("
+  extr x0, x1, x2, #1
+  lsr  x4, x3, #5
+  ubfx x5, x3, #8, #16
+")
+
+theorem extr_lsr_correct [layout : Layout] [Layout.Valid extr_lsr] (s₀ : MachineData) :
+    (layout extr_lsr).Spec s₀
+      (post := fun st =>
+        st.data.regs.X0.toBitVec = s₀.regs.X1.toBitVec <<< 63 ||| s₀.regs.X2.toBitVec >>> 1 ∧
+        st.data.regs.X4.toBitVec = s₀.regs.X3.toBitVec >>> 5 ∧
+        st.data.regs.X5.toBitVec =
+          BitVec.setWidth 64 (BitVec.extractLsb' 0 16 (s₀.regs.X3.toBitVec >>> 8)) ∧
+        st.data.regs ≡ s₀.regs except [X0, X4, X5]) := by
+  kprologue extr_lsr with s₀
+  sym => kstep; tactic =>
+  kfinish extr_lsr
