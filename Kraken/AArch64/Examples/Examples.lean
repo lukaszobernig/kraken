@@ -33,8 +33,7 @@ theorem swap_correct [layout : Layout] [Layout.Valid swap] (d : MachineData) :
         st.data.regs.getRegOrZr .X1 = d.regs.getRegOrZr .X0) := by
   kprologue swap with d
   sym => kstep; tactic =>
-  apply Eventually.done
-  grind
+  kfinish swap
 
 -- Example 3: Multi-instruction arithmetic and shift pipeline
 def arith_shift : Program := parseAArch64("
@@ -49,9 +48,7 @@ theorem arith_shift_correct [layout : Layout] [Layout.Valid arith_shift] (d : Ma
         st.data.regs.getRegOrZr .X3 = 3 * (d.regs.getRegOrZr .X1 + 42)) := by
   kprologue arith_shift with d
   sym => kstep; tactic =>
-  apply Eventually.done
-  simp (config := { zetaDelta := true }) only
-  grind
+  kfinish arith_shift
 
 -- Example 4: Stepping through control flow (branch not taken)
 def controlflow : Program := parseAArch64("
@@ -66,8 +63,7 @@ theorem p4_correct [layout : Layout] [Layout.Valid controlflow] (d : MachineData
     (layout controlflow).Spec d (post := fun st => st.data.regs.X1 = 42) := by
   kprologue controlflow with d
   sym => kstep; tactic =>
-  apply Eventually.done
-  rfl
+  kfinish controlflow
 
 -- Example 5: Storing and loading registers to/from memory
 open Std
@@ -91,8 +87,7 @@ theorem move_2_regs_to_heap_correct [layout : Layout] [Layout.Valid move_2_regs_
         st.data.regs.X2 = s₀.regs.X2) := by
   kprologue move_2_regs_to_heap with s₀
   sym => kstep; tactic =>
-  apply Eventually.done
-  exact ⟨rfl, rfl, rfl⟩
+  kfinish move_2_regs_to_heap
 
 -- Example 6: Memory access with shifted register offset [x1, x2, lsl #3]
 def reg_offset_example : Program := parseAArch64("
@@ -110,5 +105,4 @@ theorem reg_offset_example_correct [layout : Layout] [Layout.Valid reg_offset_ex
       (post := fun st => st.data.regs.X3 = 42) := by
   kprologue reg_offset_example with s₀
   sym => kstep; tactic =>
-  apply Eventually.done
-  rfl
+  kfinish reg_offset_example
