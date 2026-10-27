@@ -179,3 +179,46 @@ theorem cmp_branch_correct [layout : Layout] [Layout.Valid cmp_branch] (s₀ : M
     kprologue cmp_branch at "done"
     sym => kstep; tactic =>
     kfinish cmp_branch
+
+/-! ### `block_spec`: the same statements without the boilerplate -/
+
+-- `loop_exit_frame` restated: entry label, exit label, written registers, extra post.
+block_spec loop_exit_frame' beeu_mod_inverse_vartime s₀
+  from ".Lbeeu_loop" to ".Lbeeu_loop_end"
+  (writes := [X14, X15])
+  (pre := s₀.regs.beeuB = 0)
+  (post := fun st => st.data.dmem = s₀.dmem) := by
+  intro h_B_zero
+  have ⟨h25, h26, h27, h28⟩ := val256_eq_zero_limbs
+    s₀.regs.X25 s₀.regs.X26 s₀.regs.X27 s₀.regs.X28 h_B_zero
+  kprologue beeu_mod_inverse_vartime at ".Lbeeu_loop" to ".Lbeeu_shift_A_Y" with s₀
+  sym => kstep; tactic =>
+  kfinish beeu_mod_inverse_vartime
+
+-- The generated statement is the hand-written one.
+example : @loop_exit_frame' = @loop_exit_frame := rfl
+
+-- A whole-program block (no `from`), with extra binders and no pc conjunct.
+block_spec extr_lsr_correct' extr_lsr s₀ (n : Nat) (hn : n = 5)
+  (writes := [X0, X4, X5])
+  (post := fun st =>
+    st.data.regs.X0.toBitVec = s₀.regs.X1.toBitVec <<< 63 ||| s₀.regs.X2.toBitVec >>> 1 ∧
+    st.data.regs.X4.toBitVec = s₀.regs.X3.toBitVec >>> n) := by
+  subst hn
+  kprologue extr_lsr with s₀
+  sym => kstep; tactic =>
+  kfinish extr_lsr
+
+-- A consumer composes a `block_spec` lemma with `kcall` as usual.
+example [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s : MachineData)
+    (hB : s.regs.beeuB = 0) :
+    (layout beeu_mod_inverse_vartime).Spec s
+      (pc := (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop")
+      (post := fun st =>
+        st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop_end" ∧
+        st.data.regs.X21 = s.regs.X21) := by
+  intro _
+  kcall loop_exit_frame' s hB with st1 ⟨h1_fr, h1_mem⟩
+  kframe_eqs h1_fr
+  apply Eventually.done
+  exact ⟨rfl, h1_fr_X21⟩
