@@ -1127,7 +1127,7 @@ block_spec beeu_loop_end_correct beeu_mod_inverse_vartime s
 
 block_spec beeu_reduction_step_ge_correct beeu_mod_inverse_vartime s
   from ".Lbeeu_reduction_loop" to ".Lbeeu_reduction_loop"
-  (writes := [X3, X4, X5, X6, X7, X8, X9, X10, X11, X12])
+  (writes := [beeuX, beeuY])
   (pre :=
     s.regs.X14 = 0 ∧
     s.regs.beeuY ≥ s.regs.beeuN)
@@ -1540,7 +1540,7 @@ theorem pow2_mul_emod_step (m : Nat) (x x' n z : Int)
 
 block_spec beeu_shift_loop_X_pre_correct beeu_mod_inverse_vartime s
   from ".Lbeeu_shift_loop_X" to ".Lshift1_0"
-  (writes := [X3, X4, X5, X6, X7])
+  (writes := [beeuX])
   (pre :=
     s.regs.X14 = 0 ∧
     s.regs.beeuN % 2 = 1 ∧
@@ -1579,7 +1579,7 @@ block_spec beeu_shift1_0_correct beeu_mod_inverse_vartime s
       (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_A_Y"
     else
       (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_X")
-  (writes := [X3, X4, X5, X6, X7, X13])
+  (writes := [beeuX, X13])
   (pre :=
     0 < s.regs.X13.toNat ∧
     s.regs.beeuX % 2 = 0)
@@ -1615,7 +1615,7 @@ block_spec beeu_shift_loop_X_step_correct beeu_mod_inverse_vartime s
       (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_A_Y"
     else
       (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_X")
-  (writes := [X3, X4, X5, X6, X7, X13])
+  (writes := [beeuX, X13])
   (pre :=
     0 < s.regs.X13.toNat ∧
     s.regs.X14 = 0 ∧
@@ -1641,7 +1641,7 @@ block_spec beeu_shift_loop_X_step_correct beeu_mod_inverse_vartime s
 
 block_spec beeu_shift_loop_X_correct beeu_mod_inverse_vartime s
   from ".Lbeeu_shift_loop_X" to ".Lbeeu_shift_A_Y"
-  (writes := [X3, X4, X5, X6, X7, X13])
+  (writes := [beeuX, X13])
   (pre :=
     0 < s.regs.X13.toNat ∧
     s.regs.X14 = 0 ∧
@@ -1660,7 +1660,7 @@ block_spec beeu_shift_loop_X_correct beeu_mod_inverse_vartime s
   kloop
     (inv := fun v st =>
       st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_X" ∧
-      st.data.regs ≡ s.regs except [X3, X4, X5, X6, X7, X13] ∧
+      st.data.regs ≡ s.regs except [beeuX, X13] ∧
       st.data.dmem = s.dmem ∧
       0 < v ∧ v ≤ k₀ ∧
       st.data.regs.X13.toNat = v ∧
@@ -1697,7 +1697,7 @@ block_spec beeu_shift_loop_X_correct beeu_mod_inverse_vartime s
 
 block_spec beeu_shift_loop_Y_pre_correct beeu_mod_inverse_vartime s
   from ".Lbeeu_shift_loop_Y" to ".Lshift1_1"
-  (writes := [X8, X9, X10, X11, X12])
+  (writes := [beeuY])
   (pre :=
     s.regs.X14 = 0 ∧
     s.regs.beeuN % 2 = 1 ∧
@@ -1736,7 +1736,7 @@ block_spec beeu_shift1_1_correct beeu_mod_inverse_vartime s
       (layout beeu_mod_inverse_vartime).label ".Lbeeu_update_B_X_or_A_Y"
     else
       (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_Y")
-  (writes := [X8, X9, X10, X11, X12, X13])
+  (writes := [beeuY, X13])
   (pre :=
     0 < s.regs.X13.toNat ∧
     s.regs.beeuY % 2 = 0)
@@ -1772,7 +1772,7 @@ block_spec beeu_shift_loop_Y_step_correct beeu_mod_inverse_vartime s
       (layout beeu_mod_inverse_vartime).label ".Lbeeu_update_B_X_or_A_Y"
     else
       (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_Y")
-  (writes := [X8, X9, X10, X11, X12, X13])
+  (writes := [beeuY, X13])
   (pre :=
     0 < s.regs.X13.toNat ∧
     s.regs.X14 = 0 ∧
@@ -1798,7 +1798,7 @@ block_spec beeu_shift_loop_Y_step_correct beeu_mod_inverse_vartime s
 
 block_spec beeu_shift_loop_Y_correct beeu_mod_inverse_vartime s
   from ".Lbeeu_shift_loop_Y" to ".Lbeeu_update_B_X_or_A_Y"
-  (writes := [X8, X9, X10, X11, X12, X13])
+  (writes := [beeuY, X13])
   (pre :=
     0 < s.regs.X13.toNat ∧
     s.regs.X14 = 0 ∧
@@ -1817,7 +1817,7 @@ block_spec beeu_shift_loop_Y_correct beeu_mod_inverse_vartime s
   kloop
     (inv := fun v st =>
       st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_shift_loop_Y" ∧
-      st.data.regs ≡ s.regs except [X8, X9, X10, X11, X12, X13] ∧
+      st.data.regs ≡ s.regs except [beeuY, X13] ∧
       st.data.dmem = s.dmem ∧
       0 < v ∧ v ≤ k₀ ∧
       st.data.regs.X13.toNat = v ∧
@@ -1854,7 +1854,7 @@ block_spec beeu_shift_loop_Y_correct beeu_mod_inverse_vartime s
 
 block_spec beeu_shift_B_header_correct beeu_mod_inverse_vartime s
   from ".Lbeeu_loop"
-  (writes := [X13, X14, X15, X19, X20, X25, X26, X27, X28])
+  (writes := [beeuB, X13, X14, X15, X19, X20])
   (pre := 0 < s.regs.beeuB)
   (post := fun st =>
     let k := ctzClamped s.regs.X25
@@ -1896,7 +1896,7 @@ block_spec beeu_shift_B_header_correct beeu_mod_inverse_vartime s
 
 block_spec beeu_shift_A_header_correct beeu_mod_inverse_vartime s
   from ".Lbeeu_shift_A_Y"
-  (writes := [X13, X14, X15, X19, X20, X21, X22, X23, X24])
+  (writes := [beeuA, X13, X14, X15, X19, X20])
   (post := fun st =>
     let k := ctzClamped s.regs.X21
     st.data.dmem = s.dmem ∧
