@@ -1080,7 +1080,16 @@ syntax kloopArg := " (" ident " := " term ")"
   and `exit : ∀ st, Q v₀ g₀ st → Eventually post st`.
 
 In `body` the measure, ghost, state and invariant hypothesis are introduced as `v g st hst`
-(names/patterns from `state :=` and `with`), with a leading `st.pc = …` conjunct substituted. -/
+(names/patterns from `state :=` and `with`), with a leading `st.pc = …` conjunct substituted.
+
+**Constant-time loops.** With `(pub := pub₀)` the goal is a traced specification
+(`∃ tr, ∀ s₀ sec, pre s₀ sec → TracedEventually e (post s₀ sec) tr ⟨s₀, pc⟩`, as produced by
+`kpack_secrets`; a `Spec … (trace := some tr)` goal is packed first) and `tailrec_loop_cps_traced`
+is used: `inv`/`exit` have type `Measure → Pub → MD → Secret → Ghost → State → Prop`, `ghost` is
+`g₀ : MD → Secret → Ghost`, and `(pubinv := Inv)` (default `fun _ _ => True`) is the invariant on
+measure and public data. Goals: `init` (`(∃ tr, …) ∨ (Inv v₀ pub₀ ∧ ∃ tr, …)`), `body` with
+`v pub hpub` introduced (`(∃ tr, …) ∨ ∃ v' pub', lt v' v ∧ Inv v' pub' ∧ ∃ tr, …`) and `post`;
+`kloop_exit`, `kloop_next v' pub'` and `kintro` take it from there. -/
 syntax (name := kloop) "kloop" (ppSpace kloopArg)+ (" with " (ppSpace colGt rcasesPat)+)? : tactic
 
 elab_rules : tactic
@@ -1092,6 +1101,8 @@ elab_rules : tactic
     let mut ghost? : Option Term := none
     let mut lt? : Option Term := none
     let mut wf? : Option Term := none
+    let mut pub? : Option Term := none
+    let mut pubinv? : Option Term := none
     let mut stName := `st
     for arg in args do
       let key := arg.raw[1].getId
@@ -1103,12 +1114,58 @@ elab_rules : tactic
       | `ghost => ghost? := some val
       | `lt => lt? := some val
       | `wf => wf? := some val
+      | `pub => pub? := some val
+      | `pubinv => pubinv? := some val
       | `state =>
         unless val.raw.isIdent do throwErrorAt val "kloop: `state` expects a name"
         stName := val.raw.getId
-      | _ => throwErrorAt arg "kloop: unknown argument `{key}` (expected inv, exit, measure, ghost, lt, wf, state)"
+      | _ => throwErrorAt arg "kloop: unknown argument `{key}` (expected inv, exit, measure, ghost, lt, wf, pub, pubinv, state)"
     let some inv := inv? | throwError "kloop: missing `(inv := …)`"
     let some v0Stx := measure? | throwError "kloop: missing `(measure := …)`"
+    -- Constant-time loop: delegate to `tailrec_loop_cps_traced`.
+    if let some pub0 := pub? then
+      let some exitQ := exit? | throwError "kloop: a constant-time loop needs `(exit := …)`"
+      let some g0 := ghost? | throwError "kloop: a constant-time loop needs `(ghost := g₀)` with `g₀ : MD → Secret → Ghost`"
+      let pubInv ← match pubinv? with
+        | some t => pure t
+        | none => `(fun _ _ => True)
+      -- a `∃ tr, ∀ s₀ secrets…, Spec … (trace := some tr) …` goal is packed first
+      let target := (← instantiateMVars (← getMainTarget)).consumeMData
+      if target.find? (·.isConstOf ``Kraken.Executable.Spec) |>.isSome then
+        evalTactic (← `(tactic| kpack_secrets))
+      let mut rule : Term ← `(tailrec_loop_cps_traced _ (Inv := $pubInv) (P := $inv) (Q := $exitQ)
+        (v0 := $v0Stx) (pub0 := $pub0) (g0 := $g0))
+      match lt?, wf? with
+        | some l, some w => rule ← `($rule (lt := $l) (Hwf := $w))
+        | none, none => pure ()
+        | _, _ => throwError "kloop: `lt` and `wf` must be given together"
+      evalTactic (← `(tactic| apply $rule))
+      let [gInit, gBody, gPost] ← getGoals
+        | throwError "kloop: unexpected goals after applying `tailrec_loop_cps_traced`"
+      setGoals [gInit]
+      evalTactic (← `(tactic| (try dsimp only)))
+      tagGoals `init
+      let initGoals ← getGoals
+      setGoals [gBody]
+      let vPat ← match pats[0]? with
+        | some p => pure p
+        | none => `(rcasesPat| v)
+      let pubPat ← match pats[1]? with
+        | some p => pure p
+        | none => `(rcasesPat| pub)
+      let hPat ← match pats[2]? with
+        | some p => pure p
+        | none => `(rcasesPat| hpub)
+      evalTactic (← `(tactic| rintro $vPat:rcasesPat $pubPat:rcasesPat $hPat:rcasesPat))
+      evalTactic (← `(tactic| (try dsimp only)))
+      tagGoals `body
+      let bodyGoals ← getGoals
+      setGoals [gPost]
+      evalTactic (← `(tactic| (try dsimp only)))
+      tagGoals `post
+      let postGoals ← getGoals
+      setGoals (initGoals ++ bodyGoals ++ postGoals)
+      return
     let target := (← instantiateMVars (← getMainTarget)).consumeMData
     if target.isAppOf ``TracedEventually then
       evalTactic (← `(tactic| unfold TracedEventually))
@@ -1242,6 +1299,33 @@ elab "kloop_next" vs:(ppSpace colGt term:max)* : tactic => withMainContext do
           throwError "kloop_next: the loop has a ghost state; use `kloop_next v' g'`"
       | #[v', g'] => pure (v', g')
       | _ => throwError "kloop_next: expected `kloop_next v' [g']`"
+    -- Constant-time loop (`tailrec_loop_cps_traced`): `∃ v' pub', lt v' v ∧ Inv v' pub' ∧ ∃ tr, …`.
+    let isTraced : Bool :=
+      if vLam.isLambda then
+        let inner := vLam.bindingBody!.consumeMData
+        if inner.isAppOfArity ``Exists 2 then
+          let pubLam := (inner.getArg! 1).consumeMData
+          if pubLam.isLambda then
+            let body := pubLam.bindingBody!.consumeMData
+            body.isAppOfArity ``And 2 && (body.getArg! 1).consumeMData.isAppOfArity ``And 2 &&
+              ((body.getArg! 1).consumeMData.getArg! 1).consumeMData.isAppOfArity ``Exists 2
+          else false
+        else false
+      else false
+    if isTraced then
+      evalTactic (← `(tactic| refine Or.inr ⟨$v', $g', ?dec, ?inv, ?step⟩))
+      let [gDec, gInv, gStep] ← getGoals | throwError "kloop_next: unexpected goals"
+      let mut side : List MVarId := []
+      for g in [gDec, gInv] do
+        setGoals [g]
+        evalTactic (← `(tactic| (try dsimp only)))
+        unless (← tryClose (← `(tactic| omega))) || (← tryClose (← `(tactic| decide))) ||
+            (← tryClose (← `(tactic| trivial))) do
+          side := side ++ [g]
+      setGoals [gStep]
+      evalTactic (← `(tactic| (try dsimp only)))
+      setGoals ((← getGoals) ++ side)
+      return
     evalTactic (← `(tactic| refine Or.inr ⟨$v', $g', ?inv, ?rest⟩))
     let gs ← getGoals
     let [gInv, gRest] := gs | throwError "kloop_next: unexpected goals"
