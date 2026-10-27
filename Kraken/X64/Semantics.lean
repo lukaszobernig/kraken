@@ -446,6 +446,77 @@ end BitVec
     zf := result == BitVec.zero _
     sf := result.msb, cf := f.cf, af := f.af, of := f.of }
 
+/-! ### Flag-setting arithmetic
+
+The flag functions below are the abstraction boundary for symbolic execution: `kstep` does not
+unfold them (they are deliberately not `@[kstep]`/`@[simp]`), so a state after `cmp %rbx, %rax`
+reads `status := StatusFlags.sub rax rbx`, and the projection lemmas at the end of this file
+(`StatusFlags.sub_cf : (sub a b).cf = decide (a.toNat < b.toNat)`, …) present the individual
+flags as decided value-level facts when a condition code or a carry-in reads them.
+
+The definitions follow the architecture reference: a flag is set iff the wrapped result differs
+from the exact (unbounded) result. -/
+
+/-- Flags of `add`: `v = a + b`. -/
+def StatusFlags.add {w} (a b : BitVec w) : StatusFlags :=
+  let v := a + b
+  StatusFlags.from_result v {
+    cf := v.unsigned != a.unsigned + b.unsigned
+    af := (v.take 4).unsigned != (a.take 4).unsigned + (b.take 4).unsigned,
+    of := v.signed != a.signed + b.signed }
+
+/-- Flags of `adc`: `v = a + b + c`. -/
+def StatusFlags.adc {w} (a b : BitVec w) (c : Bool) : StatusFlags :=
+  let v := a + b + BitVec.ofNat w c.toNat
+  StatusFlags.from_result v {
+    cf := v.unsigned != a.unsigned + b.unsigned + c
+    af := (v.take 4).unsigned != (a.take 4).unsigned + (b.take 4).unsigned + c,
+    of := v.signed != a.signed + b.signed + c }
+
+/-- Flags of `sub`/`cmp`: `v = a - b`. -/
+def StatusFlags.sub {w} (a b : BitVec w) : StatusFlags :=
+  let v := a - b
+  StatusFlags.from_result v {
+    cf := v.unsigned != a.unsigned - b.unsigned
+    af := (v.take 4).unsigned != (a.take 4).unsigned - (b.take 4).unsigned,
+    of := v.signed != a.signed - b.signed }
+
+/-- Flags of `sbb`: `v = a - b - c`. -/
+def StatusFlags.sbb {w} (a b : BitVec w) (c : Bool) : StatusFlags :=
+  let v := a - b - BitVec.ofNat w c.toNat
+  StatusFlags.from_result v {
+    cf := v.unsigned != a.unsigned - b.unsigned - c
+    af := (v.take 4).unsigned != (a.take 4).unsigned - (b.take 4).unsigned - c,
+    of := v.signed != a.signed - b.signed - c }
+
+/-- Flags of `inc`: `v = a + 1`, `cf` unchanged. -/
+def StatusFlags.inc {w} (a : BitVec w) (cf : Bool) : StatusFlags :=
+  let v := a + 1
+  StatusFlags.from_result v {
+    cf := cf
+    af := (v.take 4).unsigned != (a.take 4).unsigned + 1,
+    of := v.signed != a.signed + 1 }
+
+/-- Flags of `dec`: `v = a - 1`, `cf` unchanged. -/
+def StatusFlags.dec {w} (a : BitVec w) (cf : Bool) : StatusFlags :=
+  let v := a - 1
+  StatusFlags.from_result v {
+    cf := cf
+    af := (v.take 4).unsigned != (a.take 4).unsigned - 1,
+    of := v.signed != a.signed - 1 }
+
+/-- Flags of `neg`: `v = -b`. -/
+def StatusFlags.neg {w} (b : BitVec w) : StatusFlags :=
+  let v := -b
+  StatusFlags.from_result v {
+    cf := b != 0
+    af := (b.take 4) != 0,
+    of := v.signed != - b.signed }
+
+/-- Flags of the logical operations (`and`, `or`, `xor`, `test`): `cf = of = 0`, `af` undefined. -/
+def StatusFlags.logical {w} (v : BitVec w) (af : Bool) : StatusFlags :=
+  StatusFlags.from_result v { cf := false, af, of := false }
+
 
 
 set_option maxHeartbeats 1000000
@@ -477,85 +548,52 @@ set_option maxHeartbeats 1000000
     src.interp s p (fun a s =>
     dst.interp s p (fun b s =>
     let v := a + b
-    let status := .from_result v {
-      cf := v.unsigned != a.unsigned + b.unsigned
-      af := (v.take 4).unsigned != (a.take 4).unsigned + (b.take 4).unsigned,
-      of := v.signed != a.signed + b.signed }
-    { s with status }.set dst v p next))
+    { s with status := StatusFlags.add a b }.set dst v p next))
   | .adc dst src =>
     src.interp s p (fun a s =>
     dst.interp s p (fun b s =>
     let c := s.status.cf
     let v := a + b + c
-    let status := .from_result v {
-      cf := v.unsigned != a.unsigned + b.unsigned + c
-      af := (v.take 4).unsigned != (a.take 4).unsigned + (b.take 4).unsigned + c,
-      of := v.signed != a.signed + b.signed + c }
-    { s with status }.set dst v p next))
+    { s with status := StatusFlags.adc a b c }.set dst v p next))
   | .adcx dst src =>
     src.interp s p (fun a s =>
     dst.interp s p (fun b s =>
     let v := a + b + s.status.cf
-    let cf := v.unsigned != a.unsigned + b.unsigned + s.status.cf
+    let cf := (StatusFlags.adc a b s.status.cf).cf
     next { s with regs := s.regs.set dst v, status := { s.status with cf := cf }}))
   | .adox dst src =>
     src.interp s p (fun a s =>
     dst.interp s p (fun b s =>
     let v := a + b + s.status.of
-    let of := v.unsigned != a.unsigned + b.unsigned + s.status.of
+    let of := (StatusFlags.adc a b s.status.of).cf
     next { s with regs := s.regs.set dst v, status := { s.status with of := of }}))
   | .inc dst =>
     dst.interp s p (fun a s =>
     let v := a + 1
-    let status := .from_result v {
-      cf := s.status.cf
-      af := (v.take 4).unsigned != (a.take 4).unsigned + 1,
-      of := v.signed != a.signed + 1 }
-    { s with status }.set dst v p next)
+    { s with status := StatusFlags.inc a s.status.cf }.set dst v p next)
   | .dec dst =>
     dst.interp s p (fun a s =>
     let v := a - 1
-    let status := .from_result v {
-      cf := s.status.cf
-      af := (v.take 4).unsigned != (a.take 4).unsigned - 1,
-      of := v.signed != a.signed - 1 }
-    { s with status }.set dst v p next)
+    { s with status := StatusFlags.dec a s.status.cf }.set dst v p next)
   | .neg dst =>
     dst.interp s p (fun b s =>
     let v := -b
-    let status := .from_result v {
-      cf := b != 0
-      af := (b.take 4) != 0,
-      of := v.signed != - b.signed }
-    { s with status }.set dst v p next)
+    { s with status := StatusFlags.neg b }.set dst v p next)
   | .sub dst src =>
     src.interp s p (fun a s =>
     dst.interp s p (fun b s =>
     let v := b - a
-    let status := .from_result v {
-      cf := v.unsigned != b.unsigned - a.unsigned
-      af := (v.take 4).unsigned != (b.take 4).unsigned - (a.take 4).unsigned,
-      of := v.signed != b.signed - a.signed }
-    { s with status }.set dst v p next))
+    { s with status := StatusFlags.sub b a }.set dst v p next))
   | .sbb dst src =>
     src.interp s p (fun a s =>
     dst.interp s p (fun b s =>
     let c := s.status.cf
     let v := b - a - c
-    let status := .from_result v {
-      cf := v.unsigned != b.unsigned - a.unsigned - c
-      af := (v.take 4).unsigned != (b.take 4).unsigned - (a.take 4).unsigned - c,
-      of := v.signed != b.signed - a.signed - c }
-    { s with status }.set dst v p next))
+    { s with status := StatusFlags.sbb b a c }.set dst v p next))
   | .cmp a b =>
     a.interp s p (fun a s =>
     b.interp s p (fun b s =>
-    let v := a - b
-    let status := .from_result v {
-      cf := v.unsigned != a.unsigned - b.unsigned
-      af := (v.take 4).unsigned != (a.take 4).unsigned - (b.take 4).unsigned,
-      of := v.signed != a.signed - b.signed }
-    next { s with status }))
+    next { s with status := StatusFlags.sub a b }))
   | .mul src =>
     let a := s.regs.get (Reg.low .rax w)
     src.interp s p (fun b s =>
@@ -605,15 +643,13 @@ set_option maxHeartbeats 1000000
     b.interp s p (fun b s =>
     let v := a &&& b
     undefined (fun af =>
-    let status := .from_result v { cf := false, af, of := false}
-    next { s with status})))
+    next { s with status := StatusFlags.logical v af })))
   | .and dst src | .or dst src | .xor dst src =>
     dst.interp s p (fun a s =>
     src.interp s p (fun b s =>
     let v := match i with | .and _ _ => a &&& b | .or _ _ => a ||| b | _ => a ^^^ b
     undefined (fun af =>
-    let status := .from_result v { cf := false, of := false, af }
-    { s with status }.set dst v p next)))
+    { s with status := StatusFlags.logical v af }.set dst v p next)))
   | .not dst =>
     dst.interp s p (fun a s =>
     let v := ~~~a
@@ -796,6 +832,226 @@ theorem Executable.labels_start' [layout : Layout] (l : Label) (rest : List Dire
       (fun x => if (match x.directive with | .label l' => some l' | _ => none) = some l then some x.addr else none)).getD (-1) =
     layout.start :=
   Executable.labels_start l rest
+
+/-! ## Flags at the value level
+
+The projection lemmas of the flag functions (`@[kcond]`: used by `kstep` when deciding branch
+conditions and by `kfinish`) and the limb identities for carry chains. The compare idiom
+(`cmp` followed by a condition code) is covered by the architecture-independent `BitVec.cmp_*`
+lemmas in `Kraken.BitVecArith`. -/
+
+namespace StatusFlags
+section
+variable {w : Nat} (a b : BitVec w) (c : Bool)
+
+/-! ### Projections -/
+
+@[simp, kcond] theorem logical_pf (v : BitVec w) (af : Bool) :
+    (logical v af).pf = ((v.take 8).cpop_ % 2 == BitVec.zero 8) := rfl
+@[simp, kcond, grind =] theorem logical_zf (v : BitVec w) (af : Bool) :
+    (logical v af).zf = decide (v = 0#w) := by
+  simp [logical, from_result, Bool.beq_eq_decide_eq]
+@[simp, kcond, grind =] theorem logical_sf (v : BitVec w) (af : Bool) : (logical v af).sf = v.msb := rfl
+@[simp, kcond, grind =] theorem logical_cf (v : BitVec w) (af : Bool) : (logical v af).cf = false := rfl
+@[simp, kcond, grind =] theorem logical_af (v : BitVec w) (af : Bool) : (logical v af).af = af := rfl
+@[simp, kcond, grind =] theorem logical_of (v : BitVec w) (af : Bool) : (logical v af).of = false := rfl
+
+@[simp, kcond] theorem add_pf : (add a b).pf = (((a + b).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
+@[simp, kcond, grind =] theorem add_zf : (add a b).zf = decide (a + b = 0#w) := by
+  simp [add, from_result, Bool.beq_eq_decide_eq]
+@[simp, kcond, grind =] theorem add_sf : (add a b).sf = (a + b).msb := rfl
+@[simp, kcond, grind =] theorem add_cf : (add a b).cf = decide (2 ^ w ≤ a.toNat + b.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [add, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
+  have := BitVec.toNat_add_cases a b
+  omega
+@[simp, kcond] theorem add_af :
+    (add a b).af = (((a + b).take 4).unsigned != (a.take 4).unsigned + (b.take 4).unsigned) := rfl
+@[simp, kcond, grind =] theorem add_of : (add a b).of = BitVec.saddOverflow a b := by
+  rw [BitVec.saddOverflow_eq_decide]
+  rcases w with _ | w
+  · simp [add, from_result, BitVec.signed, BitVec.of_length_zero]
+  · rw [Bool.eq_iff_iff]
+    simp only [add, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq,
+      BitVec.toInt_add, ne_eq, Int.bmod_two_pow_eq_self_iff (w := w + 1) (by omega)]
+    omega
+
+@[simp, kcond] theorem adc_pf :
+    (adc a b c).pf = (((a + b + BitVec.ofNat w c.toNat).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
+@[simp, kcond, grind =] theorem adc_zf :
+    (adc a b c).zf = decide (a + b + BitVec.ofNat w c.toNat = 0#w) := by
+  simp [adc, from_result, Bool.beq_eq_decide_eq]
+@[simp, kcond, grind =] theorem adc_sf : (adc a b c).sf = (a + b + BitVec.ofNat w c.toNat).msb := rfl
+@[simp, kcond, grind =] theorem adc_cf :
+    (adc a b c).cf = decide (2 ^ w ≤ a.toNat + b.toNat + c.toNat) := by
+  rcases Nat.eq_zero_or_pos w with rfl | hw
+  · cases c <;> simp [adc, from_result, BitVec.unsigned, BitVec.of_length_zero]
+  rw [Bool.eq_iff_iff]
+  simp only [adc, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
+  have h1 := BitVec.toNat_add_cases a b
+  have h2 := BitVec.toNat_add_cases (a + b) (BitVec.ofNat w c.toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
+  cases c <;> simp only [Bool.toNat_false, Bool.toNat_true, Int.natCast_zero, Int.natCast_one,
+    Int.add_zero] at h2 ⊢ <;> omega
+@[simp, kcond] theorem adc_af :
+    (adc a b c).af = (((a + b + BitVec.ofNat w c.toNat).take 4).unsigned !=
+      (a.take 4).unsigned + (b.take 4).unsigned + c) := rfl
+@[simp, kcond, grind =] theorem adc_of (hw : 1 < w) :
+    (adc a b c).of = decide (a.toInt + b.toInt + c.toNat < -2 ^ (w - 1) ∨
+      2 ^ (w - 1) ≤ a.toInt + b.toInt + c.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [adc, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq, BitVec.toInt_add,
+    Int.bmod_add_bmod, BitVec.toInt_ofNat_toNat_bool hw, ne_eq]
+  cases c <;> simp only [Bool.toNat_false, Bool.toNat_true, Int.natCast_zero, Int.natCast_one,
+    Int.add_zero, Int.bmod_two_pow_eq_self_iff (w := w) (by omega)] <;> omega
+
+@[simp, kcond] theorem sub_pf : (sub a b).pf = (((a - b).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
+@[simp, kcond, grind =] theorem sub_zf : (sub a b).zf = decide (a = b) := by
+  have : a - b = 0#w ↔ a = b := by grind
+  simp [sub, from_result, Bool.beq_eq_decide_eq, this]
+@[simp, kcond, grind =] theorem sub_sf : (sub a b).sf = (a - b).msb := rfl
+@[simp, kcond, grind =] theorem sub_cf : (sub a b).cf = decide (a.toNat < b.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [sub, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
+  have := BitVec.toNat_sub_cases a b
+  have := a.isLt; have := b.isLt
+  omega
+@[simp, kcond] theorem sub_af :
+    (sub a b).af = (((a - b).take 4).unsigned != (a.take 4).unsigned - (b.take 4).unsigned) := rfl
+@[simp, kcond, grind =] theorem sub_of : (sub a b).of = BitVec.ssubOverflow a b := by
+  rw [BitVec.ssubOverflow_eq_decide]
+  rcases w with _ | w
+  · simp [sub, from_result, BitVec.signed, BitVec.of_length_zero]
+  · rw [Bool.eq_iff_iff]
+    simp only [sub, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq,
+      BitVec.toInt_sub, ne_eq, Int.bmod_two_pow_eq_self_iff (w := w + 1) (by omega)]
+    omega
+
+@[simp, kcond] theorem sbb_pf :
+    (sbb a b c).pf = (((a - b - BitVec.ofNat w c.toNat).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
+@[simp, kcond, grind =] theorem sbb_zf :
+    (sbb a b c).zf = decide (a - b - BitVec.ofNat w c.toNat = 0#w) := by
+  simp [sbb, from_result, Bool.beq_eq_decide_eq]
+@[simp, kcond, grind =] theorem sbb_sf : (sbb a b c).sf = (a - b - BitVec.ofNat w c.toNat).msb := rfl
+@[simp, kcond, grind =] theorem sbb_cf :
+    (sbb a b c).cf = decide (a.toNat < b.toNat + c.toNat) := by
+  rcases Nat.eq_zero_or_pos w with rfl | hw
+  · cases c <;> simp [sbb, from_result, BitVec.unsigned, BitVec.of_length_zero]
+  rw [Bool.eq_iff_iff]
+  simp only [sbb, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
+  have h1 := BitVec.toNat_sub_cases a b
+  have h2 := BitVec.toNat_sub_cases (a - b) (BitVec.ofNat w c.toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
+  have := a.isLt; have := b.isLt
+  cases c <;> simp only [Bool.toNat_false, Bool.toNat_true, Int.natCast_zero, Int.natCast_one,
+    Int.sub_zero] at h2 ⊢ <;> omega
+@[simp, kcond] theorem sbb_af :
+    (sbb a b c).af = (((a - b - BitVec.ofNat w c.toNat).take 4).unsigned !=
+      (a.take 4).unsigned - (b.take 4).unsigned - c) := rfl
+@[simp, kcond, grind =] theorem sbb_of (hw : 1 < w) :
+    (sbb a b c).of = decide (a.toInt - b.toInt - c.toNat < -2 ^ (w - 1) ∨
+      2 ^ (w - 1) ≤ a.toInt - b.toInt - c.toNat) := by
+  rw [Bool.eq_iff_iff]
+  simp only [sbb, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq, BitVec.toInt_sub,
+    Int.bmod_sub_bmod, BitVec.toInt_ofNat_toNat_bool hw, ne_eq]
+  cases c <;> simp only [Bool.toNat_false, Bool.toNat_true, Int.natCast_zero, Int.natCast_one,
+    Int.sub_zero, Int.bmod_two_pow_eq_self_iff (w := w) (by omega)] <;> omega
+
+@[simp, kcond] theorem inc_pf (cf : Bool) :
+    (inc a cf).pf = (((a + 1#w).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
+@[simp, kcond, grind =] theorem inc_zf (cf : Bool) : (inc a cf).zf = decide (a + 1#w = 0#w) := by
+  simp [inc, from_result, Bool.beq_eq_decide_eq]
+@[simp, kcond, grind =] theorem inc_sf (cf : Bool) : (inc a cf).sf = (a + 1#w).msb := rfl
+@[simp, kcond, grind =] theorem inc_cf (cf : Bool) : (inc a cf).cf = cf := rfl
+@[simp, kcond] theorem inc_af (cf : Bool) :
+    (inc a cf).af = (((a + 1#w).take 4).unsigned != (a.take 4).unsigned + 1) := rfl
+@[simp, kcond, grind =] theorem inc_of (cf : Bool) (hw : 1 < w) :
+    (inc a cf).of = decide (2 ^ (w - 1) ≤ a.toInt + 1) := by
+  rw [Bool.eq_iff_iff]
+  have := BitVec.le_toInt a
+  simp only [inc, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq, BitVec.toInt_add,
+    BitVec.ofNat_eq_ofNat, BitVec.toInt_one_of_lt hw, ne_eq,
+    Int.bmod_two_pow_eq_self_iff (w := w) (by omega)]
+  omega
+
+@[simp, kcond] theorem dec_pf (cf : Bool) :
+    (dec a cf).pf = (((a - 1#w).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
+@[simp, kcond, grind =] theorem dec_zf (cf : Bool) : (dec a cf).zf = decide (a = 1#w) := by
+  have : a - 1#w = 0#w ↔ a = 1#w := by grind
+  simp [dec, from_result, Bool.beq_eq_decide_eq, this]
+@[simp, kcond, grind =] theorem dec_sf (cf : Bool) : (dec a cf).sf = (a - 1#w).msb := rfl
+@[simp, kcond, grind =] theorem dec_cf (cf : Bool) : (dec a cf).cf = cf := rfl
+@[simp, kcond] theorem dec_af (cf : Bool) :
+    (dec a cf).af = (((a - 1#w).take 4).unsigned != (a.take 4).unsigned - 1) := rfl
+@[simp, kcond, grind =] theorem dec_of (cf : Bool) (hw : 1 < w) :
+    (dec a cf).of = decide (a.toInt - 1 < -2 ^ (w - 1)) := by
+  rw [Bool.eq_iff_iff]
+  have := BitVec.toInt_lt (x := a)
+  simp only [dec, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq, BitVec.toInt_sub,
+    BitVec.ofNat_eq_ofNat, BitVec.toInt_one_of_lt hw, ne_eq,
+    Int.bmod_two_pow_eq_self_iff (w := w) (by omega)]
+  omega
+
+@[simp, kcond] theorem neg_pf : (neg b).pf = (((-b).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
+@[simp, kcond, grind =] theorem neg_zf : (neg b).zf = decide (b = 0#w) := by
+  simp [neg, from_result, Bool.beq_eq_decide_eq, BitVec.neg_eq_zero_iff]
+@[simp, kcond, grind =] theorem neg_sf : (neg b).sf = (-b).msb := rfl
+@[simp, kcond, grind =] theorem neg_cf : (neg b).cf = !decide (b = 0#w) := by
+  simp [neg, from_result, bne, Bool.beq_eq_decide_eq]
+@[simp, kcond] theorem neg_af : (neg b).af = (b.take 4 != 0) := rfl
+@[simp, kcond, grind =] theorem neg_of : (neg b).of = decide (b.toInt = -2 ^ (w - 1)) := by
+  rcases w with _ | w
+  · simp [neg, from_result, BitVec.signed, BitVec.of_length_zero]
+  · rw [Bool.eq_iff_iff]
+    have h1 := BitVec.le_toInt b
+    have h2 := BitVec.toInt_lt (x := b)
+    simp only [neg, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq, BitVec.toInt_neg,
+      ne_eq, Int.bmod_two_pow_eq_self_iff (w := w + 1) (by omega)]
+    simp only [Nat.add_one_sub_one] at h1 h2 ⊢
+    omega
+
+/-! ### Limb identities for carry chains: wrapped result + carry weight = exact result -/
+
+theorem add_toNat :
+    ((a + b).toNat : Int) + ((add a b).cf).toNat * (2 ^ w : Nat) = a.toNat + b.toNat := by
+  rw [add_cf]
+  have := BitVec.toNat_add_cases a b
+  by_cases h : 2 ^ w ≤ a.toNat + b.toNat <;> simp only [h, decide_true, decide_false,
+    Bool.toNat_true, Bool.toNat_false] <;> omega
+
+theorem adc_toNat (hw : 0 < w) :
+    ((a + b + BitVec.ofNat w c.toNat).toNat : Int) + ((adc a b c).cf).toNat * (2 ^ w : Nat) =
+      a.toNat + b.toNat + c.toNat := by
+  rw [adc_cf]
+  have h1 := BitVec.toNat_add_cases a b
+  have h2 := BitVec.toNat_add_cases (a + b) (BitVec.ofNat w c.toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
+  have := a.isLt; have := b.isLt
+  have hc : c.toNat ≤ 1 := by cases c <;> simp
+  by_cases h : 2 ^ w ≤ a.toNat + b.toNat + c.toNat <;> simp only [h, decide_true, decide_false,
+    Bool.toNat_true, Bool.toNat_false] <;> omega
+
+theorem sub_toNat :
+    ((a - b).toNat : Int) - ((sub a b).cf).toNat * (2 ^ w : Nat) = a.toNat - b.toNat := by
+  rw [sub_cf]
+  have := BitVec.toNat_sub_cases a b
+  by_cases h : a.toNat < b.toNat <;> simp only [h, decide_true, decide_false,
+    Bool.toNat_true, Bool.toNat_false] <;> omega
+
+theorem sbb_toNat (hw : 0 < w) :
+    ((a - b - BitVec.ofNat w c.toNat).toNat : Int) - ((sbb a b c).cf).toNat * (2 ^ w : Nat) =
+      a.toNat - b.toNat - c.toNat := by
+  rw [sbb_cf]
+  have h1 := BitVec.toNat_sub_cases a b
+  have h2 := BitVec.toNat_sub_cases (a - b) (BitVec.ofNat w c.toNat)
+  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
+  have := a.isLt; have := b.isLt
+  have hc : c.toNat ≤ 1 := by cases c <;> simp
+  by_cases h : a.toNat < b.toNat + c.toNat <;> simp only [h, decide_true, decide_false,
+    Bool.toNat_true, Bool.toNat_false] <;> omega
+
+end
+end StatusFlags
 
 def Directive.fakeSize (hashOfProgram : UInt64) (d : Directive) : Nat :=
   match d with

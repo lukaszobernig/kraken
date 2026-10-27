@@ -853,8 +853,12 @@ elab_rules : tactic
         some <$> `(Lean.Parser.Tactic.simpLemma| $(mkIdent n):ident)
       else pure none
     let nfStx := nfStx.toArray.push (← `(Lean.Parser.Tactic.simpLemma| ↓reduceIte))
+    -- flag projections / compare idiom (`@[kcond]` simp set)
+    let nfStx := nfStx.push (← `(Lean.Parser.Tactic.simpLemma| kcond))
+    -- (flag projections `kcond` on hypotheses too, so that carries/conditions in hypotheses and
+    -- goal share one normal form)
     evalTactic (← `(tactic| (try simp only [BitVec.shiftLeft_zero, BitVec.zero_or, BitVec.or_zero,
-      BitVec.xor_self, UInt64.toNat_toBitVec, UInt64.toBitVec_ofBitVec] at *)))
+      BitVec.xor_self, UInt64.toNat_toBitVec, UInt64.toBitVec_ofBitVec, kcond] at *)))
     -- goal only, deciding ground conditions (`if (1 == 0) = true then … else …`)
     evalTactic (← `(tactic| (try simp +decide only [$nfStx,*])))
     -- Apply the extra lemmas to the goal and to every hypothesis that is not itself one of them.
@@ -892,8 +896,10 @@ elab_rules : tactic
         else if mentionsConst t [``Std.ExtHashMap.sep, ``List.At] then
           pure [← `(tactic| ecancel)]
         else
+          -- `grind` last: it uses the context (e.g. the case hypothesis of a decided branch) and
+          -- knows the `UInt64`/`BitVec` literal bridge
           pure [← `(tactic| assumption), ← `(tactic| rfl), ← `(tactic| exact True.intro),
-            ← `(tactic| omega), ← `(tactic| simp)]
+            ← `(tactic| omega), ← `(tactic| simp), ← `(tactic| grind)]
       let mut closed := false
       for tac in closers do
         if !closed then
@@ -2601,6 +2607,12 @@ partial def evalSymKStep : Grind.GrindTactic :=
                 | .closed => pure mvarId
                 | .refuted => failure
                 | .goal m => pure m
+              -- A condition that became linear arithmetic (a decided flag, a compare) is settled
+              -- by `omega` with the context, no `grind` needed.
+              unless ← mvarId.isAssigned do
+                if ← mvarId.withContext (Kraken.Tactic.isArithProp (← mvarId.getType)) then
+                  if ← Kraken.Tactic.solveArithGoal mvarId then
+                    trace[Kraken.kstep] "ite condition by omega"
               unless ← mvarId.isAssigned do
                 trace[Kraken.kstep] "ite grind on: {← mvarId.getType}"
                 let cleanMVarId ← mvarId.withContext do
