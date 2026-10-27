@@ -32,7 +32,6 @@ theorem swap_correct [layout : Layout] [Layout.Valid swap] (d : MachineData) :
         st.data.regs.getRegOrZr .X0 = d.regs.getRegOrZr .X1 ∧
         st.data.regs.getRegOrZr .X1 = d.regs.getRegOrZr .X0) := by
   kprologue swap with d
-  sym => kstep; tactic =>
   kfinish swap
 
 -- Example 3: Multi-instruction arithmetic and shift pipeline
@@ -47,7 +46,6 @@ theorem arith_shift_correct [layout : Layout] [Layout.Valid arith_shift] (d : Ma
       (post := fun st =>
         st.data.regs.getRegOrZr .X3 = 3 * (d.regs.getRegOrZr .X1 + 42)) := by
   kprologue arith_shift with d
-  sym => kstep; tactic =>
   kfinish arith_shift
 
 -- Example 4: Stepping through control flow (branch not taken)
@@ -62,7 +60,6 @@ start:
 theorem p4_correct [layout : Layout] [Layout.Valid controlflow] (d : MachineData) :
     (layout controlflow).Spec d (post := fun st => st.data.regs.X1 = 42) := by
   kprologue controlflow with d
-  sym => kstep; tactic =>
   kfinish controlflow
 
 -- Example 5: Storing and loading registers to/from memory
@@ -86,7 +83,6 @@ theorem move_2_regs_to_heap_correct [layout : Layout] [Layout.Valid move_2_regs_
         st.data.regs.X4 = s₀.regs.X1 ∧
         st.data.regs.X2 = s₀.regs.X2) := by
   kprologue move_2_regs_to_heap with s₀
-  sym => kstep; tactic =>
   kfinish move_2_regs_to_heap
 
 -- Example 6: Memory access with shifted register offset [x1, x2, lsl #3]
@@ -104,5 +100,4 @@ theorem reg_offset_example_correct [layout : Layout] [Layout.Valid reg_offset_ex
         s₀.dmem =⋆ v @ s₀.regs.X1.toBitVec + BitVec.ofInt 64 (s₀.regs.X2.toBitVec.toNat <<< 3) ⋆ R)
       (post := fun st => st.data.regs.X3 = 42) := by
   kprologue reg_offset_example with s₀
-  sym => kstep; tactic =>
   kfinish reg_offset_example

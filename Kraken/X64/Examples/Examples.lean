@@ -31,9 +31,7 @@ def p1 := parse("start: mov $1, %rax")
 example [layout : Layout] [Layout.Valid p1] (s : MachineData) :
     (layout p1).Spec s (post := fun st => st.data.regs.rax = 1) := by
   kprologue p1 with s
-  sym => kstep; tactic =>
-  apply Eventually.done
-  rfl
+  kfinish p1
 
 def swap : Program := parse("
   xor %rbx, %rax
@@ -46,9 +44,7 @@ theorem swap_correct [layout : Layout] [Layout.Valid swap] (d : MachineData) :
         st.data.regs.get Reg.rax = d.regs.get Reg.rbx ∧
         st.data.regs.get Reg.rbx = d.regs.get Reg.rax) := by
   kprologue swap with d
-  sym => kstep; tactic =>
-  apply Eventually.done
-  grind
+  kfinish swap
 
 -- Stepping demo. Ideally, this demo should be without the first .mov
 def p2 : Program := parse("
@@ -62,9 +58,7 @@ start:
 example [layout : Layout] [Layout.Valid p2] (s : MachineData) :
     (layout p2).Spec s (post := fun st => st.data.regs.rax = 2) := by
   kprologue p2 with s
-  sym => kstep; tactic =>
-  apply Eventually.done
-  rfl
+  kfinish p2
 
 -- Example 3, more sophisticated
 
@@ -91,10 +85,9 @@ theorem p3_correct [layout: Layout] [Layout.Valid p3] (s: MachineData):
   intro h_bounds
   unfold p3_spec at *
   kprologue p3 to "start"
-  sym => kstep; tactic =>
-  kloop
+  kstep
+  kloop at "start"
     (inv := fun i st =>
-      st.pc = (layout p3).label "start" ∧
       st.data.regs.rbx.toNat = i ∧
       i ≤ s.regs.rbx.toNat ∧
       st.data.regs.rdx.toNat = 2 ^ (2 ^ (s.regs.rbx.toNat - i)) ∧
@@ -102,17 +95,16 @@ theorem p3_correct [layout: Layout] [Layout.Valid p3] (s: MachineData):
     (measure := s.regs.rbx.toNat)
     (state := state)
     with k _ ⟨h_rbx_k, h_k_le, h_inv, h_rax⟩
-  · exact ⟨by kaddr p3, rfl, Nat.le_refl _, by simp; decide, fun h => absurd h (Nat.lt_irrefl _)⟩
+  · exact ⟨rfl, Nat.le_refl _, by simp; decide, fun h => absurd h (Nat.lt_irrefl _)⟩
   · by_cases hk : k = 0
     · subst hk
       kprologue p3 at "start" with state
-      sym => kstep; tactic =>
+      kstep
       kprologue p3 at "_end"
-      sym => kstep; tactic =>
       kloop_exit
       exact ⟨by rw [h_inv, Nat.sub_zero], fun h_pos => h_rax h_pos⟩
     · kprologue p3 at "start" to "_end" with state
-      sym => kstep; tactic =>
+      kstep
       rename_i _ b_mul v_mul _ _ _
       have h_pow_eq : rdx.toNat * rdx.toNat = 2 ^ 2 ^ (s.regs.rbx.toNat - (k - 1)) := by
         rw [h_inv, show s.regs.rbx.toNat - (k - 1) = (s.regs.rbx.toNat - k) + 1 by omega]
@@ -126,7 +118,7 @@ theorem p3_correct [layout: Layout] [Layout.Valid p3] (s: MachineData):
       have hv_mul : v_mul = ↑(rdx.toNat * rdx.toNat) := by
         dsimp [v_mul, b_mul, BitVec.unsigned] <;> grind
       kloop_next (k - 1)
-      refine ⟨by kaddr p3, by grind, by omega, ?_, ?_⟩
+      refine ⟨by grind, by omega, ?_, ?_⟩
       · rw [hv_mul, ← h_pow_eq]
         change (BitVec.ofNat 64 (rdx.toNat * rdx.toNat)).toNat = rdx.toNat * rdx.toNat
         rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt h_prod_lt]
@@ -145,9 +137,7 @@ dec %rax")
 example [layout : Layout] [Layout.Valid p4] (s : MachineData) :
     (layout p4).Spec s (post := fun st => st.data.regs.rax = 1) := by
   kprologue p4 with s
-  sym => kstep; tactic =>
-  apply Eventually.done
-  rfl
+  kfinish p4
 
 /- Examples -/
 
@@ -159,9 +149,7 @@ dec %rax")
 example [layout : Layout] [Layout.Valid p5] (s : MachineData) :
     (layout p5).Spec s (post := fun st => st.data.regs.rax = 0) := by
   kprologue p5 with s
-  sym => kstep; tactic =>
-  apply Eventually.done
-  dsimp; grind
+  kfinish p5
 
 def p6 := parse("push %rax
 mov $0, %rax
@@ -176,7 +164,7 @@ theorem p6_correct [layout : Layout] [Layout.Valid p6] (s₀ : MachineData)
       (post := fun st =>
         st.data.regs.rax = s₀.regs.rax ∧ st.data.regs.rsp = s₀.regs.rsp) := by
   kprologue p6 with s₀
-  sym => kstep; tactic =>
+  kstep
   apply Eventually.done
   simp (config := { zetaDelta := true }) only [show (OfNat.ofNat 8 : UInt64) = 8 from rfl]
   grind
@@ -202,9 +190,7 @@ theorem move_2_regs_to_heap_correct [layout : Layout] [Layout.Valid move_2_regs_
         st.data.regs.r13 = s₀.regs.rcx ∧
         st.data.regs.rdi = s₀.regs.rdi) := by
   kprologue move_2_regs_to_heap with s₀
-  sym => kstep; tactic =>
-  apply Eventually.done
-  exact ⟨rfl, rfl, rfl⟩
+  kfinish move_2_regs_to_heap
 
 def sib_example := parse("
     movq $42, %rax
@@ -220,9 +206,7 @@ theorem sib_example_correct [layout : Layout] [Layout.Valid sib_example] (s₀ :
         s₀.dmem =⋆ v @ s₀.regs.rdi + s₀.regs.r15 * 8 ⋆ R)
       (post := fun st => st.data.regs.rax = 42) := by
   kprologue sib_example with s₀
-  sym => kstep; tactic =>
-  apply Eventually.done
-  rfl
+  kfinish sib_example
 
 def alu_mem_example := parse("
     movq $42, %rax
@@ -238,9 +222,7 @@ theorem alu_mem_example_correct [layout : Layout] [Layout.Valid alu_mem_example]
         s₀.dmem =⋆ v @ s₀.regs.rdx + 136 ⋆ R)
       (post := fun st => st.data.regs.rcx = 142) := by
   kprologue alu_mem_example with s₀
-  sym => kstep; tactic =>
-  apply Eventually.done
-  rfl
+  kfinish alu_mem_example
 
 def dynamic_stack_example := parse("
     movq $99, -8(%rsp)
@@ -268,9 +250,7 @@ theorem dynamic_stack_example_correct [layout : Layout] [Layout.Valid dynamic_st
   rw [Mem.At_take_drop_sep stack 1016 _ (by omega) (by omega)] at h_mem
   rw [Mem.At_slice_sep (stack.take 1016) ((r9.toNat + r15.toNat) * 8 + 16) 8 _
     (by simp [lstack]; omega) (by simp [lstack])] at h_mem
-  sym => kstep; tactic =>
-  apply Eventually.done
-  exact ⟨rfl, rfl, rfl⟩
+  kfinish dynamic_stack_example
 
 -- Example 10: Loop zeroing an array of 64-bit words in memory using `tailrec_loop`
 def memset_loop : Program := parse("
@@ -296,8 +276,8 @@ theorem memset_loop_correct [layout : Layout] [Layout.Valid memset_loop] (s₀ :
         (st.data.dmem =⋆ (List.replicate (8 * n) 0) @ s₀.regs.rdi ⋆ R)) := by
   rintro ⟨hn, h_rcx, h_len, h_bound, h_mem⟩
   kloop
+    (pc := layout.start)
     (inv := fun v (ptr, bs, frame) st =>
-      st.pc = layout.start ∧
       0 < v ∧
       st.data.regs.rcx.toNat = v ∧
       st.data.regs.rdi.toBitVec = ptr ∧
@@ -313,18 +293,16 @@ theorem memset_loop_correct [layout : Layout] [Layout.Valid memset_loop] (s₀ :
     (state := s)
     with v ⟨ptr, bs, frame⟩ ⟨hv, h_rcx, rfl, h_bs_len, h_bs_bound, h_mem⟩
   · kloop_next
-    exact ⟨rfl, hn, h_rcx, rfl, h_len, h_bound, h_mem⟩
+    exact ⟨hn, h_rcx, rfl, h_len, h_bound, h_mem⟩
   · by_cases hv1 : v = 1
     · subst hv1
       kprologue memset_loop with s
-      sym => kstep; tactic =>
       kloop_exit
-      exact ⟨by grind, by grind, by ecancel⟩
+      kfinish memset_loop
     · kprologue memset_loop with s
       rw [Mem.At_take_drop_sep bs 8 rdi.toBitVec (by omega) h_bs_bound] at h_mem
-      sym => kstep; tactic =>
       kloop_next (v - 1) (rdi.toBitVec + 8#64, bs.drop 8, (List.replicate 8 0) @ rdi ⋆ frame)
-      · exact ⟨rfl, by grind, by grind, by grind, by simp [h_bs_len]; omega, by simp; omega, by ecancel⟩
+      · exact ⟨by grind, by grind, by grind, by simp [h_bs_len]; omega, by simp; omega, by ecancel⟩
       rintro t_s ⟨hQ_rcx, hQ_rdi, hQ_mem⟩
       refine ⟨hQ_rcx, by grind, ?_⟩
       rw [Mem.At_take_drop_sep _ 8 _ (by simp; omega) (by simp; omega)]
@@ -355,8 +333,7 @@ theorem swap_mem_block_spec [layout : Layout] [Labels] (s₀ : MachineData)
         st.data.regs.rsi = s₀.regs.rsi ∧
         (st.data.dmem =⋆ y @ s₀.regs.rdi ⋆ x @ s₀.regs.rsi ⋆ R)) := by
   kprologue swap_mem_block with s₀
-  sym => kstep; tactic =>
-  refine ⟨by kaddr swap_mem_block, by grind, by grind, trivial, trivial, by ecancel⟩
+  kfinish swap_mem_block
 
 -- A larger program that embeds `swap_mem_block` and follows it with a second basic block `finish:`
 def swap_and_add : Program := parse("
@@ -369,26 +346,21 @@ finish:
 ")
 
 -- Separate basic-block lemma for the `finish:` block within `swap_and_add`
-theorem swap_and_add_finish_spec [layout : Layout] [Layout.Valid swap_and_add] (s : MachineData) :
-    (layout swap_and_add).Spec s
-      (pc := (layout swap_and_add).label "finish")
-      (post := fun st =>
-        st.data.regs.rax = s.regs.rax + s.regs.rcx ∧
-        st.data.dmem = s.dmem) := by
+block_spec swap_and_add_finish_spec swap_and_add s
+  from "finish"
+  (post := fun st =>
+    st.data.regs.rax = s.regs.rax + s.regs.rcx ∧
+    st.data.dmem = s.dmem) := by
   kprologue swap_and_add at "finish" with s
-  sym => kstep; tactic =>
-  apply Eventually.done
-  exact ⟨by grind, rfl⟩
+  kfinish swap_and_add
 
 -- Composing the standalone `swap_mem_block_spec` (`step1_subprog`) with `swap_and_add_finish_spec` (`Spec.bind_at`)
-theorem swap_and_add_correct [layout : Layout] [Layout.Valid swap_and_add] (s₀ : MachineData)
-    (x y : UInt64) (R : DataMem → Prop) :
-    (layout swap_and_add).Spec s₀
-      (pre :=
-        s₀.dmem =⋆ x @ s₀.regs.rdi ⋆ y @ s₀.regs.rsi ⋆ R)
-      (post := fun st =>
-        st.data.regs.rax = x.toBitVec + y.toBitVec ∧
-        (st.data.dmem =⋆ y @ s₀.regs.rdi ⋆ x @ s₀.regs.rsi ⋆ R)) := by
+block_spec swap_and_add_correct swap_and_add s₀ (x y : UInt64) (R : DataMem → Prop)
+  (pre :=
+    s₀.dmem =⋆ x @ s₀.regs.rdi ⋆ y @ s₀.regs.rsi ⋆ R)
+  (post := fun st =>
+    st.data.regs.rax = x.toBitVec + y.toBitVec ∧
+    (st.data.dmem =⋆ y @ s₀.regs.rdi ⋆ x @ s₀.regs.rsi ⋆ R)) := by
   intro h_mem
   refine step1_subprog 0 (swap_mem_block_spec s₀ x y R) h_mem (by rfl) (by kaddr swap_and_add) ?_
   rintro s₁ ⟨h_rax, h_rcx, -, -, h_mem₁⟩
@@ -411,38 +383,27 @@ theorem swap_mem_block_ct_spec [layout : Layout] [Labels] (x_ptr y_ptr : BitVec 
           st.data.regs.rdi = x_ptr ∧
           st.data.regs.rsi = y_ptr ∧
           (st.data.dmem =⋆ y @ x_ptr ⋆ x @ y_ptr ⋆ R)) := by
-  kintro s₀ x y R
   kprologue swap_mem_block with s₀
-  kstep
-  kdone
-  refine ⟨by kaddr swap_mem_block, by grind, by grind, by assumption, by assumption, by ecancel⟩
+  kfinish swap_mem_block
 
 -- Constant-time specification for the `finish:` block within `swap_and_add`
-theorem swap_and_add_finish_ct_spec [layout : Layout] [Layout.Valid swap_and_add] :
-    ∃ tr, ∀ (s : MachineData),
-      (layout swap_and_add).Spec s
-        (pc := (layout swap_and_add).label "finish")
-        (trace := some tr)
-        (post := fun st =>
-          st.data.regs.rax = s.regs.rax + s.regs.rcx ∧
-          st.data.dmem = s.dmem) := by
-  kintro s
+block_spec swap_and_add_finish_ct_spec swap_and_add s
+  from "finish" ct
+  (post := fun st =>
+    st.data.regs.rax = s.regs.rax + s.regs.rcx ∧
+    st.data.dmem = s.dmem) := by
   kprologue swap_and_add at "finish" with s
-  kstep
-  kdone
-  exact ⟨by grind, rfl⟩
+  kfinish swap_and_add
 
 -- Composing `swap_mem_block_ct_spec` (`step1_subprog_traced`) with `swap_and_add_finish_ct_spec` (`Spec.bind_at_traced`)
-theorem swap_and_add_ct_correct [layout : Layout] [Layout.Valid swap_and_add] (x_ptr y_ptr : BitVec 64) :
-    ∃ tr, ∀ (s₀ : MachineData) (x y : UInt64) (R : DataMem → Prop),
-      (layout swap_and_add).Spec s₀
-        (trace := some tr)
-        (pre :=
-          s₀.regs.rdi = x_ptr ∧ s₀.regs.rsi = y_ptr ∧
-          (s₀.dmem =⋆ x @ x_ptr ⋆ y @ y_ptr ⋆ R))
-        (post := fun st =>
-          st.data.regs.rax = x.toBitVec + y.toBitVec ∧
-          (st.data.dmem =⋆ y @ x_ptr ⋆ x @ y_ptr ⋆ R)) := by
+block_spec swap_and_add_ct_correct swap_and_add (x_ptr y_ptr : BitVec 64)
+    s₀ (x y : UInt64) (R : DataMem → Prop) ct
+  (pre :=
+    s₀.regs.rdi = x_ptr ∧ s₀.regs.rsi = y_ptr ∧
+    (s₀.dmem =⋆ x @ x_ptr ⋆ y @ y_ptr ⋆ R))
+  (post := fun st =>
+    st.data.regs.rax = x.toBitVec + y.toBitVec ∧
+    (st.data.dmem =⋆ y @ x_ptr ⋆ x @ y_ptr ⋆ R)) := by
   kintro s₀ x y R ⟨h_rdi, h_rsi, h_mem⟩
   refine step1_subprog_traced 0 ((swap_mem_block_ct_spec x_ptr y_ptr).choose_spec s₀ x y R)
     ⟨h_rdi, h_rsi, h_mem⟩ (by rfl) (by kaddr swap_and_add) ?_
