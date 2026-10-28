@@ -1,42 +1,28 @@
 module
 
--- The reference semantics are taken from https://www.felixcloutier.com/x86/,
--- which itself is just extracted from https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
-
 import Kraken.Attribute
 public import Kraken.Layout
 public import Kraken.Mem
-meta import Kraken.Mem
+public meta import Kraken.Mem
 public import Kraken.Semantics
-meta import Kraken.Semantics
+public meta import Kraken.Semantics
 public import Kraken.Frame
 public import Kraken.X64.Syntax
-meta import Kraken.X64.Syntax
+public meta import Kraken.X64.Syntax
 public import Lean.ToExpr
 meta import Lean.Elab.Deriving.ToExpr
 
+/-!
+# x86-64 Instruction Semantics
+
+Operational semantics for x86-64 instructions, registers, status flags, operands, and directives,
+together with value-level flag projections (`@[kcond]`) and carry-chain limb identities.
+Reference: Intel SDM (via https://www.felixcloutier.com/x86/).
+-/
+
 @[expose] public section
 
-attribute [kstep] BitVec.extractLsb'
-
-def BitVec.replaceLow {w n} (old : BitVec w) (new : BitVec n) : BitVec w :=
-  (BitVec.append (old.drop n) new).setWidth _
-
-theorem BitVec.setWidth_replaceLow {w n : Nat} (old : BitVec w) (v : BitVec n) (h : n ≤ w := by decide) :
-    BitVec.setWidth n (old.replaceLow v) = v := by
-  ext i hi
-  simp [BitVec.replaceLow, BitVec.drop, BitVec.getLsbD_append]
-  grind
-
-@[simp, ksimp]
-theorem BitVec.setWidth_8_replaceLow_8 (old : BitVec 64) (v : BitVec 8) :
-    BitVec.setWidth 8 (old.replaceLow v) = v :=
-  BitVec.setWidth_replaceLow old v
-
-@[simp, ksimp]
-theorem BitVec.setWidth_16_replaceLow_16 (old : BitVec 64) (v : BitVec 16) :
-    BitVec.setWidth 16 (old.replaceLow v) = v :=
-  BitVec.setWidth_replaceLow old v
+/-! ### Registers and Register File -/
 
 namespace Reg
 @[kstep] def base {w} (r : Reg w) : Reg64 := match r with
@@ -72,7 +58,7 @@ structure Reg64s where
   r13 : UInt64 := 0
   r14 : UInt64 := 0
   r15 : UInt64 := 0
-  deriving Repr, BEq, DecidableEq, Hashable, Hashable, Lean.ToExpr
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
 @[kstep] def Reg64s.get64 (s : Reg64s) (r : Reg64) : Width.W64.type := UInt64.toBitVec (match r with
   | .rax => s.rax | .rbx => s.rbx | .rcx => s.rcx | .rdx => s.rdx
@@ -93,13 +79,13 @@ structure Reg64s where
 
 @[kstep] def Reg64s.get (s : Reg64s) {w} (r : Reg w) : w.type :=
   ((s.get64 r.base).drop r.offset).take w.bits
-  -- BitVec because it may be signed or unsigned depending on context
 
 @[kstep] def Reg64s.set (s : Reg64s) {w} (r : Reg w) (v : w.type) : Reg64s := match r with
   | .low r .W64 => s.set64 r v
   | .low r .W32 => s.set64 r (v.zeroExtend _)
-  | .low r w => s.set64 r ((s.get64 r).replaceLow v)
-  | .ah | .bh | .ch | .dh => let old := s.get64 r.base;
+  | .low r _ => s.set64 r ((s.get64 r).replaceLow v)
+  | .ah | .bh | .ch | .dh =>
+    let old := s.get64 r.base
     s.set64 r.base (old.replaceLow (BitVec.append v (s.get (.low r.base .W8))))
 
 /-- Register file view of `Reg64s` for frame ("modifies") clauses: `r' ≡ r except [rax, rcx]`. -/
@@ -138,7 +124,7 @@ theorem Reg64s.CalleeSavedEq.trans {r₁ r₂ r₃ : Reg64s}
   grind
 
 def ZmmValue : Type := BitVec 512
-  deriving Repr, BEq, DecidableEq, Hashable, Hashable, Lean.ToExpr
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
 def zmmZero : ZmmValue := 0#512
 
@@ -175,7 +161,7 @@ structure RegZmms where
   zmm29 : ZmmValue := zmmZero
   zmm30 : ZmmValue := zmmZero
   zmm31 : ZmmValue := zmmZero
-  deriving Repr, BEq, DecidableEq, Hashable, Hashable, Lean.ToExpr
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
 def RegZmms.get512 (s : RegZmms) (r : RegMm) : AvxWidth.W512.type := (match r with
   | .mm0  => s.zmm0  | .mm1  => s.zmm1  | .mm2  => s.zmm2  | .mm3  => s.zmm3
@@ -215,51 +201,11 @@ def RegZmms.set (s : RegZmms) {w} (r : AvxReg w) (v : w.type) : RegZmms := match
   | .xmm r => s.set512 r (v.zeroExtend _)
 
 def RegZmms.setLegacy (s : RegZmms) {w} (r : AvxReg w) (v : w.type) : RegZmms := match r with
-  | .zmm r => s.set512 r v  -- impossible
-  | .ymm r => s.set512 r ((s.get512 r).replaceLow v)  -- impossible
+  | .zmm r => s.set512 r v
+  | .ymm r => s.set512 r ((s.get512 r).replaceLow v)
   | .xmm r => s.set512 r ((s.get512 r).replaceLow v)
 
-@[kstep]
-def BitVec.toAddressSize [address_size: AddressSize] (w: BitVec 64): BitVec address_size.address_size.bits :=
-  w.take address_size.address_size.bits
-
--- TODO: consider adding a `split` helper to switch representations between
--- u128, 4xu32, etc.
-def BitVec.packedBinOp {w : Nat} (c : Nat) (op : BitVec c → BitVec c → BitVec c) (a b : BitVec w) : BitVec w :=
-  if _ : c = 0 ∨ w < c then
-    a -- Fallback/Base case (w = 0 or invalid chunk size)
-  else
-    -- Extract the lowest chunk
-    let a_low := a.take c
-    let b_low := b.take c
-    let res_low := op a_low b_low
-
-    -- Recursively process the remaining high bits
-    let a_high := a.drop c
-    let b_high := b.drop c
-    let res_high := BitVec.packedBinOp c op a_high b_high
-
-    -- Recombine: res_high is the high part, res_low is the low part
-    (BitVec.append res_high res_low).setWidth _
-termination_by w
-decreasing_by omega
-
-def BitVec.toFloat32 (v : BitVec 32) : Float32 :=
-  Float32.ofBits (UInt32.ofBitVec v)
-
-def Float32.toBitVec (f : Float32) : BitVec 32 :=
-  UInt32.toBitVec (Float32.toBits f)
-
-/-- An SSE single-precision operation on one lane: a NaN operand propagates (quieted, the first
-operand winning), and an invalid operation gives the default NaN ("QNaN floating-point
-indefinite"). In binary32, `0x400000` is bit 22, the most significant fraction bit, which makes a
-NaN quiet; `0xffc00000` (sign set, exponent all ones, fraction `100…0`) is the default NaN.
-Lean's `Float32` can't express this: its logical model has a single NaN (all NaNs are equal), so
-every NaN result reads back as `0x7fc00000`. -/
-def sseBinOp (op : Float32 → Float32 → Float32) (a b : BitVec 32) : BitVec 32 :=
-  if a.toFloat32.isNaN then a ||| 0x400000#32
-  else if b.toFloat32.isNaN then b ||| 0x400000#32
-  else let r := op a.toFloat32 b.toFloat32; if r.isNaN then 0xffc00000#32 else r.toBitVec
+/-! ### Status Flags -/
 
 structure StatusFlags where
   cf : Bool
@@ -270,194 +216,20 @@ structure StatusFlags where
   of : Bool
   deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
-structure MachineData where -- does not include code or program position
-  regs : Reg64s := {}
-  zmms : RegZmms := {}
-  status : StatusFlags := .mk false false false false false false
-  dmem : DataMem := ∅
-  deriving Repr, BEq, DecidableEq
-
-@[reducible]
-instance : HasDataMem MachineData where
-  dmem s := s.dmem
-  withDmem s dmem := { s with dmem }
-
-instance (w : AvxWidth) : NondetSupportingType w.type where
-  from_hash h := h.toBitVec.setWidth w.bits
-
-instance : NondetSupportingType StatusFlags where
-  from_hash h := let h := h.toBitVec; (.mk h[0] h[1] h[2] h[3] h[4] h[5])
-
-abbrev MachineState := Kraken.MachineState MachineData
-abbrev Effects := Kraken.Effects MachineData
-
--- the unused `Std.Rco Int64` argument and the unmodified `MachineData` return
--- value are present for uniformity with RegOrMem.interp
-@[kstep] def Reg.interp {w} (r : Reg w) (s : MachineData) (_ : Std.Rco Int64)
-  (ret : w.type → MachineData → Effects) : Effects :=
-  ret (s.regs.get r) s
-
--- Alternatively, we could define this in terms of BitVecs without %:
--- (addr &&& BitVec.ofNat 64 (bytes - 1)) == 0#64
-def isAligned (bytes : Nat) (addr : BitVec 64) : Bool :=
-  addr.toNat % bytes == 0
-
--- Legacy SSE instructions are generally stricter about alignment requirements,
--- while AVX (VEX-encoded) instructions can mostly deal with unaligned
--- addresses (https://discourse.llvm.org/t/memory-alignment-model-on-avx-avx2-and-avx-512-targets/34705).
--- For this reason we default checkAlign to false.
-def MachineData.loadAvx
-  (s : MachineData) (addr : BitVec 64) (w : AvxWidth)
-  (ret : w.type → MachineData → Effects) (checkAlign : Bool := false) : Effects :=
-  if checkAlign && !(isAligned w.bytes addr) then
-    .unaligned addr w.bytes
-  else
-    require_read_access addr .W64 (fun _unit =>
-  match Mem.loadInt s.dmem addr w.bytes with
-      | .some i => ret (.ofInt _ i) s
-      | .none => unimplemented "AVX nonmem load not supported")
-
-def MachineData.storeAvx (s : MachineData) (addr : BitVec 64) {w : AvxWidth} (v : w.type) (ret: MachineData → Effects) (checkAlign : Bool := false) : Effects :=
-  if checkAlign && !(isAligned w.bytes addr) then
-    .unaligned addr w.bytes
-  else
-    require_write_access addr .W64 (fun _unit =>
-  match Mem.loadInt s.dmem addr w.bytes with
-      | .some _ =>
-          ret { s with dmem := Mem.storeInt s.dmem addr w.bytes v.toInt }
-      | .none => unimplemented "AVX nonmem store not supported")
-
-@[kstep] def ConstExpr.interp [Labels] : ConstExpr → Std.Rco _root_.Int64 → _root_.Int64
-  | .label l, _ => Labels.label l
-  | .int64 i, _ => i
-  | .before_current_instruction, r => r.lower
-  | .after_current_instruction, r => r.upper
-  | .add e1 e2, p => e1.interp p + e2.interp p
-  | .sub e1 e2, p => e1.interp p - e2.interp p
-
-@[kstep] def AddrExpr.interp [Labels] [address_size : AddressSize] (a : AddrExpr) (s : Reg64s) (p : Std.Rco Int64) :=
-  let base := match a.base with
-              | .some (.reg r) => (s.get64 r).toAddressSize.signed
-              | .some .rip => p.upper.toInt
-              | .none => 0
-  let idx := match a.idx with
-             | .some ⟨r, c⟩ => (s.get64 r).toAddressSize.signed * c.bytes
-             | .none => 0
-  BitVec.ofInt address_size.address_size.bits (base + idx + (a.disp.interp p).toInt)
-
-@[kstep] def RegOrMem.interp {w} [Labels] [AddressSize]
-  (o : RegOrMem w) (s : MachineData) (p : Std.Rco Int64)
-  (ret : w.type → MachineData → Effects) :=
-match o with
-  | .reg r => ret (s.regs.get r) s
-  | .mem a => MachineData.load s ((a.interp s.regs p).zeroExtend _) w ret
-
-def AvxRegOrMem.interp {w} [Labels] [AddressSize]
-  (o : AvxRegOrMem w) (s : MachineData) (p : Std.Rco Int64)
-  (ret : w.type → MachineData → Effects) (checkAlign : Bool := false) :=
-match o with
-  | .avx r => ret (s.zmms.get r) s
-  | .mem a => s.loadAvx ((a.interp s.regs p).zeroExtend _) w ret checkAlign
-
-@[kstep]
-def MachineData.setReg (s : MachineData) {w} (r : Reg w) (v : w.type) : MachineData :=
-  { s with regs := s.regs.set r v }
-
-def MachineData.setAvxReg (s : MachineData) {w : AvxWidth} (r : AvxReg w) (v : w.type) : MachineData :=
-  { s with zmms := s.zmms.set r v }
-
-def MachineData.setAvxLegacyReg (s : MachineData) {w : AvxWidth} (r : AvxReg w) (v : w.type) : MachineData :=
-  { s with zmms := s.zmms.setLegacy r v }
-
-@[kstep]
-def MachineData.set {w} [Labels] [AddressSize] (s : MachineData) (d : Dst w) (v : w.type) (p : Std.Rco Int64) (ret : MachineData → Effects) : Effects :=
-  match d with
-  | .reg r => ret (s.setReg r v)
-  | .mem a => MachineData.store s ((a.interp s.regs p).zeroExtend _) v ret
-
-def MachineData.setAvx {aw} [Labels] [AddressSize] (s : MachineData) (d : AvxDst aw) (v : aw.type) (p : Std.Rco Int64) (ret : MachineData → Effects) (checkAlign : Bool := false) : Effects :=
-match d with
-  | .avx r => ret (s.setAvxReg r v)
-  | .mem a => s.storeAvx ((a.interp s.regs p).zeroExtend _) v ret checkAlign
-
-def MachineData.setAvxLegacy {w} [Labels] [AddressSize] (s : MachineData) (d : AvxDst w) (v : w.type) (p : Std.Rco Int64) (ret : MachineData → Effects) (checkAlign : Bool := false) : Effects :=
-match d with
-  | .avx r => ret (s.setAvxLegacyReg r v)
-  | .mem a => s.storeAvx ((a.interp s.regs p).zeroExtend _) v ret checkAlign
-
-@[kstep] def Operand.interp {w} [Labels] [AddressSize]
-  (o : Operand w) (s : MachineData) (p : Std.Rco Int64)
-  (ret : w.type → MachineData → Effects) :=
-  match o with
-  | regOrMem rm => rm.interp s p ret
-  | .imm v => ret ((v.interp p).toBitVec.truncate _) s
-  -- we rely on assemblers erroring out on too-large immediates in uniform ops
-
-def AvxOperand.interp {aw} [Labels] [AddressSize]
-  (o : AvxOperand aw) (s : MachineData) (p : Std.Rco Int64)
-  (ret : aw.type → MachineData → Effects) (checkAlign : Bool := false) :=
-match o with
-  | regOrMem rm => rm.interp s p ret checkAlign
-
-@[kstep]
-def CondCode.interp (cc : CondCode) (s : StatusFlags) : Bool := match cc with
-  | .o  => s.of | .no => !s.of
-  | .c  => s.cf | .nc => !s.cf
-  | .z  => s.zf | .nz => !s.zf
-  | .be => s.cf || s.zf | .a  => !s.cf && !s.zf
-  | .s  => s.sf | .ns => !s.sf
-  | .p  => s.pf | .np => !s.pf
-  | .l  => s.sf != s.of | .ge => s.sf == s.of
-  | .le => (s.sf != s.of) || s.zf | .g  => !s.zf && (s.sf == s.of)
-
-@[kstep] def ShiftCountExpr.interp [Labels] (c : ShiftCountExpr) (s : MachineData) (p : Std.Rco Int64) := match c with
-  | .cl => s.regs.rcx.toBitVec.take 8
-  | .imm8 v => (v.interp p).toBitVec.take _
-@[kstep] def ShiftCountExpr.interpMasked [Labels] (c : ShiftCountExpr) (s : MachineData) (p : Std.Rco Int64) (w : Width) : Nat :=
-  (c.interp s p).toNat &&& match w with | .W64 => 0x3f | _ => 0x1f -- "masked to 5 bits (or 6 bits with a 64-bit operand)"
-
-@[kstep] def RelRegOrMem.interp [Labels] [AddressSize]
-  (o : RelRegOrMem) (s : MachineData) (p : Std.Rco Int64)
-  (ret : BitVec 64 → MachineData → Effects) :=
-  match o with
-  | .rel c => ret (p.upper + c.interp p).toBitVec s
-  | .reg r => ret (s.regs.get r) s
-  | .mem a => MachineData.load s ((a.interp s.regs p).zeroExtend _) .W64 ret
-
 structure StatusFlags.from_result.Remaining where
   cf : Bool
   af : Bool
   of : Bool
   deriving Repr, BEq, DecidableEq
 
--- TEMPORARY: definitions stolen from Lean 4.28's standard library, but with a
--- different name so that this file builds with both 4.27 and 4.28
-namespace BitVec
-def cpopNatRec_ {w} (x : BitVec w) (pos acc : Nat) : Nat :=
-  match pos with
-  | 0 => acc
-  | n + 1 => x.cpopNatRec_ n (acc + (x.getLsbD n).toNat)
-
-def cpop_ {w} (x : BitVec w) : BitVec w := BitVec.ofNat w (cpopNatRec_ x w 0)
-end BitVec
-
 @[kstep] def StatusFlags.from_result {w} (result : BitVec w) (f : from_result.Remaining) : StatusFlags :=
   { pf := (result.take 8).cpop_ % 2 == BitVec.zero _
     zf := result == BitVec.zero _
     sf := result.msb, cf := f.cf, af := f.af, of := f.of }
 
-/-! ### Flag-setting arithmetic
-
-The flag functions below are the abstraction boundary for symbolic execution: `kstep` does not
-unfold them (they are deliberately not `@[kstep]`/`@[simp]`), so a state after `cmp %rbx, %rax`
-reads `status := StatusFlags.sub rax rbx`, and the projection lemmas at the end of this file
-(`StatusFlags.sub_cf : (sub a b).cf = decide (a.toNat < b.toNat)`, …) present the individual
-flags as decided value-level facts when a condition code or a carry-in reads them.
-
-The definitions follow the architecture reference: a flag is set iff the wrapped result differs
-from the exact (unbounded) result. -/
-
-/-- Flags of `add`: `v = a + b`. -/
+/-- Flag-setting arithmetic abstraction boundary: `kstep` keeps these unexpanded so symbolic states
+record e.g. `status := StatusFlags.sub rax rbx`, and `@[kcond]` projection lemmas reduce individual
+flags to decided value-level propositions when read by a condition code or carry-in. -/
 def StatusFlags.add {w} (a b : BitVec w) : StatusFlags :=
   let v := a + b
   StatusFlags.from_result v {
@@ -517,7 +289,172 @@ def StatusFlags.neg {w} (b : BitVec w) : StatusFlags :=
 def StatusFlags.logical {w} (v : BitVec w) (af : Bool) : StatusFlags :=
   StatusFlags.from_result v { cf := false, af, of := false }
 
+@[kstep]
+def CondCode.interp (cc : CondCode) (s : StatusFlags) : Bool := match cc with
+  | .o  => s.of | .no => !s.of
+  | .c  => s.cf | .nc => !s.cf
+  | .z  => s.zf | .nz => !s.zf
+  | .be => s.cf || s.zf | .a  => !s.cf && !s.zf
+  | .s  => s.sf | .ns => !s.sf
+  | .p  => s.pf | .np => !s.pf
+  | .l  => s.sf != s.of | .ge => s.sf == s.of
+  | .le => (s.sf != s.of) || s.zf | .g  => !s.zf && (s.sf == s.of)
 
+/-! ### Machine State and Memory Helpers -/
+
+structure MachineData where
+  regs : Reg64s := {}
+  zmms : RegZmms := {}
+  status : StatusFlags := .mk false false false false false false
+  dmem : DataMem := ∅
+  deriving Repr, BEq, DecidableEq
+
+@[reducible]
+instance : HasDataMem MachineData where
+  dmem s := s.dmem
+  withDmem s dmem := { s with dmem }
+
+instance (w : AvxWidth) : NondetSupportingType w.type where
+  from_hash h := h.toBitVec.setWidth w.bits
+
+instance : NondetSupportingType StatusFlags where
+  from_hash h := let h := h.toBitVec; (.mk h[0] h[1] h[2] h[3] h[4] h[5])
+
+abbrev MachineState := Kraken.MachineState MachineData
+abbrev Effects := Kraken.Effects MachineData
+
+def isAligned (bytes : Nat) (addr : BitVec 64) : Bool :=
+  addr.toNat % bytes == 0
+
+/-- Load an AVX vector operand from memory. VEX-encoded AVX instructions generally permit
+unaligned addresses while legacy SSE instructions require alignment (`checkAlign := true`). -/
+def MachineData.loadAvx
+  (s : MachineData) (addr : BitVec 64) (w : AvxWidth)
+  (ret : w.type → MachineData → Effects) (checkAlign : Bool := false) : Effects :=
+  if checkAlign && !(isAligned w.bytes addr) then
+    .unaligned addr w.bytes
+  else
+    require_read_access addr .W64 (fun _unit =>
+      match Mem.loadInt s.dmem addr w.bytes with
+      | .some i => ret (.ofInt _ i) s
+      | .none => unimplemented "AVX nonmem load not supported")
+
+def MachineData.storeAvx (s : MachineData) (addr : BitVec 64) {w : AvxWidth} (v : w.type)
+    (ret : MachineData → Effects) (checkAlign : Bool := false) : Effects :=
+  if checkAlign && !(isAligned w.bytes addr) then
+    .unaligned addr w.bytes
+  else
+    require_write_access addr .W64 (fun _unit =>
+      match Mem.loadInt s.dmem addr w.bytes with
+      | .some _ =>
+          ret { s with dmem := Mem.storeInt s.dmem addr w.bytes v.toInt }
+      | .none => unimplemented "AVX nonmem store not supported")
+
+/-- Single-precision SSE lane operation: a NaN operand propagates quieted (`0x400000` sets the
+quiet bit), and an invalid operation yields the default quiet NaN `0xffc00000`. -/
+def sseBinOp (op : Float32 → Float32 → Float32) (a b : BitVec 32) : BitVec 32 :=
+  if a.toFloat32.isNaN then a ||| 0x400000#32
+  else if b.toFloat32.isNaN then b ||| 0x400000#32
+  else let r := op a.toFloat32 b.toFloat32; if r.isNaN then 0xffc00000#32 else r.toBitVec
+
+@[kstep]
+def MachineData.setReg (s : MachineData) {w} (r : Reg w) (v : w.type) : MachineData :=
+  { s with regs := s.regs.set r v }
+
+def MachineData.setAvxReg (s : MachineData) {w : AvxWidth} (r : AvxReg w) (v : w.type) : MachineData :=
+  { s with zmms := s.zmms.set r v }
+
+def MachineData.setAvxLegacyReg (s : MachineData) {w : AvxWidth} (r : AvxReg w) (v : w.type) : MachineData :=
+  { s with zmms := s.zmms.setLegacy r v }
+
+/-! ### Operand and Address Evaluation -/
+
+@[kstep]
+def BitVec.toAddressSize [address_size : AddressSize] (w : BitVec 64) : BitVec address_size.address_size.bits :=
+  w.take address_size.address_size.bits
+
+@[kstep] def Reg.interp {w} (r : Reg w) (s : MachineData) (_ : Std.Rco Int64)
+  (ret : w.type → MachineData → Effects) : Effects :=
+  ret (s.regs.get r) s
+
+@[kstep] def ConstExpr.interp [Labels] : ConstExpr → Std.Rco _root_.Int64 → _root_.Int64
+  | .label l, _ => Labels.label l
+  | .int64 i, _ => i
+  | .before_current_instruction, r => r.lower
+  | .after_current_instruction, r => r.upper
+  | .add e1 e2, p => e1.interp p + e2.interp p
+  | .sub e1 e2, p => e1.interp p - e2.interp p
+
+@[kstep] def AddrExpr.interp [Labels] [address_size : AddressSize] (a : AddrExpr) (s : Reg64s) (p : Std.Rco Int64) :=
+  let base := match a.base with
+              | .some (.reg r) => (s.get64 r).toAddressSize.signed
+              | .some .rip => p.upper.toInt
+              | .none => 0
+  let idx := match a.idx with
+             | .some ⟨r, c⟩ => (s.get64 r).toAddressSize.signed * c.bytes
+             | .none => 0
+  BitVec.ofInt address_size.address_size.bits (base + idx + (a.disp.interp p).toInt)
+
+@[kstep] def RegOrMem.interp {w} [Labels] [AddressSize]
+  (o : RegOrMem w) (s : MachineData) (p : Std.Rco Int64)
+  (ret : w.type → MachineData → Effects) :=
+  match o with
+  | .reg r => ret (s.regs.get r) s
+  | .mem a => MachineData.load s ((a.interp s.regs p).zeroExtend _) w ret
+
+def AvxRegOrMem.interp {w} [Labels] [AddressSize]
+  (o : AvxRegOrMem w) (s : MachineData) (p : Std.Rco Int64)
+  (ret : w.type → MachineData → Effects) (checkAlign : Bool := false) :=
+  match o with
+  | .avx r => ret (s.zmms.get r) s
+  | .mem a => s.loadAvx ((a.interp s.regs p).zeroExtend _) w ret checkAlign
+
+@[kstep]
+def MachineData.set {w} [Labels] [AddressSize] (s : MachineData) (d : Dst w) (v : w.type) (p : Std.Rco Int64) (ret : MachineData → Effects) : Effects :=
+  match d with
+  | .reg r => ret (s.setReg r v)
+  | .mem a => MachineData.store s ((a.interp s.regs p).zeroExtend _) v ret
+
+def MachineData.setAvx {aw} [Labels] [AddressSize] (s : MachineData) (d : AvxDst aw) (v : aw.type) (p : Std.Rco Int64) (ret : MachineData → Effects) (checkAlign : Bool := false) : Effects :=
+  match d with
+  | .avx r => ret (s.setAvxReg r v)
+  | .mem a => s.storeAvx ((a.interp s.regs p).zeroExtend _) v ret checkAlign
+
+def MachineData.setAvxLegacy {w} [Labels] [AddressSize] (s : MachineData) (d : AvxDst w) (v : w.type) (p : Std.Rco Int64) (ret : MachineData → Effects) (checkAlign : Bool := false) : Effects :=
+  match d with
+  | .avx r => ret (s.setAvxLegacyReg r v)
+  | .mem a => s.storeAvx ((a.interp s.regs p).zeroExtend _) v ret checkAlign
+
+@[kstep] def Operand.interp {w} [Labels] [AddressSize]
+  (o : Operand w) (s : MachineData) (p : Std.Rco Int64)
+  (ret : w.type → MachineData → Effects) :=
+  match o with
+  | regOrMem rm => rm.interp s p ret
+  | .imm v => ret ((v.interp p).toBitVec.truncate _) s
+
+def AvxOperand.interp {aw} [Labels] [AddressSize]
+  (o : AvxOperand aw) (s : MachineData) (p : Std.Rco Int64)
+  (ret : aw.type → MachineData → Effects) (checkAlign : Bool := false) :=
+  match o with
+  | regOrMem rm => rm.interp s p ret checkAlign
+
+@[kstep] def ShiftCountExpr.interp [Labels] (c : ShiftCountExpr) (s : MachineData) (p : Std.Rco Int64) := match c with
+  | .cl => s.regs.rcx.toBitVec.take 8
+  | .imm8 v => (v.interp p).toBitVec.take _
+
+/-- Shift counts are masked to 5 bits (or 6 bits for 64-bit operands). -/
+@[kstep] def ShiftCountExpr.interpMasked [Labels] (c : ShiftCountExpr) (s : MachineData) (p : Std.Rco Int64) (w : Width) : Nat :=
+  (c.interp s p).toNat &&& match w with | .W64 => 0x3f | _ => 0x1f
+
+@[kstep] def RelRegOrMem.interp [Labels] [AddressSize]
+  (o : RelRegOrMem) (s : MachineData) (p : Std.Rco Int64)
+  (ret : BitVec 64 → MachineData → Effects) :=
+  match o with
+  | .rel c => ret (p.upper + c.interp p).toBitVec s
+  | .reg r => ret (s.regs.get r) s
+  | .mem a => MachineData.load s ((a.interp s.regs p).zeroExtend _) .W64 ret
+
+/-! ### Instruction and Directive Semantics -/
 
 set_option maxHeartbeats 1000000
 @[kstep] def Operation.interp [Labels] [address_size : AddressSize]
@@ -542,7 +479,7 @@ set_option maxHeartbeats 1000000
     src.interp s p (fun src s =>
     let v := if cc.interp s.status then src else s.regs.get dst
     next (s.setReg dst v))
--- Arithmetic
+  -- Arithmetic
   | .lea dst src => next (s.setReg dst ((src.interp s.regs p).zeroExtend _))
   | .add dst src =>
     src.interp s p (fun a s =>
@@ -608,11 +545,9 @@ set_option maxHeartbeats 1000000
     src1.interp s p (fun a s =>
     let b := s.regs.get (.low .rdx w)
     let v := a.unsigned * b.unsigned
-    let s := s.setReg r_lo (.ofInt _ v) -- if r_hi = r_li, hi is written:
+    let s := s.setReg r_lo (.ofInt _ v)
     let s := s.setReg r_hi (.ofInt _ (v >>> w.bits))
     next s)
-  -- imul1 and imul collectively describe variants of the same
-  -- syntax level `imul` instruction, where imul1 is the 1-operand case
   | .imul1 src =>
     let a := s.regs.get (Reg.low .rax w)
     src.interp s p (fun b s =>
@@ -637,7 +572,7 @@ set_option maxHeartbeats 1000000
     let cf := v.signed != a.signed * b.signed
     undefined (λ sf => undefined (λ zf => undefined (λ af => undefined (λ pf =>
     next { s with status := { cf := cf, pf, af, zf, sf, of := cf }})))))))
--- Bitwise
+  -- Bitwise
   | .test a b =>
     a.interp s p (fun a s =>
     b.interp s p (fun b s =>
@@ -693,7 +628,6 @@ set_option maxHeartbeats 1000000
       undefined (λ af =>
       (λ setof => if count == 1 then setof (v.msb != a.msb) else undefined setof) (λ of =>
       setstatus (.from_result v { cf, af, of})))) (λ status =>
-    -- The result is undefined if the count exceeds the operand size (only possible for 16 bits).
     (λ setv => if count > w.bits then undefined setv else setv v) (λ v =>
     { s with status }.set dst v p next))))
   | .shld dst src count =>
@@ -769,17 +703,15 @@ set_option maxHeartbeats 1000000
     jmp (.ofBitVec ra) { s with regs := s.regs.set64 .rsp (rsp + 8) })
   | nop _ | nopalign _ _ => next s
 
--- AVX Operations Interpreter
 def AvxOperation.interp [Labels] [address_size : AddressSize]
   {w} (i : AvxOperation w) (p : Std.Rco Int64) (s : MachineData)
   (next : MachineData → Effects) : Effects :=
-match i with
+  match i with
   | .movups dst src => src.interp s p (fun val s => s.setAvxLegacy dst val p next)
   | .vmovups dst src => src.interp s p (fun val s => s.setAvx dst val p next)
   | .movaps dst src =>
     src.interp s p (checkAlign := true)
       (fun val s => s.setAvxLegacy dst val p (checkAlign := true) next)
-  -- TODO: MXCSR
   | .subps dst src =>
     src.interp s p (checkAlign := true) (fun a s =>
     dst.interp s p (fun b s =>
@@ -795,10 +727,10 @@ def Instr.interp [Labels]
   (next : MachineData → Effects) (jmp : Int64 → MachineData → Effects) : Effects :=
   require_exec_access p (fun _unit =>
     match i with
-      | .regular addr_sz op_sz op =>
-          Operation.interp (w := op_sz) (address_size := .mk addr_sz) op p s next jmp
-      | .avx addr_sz op_sz op =>
-          AvxOperation.interp (w := op_sz) (address_size := .mk addr_sz) op p s next
+    | .regular addr_sz op_sz op =>
+        Operation.interp (w := op_sz) (address_size := .mk addr_sz) op p s next jmp
+    | .avx addr_sz op_sz op =>
+        AvxOperation.interp (w := op_sz) (address_size := .mk addr_sz) op p s next
   )
 
 @[kstep] def Directive.interp [Labels]
@@ -833,18 +765,30 @@ theorem Executable.labels_start' [layout : Layout] (l : Label) (rest : List Dire
     layout.start :=
   Executable.labels_start l rest
 
-/-! ## Flags at the value level
+def Directive.fakeSize (hashOfProgram : UInt64) (d : Directive) : Nat :=
+  match d with
+  | .label _ => 0
+  | .instr (.regular _ _ (.nop sz)) => sz
+  | .instr i => (1 + hash (hashOfProgram, i) % 15).toNat
+  | .byteArray bs => bs.size
 
-The projection lemmas of the flag functions (`@[kcond]`: used by `kstep` when deciding branch
-conditions and by `kfinish`) and the limb identities for carry chains. The compare idiom
-(`cmp` followed by a condition code) is covered by the architecture-independent `BitVec.cmp_*`
-lemmas in `Kraken.BitVecArith`. -/
+def Program.fakeLayout (prog : Program) : Executable :=
+  let : Inhabited Directive := .mk (.byteArray (.mk #[]))
+  let h := hash prog
+  let layout : Layout := { start := h.toInt64 <<< 16, size i := prog[i]!.fakeSize h }
+  layout prog
+
+/-! ### Flag Projections and Carry-Chain Lemmas
+
+Projection lemmas of the flag functions (`@[kcond]`, used when deciding branch conditions) and
+limb identities for carry chains. Compare idioms (`cmp` followed by a condition code) are covered
+by `BitVec.cmp_*` in `Kraken.BitVecArith`. -/
 
 namespace StatusFlags
 section
 variable {w : Nat} (a b : BitVec w) (c : Bool)
 
-/-! ### Projections -/
+/-! #### Projections -/
 
 @[simp, kcond] theorem logical_pf (v : BitVec w) (af : Bool) :
     (logical v af).pf = ((v.take 8).cpop_ % 2 == BitVec.zero 8) := rfl
@@ -860,21 +804,12 @@ variable {w : Nat} (a b : BitVec w) (c : Bool)
 @[simp, kcond, grind =] theorem add_zf : (add a b).zf = decide (a + b = 0#w) := by
   simp [add, from_result, Bool.beq_eq_decide_eq]
 @[simp, kcond, grind =] theorem add_sf : (add a b).sf = (a + b).msb := rfl
-@[simp, kcond, grind =] theorem add_cf : (add a b).cf = decide (2 ^ w ≤ a.toNat + b.toNat) := by
-  rw [Bool.eq_iff_iff]
-  simp only [add, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
-  have := BitVec.toNat_add_cases a b
-  omega
+@[simp, kcond, grind =] theorem add_cf : (add a b).cf = decide (2 ^ w ≤ a.toNat + b.toNat) :=
+  BitVec.unsigned_add_bne a b
 @[simp, kcond] theorem add_af :
     (add a b).af = (((a + b).take 4).unsigned != (a.take 4).unsigned + (b.take 4).unsigned) := rfl
-@[simp, kcond, grind =] theorem add_of : (add a b).of = BitVec.saddOverflow a b := by
-  rw [BitVec.saddOverflow_eq_decide]
-  rcases w with _ | w
-  · simp [add, from_result, BitVec.signed, BitVec.of_length_zero]
-  · rw [Bool.eq_iff_iff]
-    simp only [add, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq,
-      BitVec.toInt_add, ne_eq, Int.bmod_two_pow_eq_self_iff (w := w + 1) (by omega)]
-    omega
+@[simp, kcond, grind =] theorem add_of : (add a b).of = BitVec.saddOverflow a b :=
+  BitVec.signed_add_bne a b
 
 @[simp, kcond] theorem adc_pf :
     (adc a b c).pf = (((a + b + BitVec.ofNat w c.toNat).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
@@ -883,49 +818,27 @@ variable {w : Nat} (a b : BitVec w) (c : Bool)
   simp [adc, from_result, Bool.beq_eq_decide_eq]
 @[simp, kcond, grind =] theorem adc_sf : (adc a b c).sf = (a + b + BitVec.ofNat w c.toNat).msb := rfl
 @[simp, kcond, grind =] theorem adc_cf :
-    (adc a b c).cf = decide (2 ^ w ≤ a.toNat + b.toNat + c.toNat) := by
-  rcases Nat.eq_zero_or_pos w with rfl | hw
-  · cases c <;> simp [adc, from_result, BitVec.unsigned, BitVec.of_length_zero]
-  rw [Bool.eq_iff_iff]
-  simp only [adc, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
-  have h1 := BitVec.toNat_add_cases a b
-  have h2 := BitVec.toNat_add_cases (a + b) (BitVec.ofNat w c.toNat)
-  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
-  cases c <;> simp only [Bool.toNat_false, Bool.toNat_true, Int.natCast_zero, Int.natCast_one,
-    Int.add_zero] at h2 ⊢ <;> omega
+    (adc a b c).cf = decide (2 ^ w ≤ a.toNat + b.toNat + c.toNat) :=
+  BitVec.unsigned_adc_bne_coe a b c
 @[simp, kcond] theorem adc_af :
     (adc a b c).af = (((a + b + BitVec.ofNat w c.toNat).take 4).unsigned !=
       (a.take 4).unsigned + (b.take 4).unsigned + c) := rfl
 @[simp, kcond, grind =] theorem adc_of (hw : 1 < w) :
     (adc a b c).of = decide (a.toInt + b.toInt + c.toNat < -2 ^ (w - 1) ∨
-      2 ^ (w - 1) ≤ a.toInt + b.toInt + c.toNat) := by
-  rw [Bool.eq_iff_iff]
-  simp only [adc, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq, BitVec.toInt_add,
-    Int.bmod_add_bmod, BitVec.toInt_ofNat_toNat_bool hw, ne_eq]
-  cases c <;> simp only [Bool.toNat_false, Bool.toNat_true, Int.natCast_zero, Int.natCast_one,
-    Int.add_zero, Int.bmod_two_pow_eq_self_iff (w := w) (by omega)] <;> omega
+      2 ^ (w - 1) ≤ a.toInt + b.toInt + c.toNat) :=
+  BitVec.signed_adc_bne_coe a b c hw
 
 @[simp, kcond] theorem sub_pf : (sub a b).pf = (((a - b).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
 @[simp, kcond, grind =] theorem sub_zf : (sub a b).zf = decide (a = b) := by
   have : a - b = 0#w ↔ a = b := by grind
   simp [sub, from_result, Bool.beq_eq_decide_eq, this]
 @[simp, kcond, grind =] theorem sub_sf : (sub a b).sf = (a - b).msb := rfl
-@[simp, kcond, grind =] theorem sub_cf : (sub a b).cf = decide (a.toNat < b.toNat) := by
-  rw [Bool.eq_iff_iff]
-  simp only [sub, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
-  have := BitVec.toNat_sub_cases a b
-  have := a.isLt; have := b.isLt
-  omega
+@[simp, kcond, grind =] theorem sub_cf : (sub a b).cf = decide (a.toNat < b.toNat) :=
+  BitVec.unsigned_sub_bne a b
 @[simp, kcond] theorem sub_af :
     (sub a b).af = (((a - b).take 4).unsigned != (a.take 4).unsigned - (b.take 4).unsigned) := rfl
-@[simp, kcond, grind =] theorem sub_of : (sub a b).of = BitVec.ssubOverflow a b := by
-  rw [BitVec.ssubOverflow_eq_decide]
-  rcases w with _ | w
-  · simp [sub, from_result, BitVec.signed, BitVec.of_length_zero]
-  · rw [Bool.eq_iff_iff]
-    simp only [sub, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq,
-      BitVec.toInt_sub, ne_eq, Int.bmod_two_pow_eq_self_iff (w := w + 1) (by omega)]
-    omega
+@[simp, kcond, grind =] theorem sub_of : (sub a b).of = BitVec.ssubOverflow a b :=
+  BitVec.signed_sub_bne a b
 
 @[simp, kcond] theorem sbb_pf :
     (sbb a b c).pf = (((a - b - BitVec.ofNat w c.toNat).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
@@ -934,28 +847,15 @@ variable {w : Nat} (a b : BitVec w) (c : Bool)
   simp [sbb, from_result, Bool.beq_eq_decide_eq]
 @[simp, kcond, grind =] theorem sbb_sf : (sbb a b c).sf = (a - b - BitVec.ofNat w c.toNat).msb := rfl
 @[simp, kcond, grind =] theorem sbb_cf :
-    (sbb a b c).cf = decide (a.toNat < b.toNat + c.toNat) := by
-  rcases Nat.eq_zero_or_pos w with rfl | hw
-  · cases c <;> simp [sbb, from_result, BitVec.unsigned, BitVec.of_length_zero]
-  rw [Bool.eq_iff_iff]
-  simp only [sbb, from_result, BitVec.unsigned, bne_iff_ne, decide_eq_true_eq]
-  have h1 := BitVec.toNat_sub_cases a b
-  have h2 := BitVec.toNat_sub_cases (a - b) (BitVec.ofNat w c.toNat)
-  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
-  have := a.isLt; have := b.isLt
-  cases c <;> simp only [Bool.toNat_false, Bool.toNat_true, Int.natCast_zero, Int.natCast_one,
-    Int.sub_zero] at h2 ⊢ <;> omega
+    (sbb a b c).cf = decide (a.toNat < b.toNat + c.toNat) :=
+  BitVec.unsigned_sbb_bne a b c
 @[simp, kcond] theorem sbb_af :
     (sbb a b c).af = (((a - b - BitVec.ofNat w c.toNat).take 4).unsigned !=
       (a.take 4).unsigned - (b.take 4).unsigned - c) := rfl
 @[simp, kcond, grind =] theorem sbb_of (hw : 1 < w) :
     (sbb a b c).of = decide (a.toInt - b.toInt - c.toNat < -2 ^ (w - 1) ∨
-      2 ^ (w - 1) ≤ a.toInt - b.toInt - c.toNat) := by
-  rw [Bool.eq_iff_iff]
-  simp only [sbb, from_result, BitVec.signed, bne_iff_ne, decide_eq_true_eq, BitVec.toInt_sub,
-    Int.bmod_sub_bmod, BitVec.toInt_ofNat_toNat_bool hw, ne_eq]
-  cases c <;> simp only [Bool.toNat_false, Bool.toNat_true, Int.natCast_zero, Int.natCast_one,
-    Int.sub_zero, Int.bmod_two_pow_eq_self_iff (w := w) (by omega)] <;> omega
+      2 ^ (w - 1) ≤ a.toInt - b.toInt - c.toNat) :=
+  BitVec.signed_sbb_bne_coe a b c hw
 
 @[simp, kcond] theorem inc_pf (cf : Bool) :
     (inc a cf).pf = (((a + 1#w).take 8).cpop_ % 2 == BitVec.zero 8) := rfl
@@ -1010,70 +910,30 @@ variable {w : Nat} (a b : BitVec w) (c : Bool)
     simp only [Nat.add_one_sub_one] at h1 h2 ⊢
     omega
 
-/-! ### Limb identities for carry chains: wrapped result + carry weight = exact result -/
+/-! #### Carry-Chain Limb Identities -/
 
 theorem add_toNat :
     ((a + b).toNat : Int) + ((add a b).cf).toNat * (2 ^ w : Nat) = a.toNat + b.toNat := by
   rw [add_cf]
-  have := BitVec.toNat_add_cases a b
-  by_cases h : 2 ^ w ≤ a.toNat + b.toNat <;> simp only [h, decide_true, decide_false,
-    Bool.toNat_true, Bool.toNat_false] <;> omega
+  exact BitVec.toNat_add_carry a b
 
 theorem adc_toNat (hw : 0 < w) :
     ((a + b + BitVec.ofNat w c.toNat).toNat : Int) + ((adc a b c).cf).toNat * (2 ^ w : Nat) =
       a.toNat + b.toNat + c.toNat := by
   rw [adc_cf]
-  have h1 := BitVec.toNat_add_cases a b
-  have h2 := BitVec.toNat_add_cases (a + b) (BitVec.ofNat w c.toNat)
-  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
-  have := a.isLt; have := b.isLt
-  have hc : c.toNat ≤ 1 := by cases c <;> simp
-  by_cases h : 2 ^ w ≤ a.toNat + b.toNat + c.toNat <;> simp only [h, decide_true, decide_false,
-    Bool.toNat_true, Bool.toNat_false] <;> omega
+  exact BitVec.toNat_adc_carry a b c hw
 
 theorem sub_toNat :
     ((a - b).toNat : Int) - ((sub a b).cf).toNat * (2 ^ w : Nat) = a.toNat - b.toNat := by
   rw [sub_cf]
-  have := BitVec.toNat_sub_cases a b
-  by_cases h : a.toNat < b.toNat <;> simp only [h, decide_true, decide_false,
-    Bool.toNat_true, Bool.toNat_false] <;> omega
+  exact BitVec.toNat_sub_borrow a b
 
 theorem sbb_toNat (hw : 0 < w) :
     ((a - b - BitVec.ofNat w c.toNat).toNat : Int) - ((sbb a b c).cf).toNat * (2 ^ w : Nat) =
       a.toNat - b.toNat - c.toNat := by
   rw [sbb_cf]
-  have h1 := BitVec.toNat_sub_cases a b
-  have h2 := BitVec.toNat_sub_cases (a - b) (BitVec.ofNat w c.toNat)
-  rw [BitVec.toNat_ofNat_toNat_bool hw] at h2
-  have := a.isLt; have := b.isLt
-  have hc : c.toNat ≤ 1 := by cases c <;> simp
-  by_cases h : a.toNat < b.toNat + c.toNat <;> simp only [h, decide_true, decide_false,
-    Bool.toNat_true, Bool.toNat_false] <;> omega
+  exact BitVec.toNat_sbb_borrow a b c hw
 
 end
 end StatusFlags
 
-def Directive.fakeSize (hashOfProgram : UInt64) (d : Directive) : Nat :=
-  match d with
-  | .label _ => 0
-  | .instr (.regular _ _ (.nop sz)) => sz -- may be zero
-  | .instr i => (1 + hash (hashOfProgram, i) % 15).toNat
-  | .byteArray bs => bs.size
-
-def Program.fakeLayout (prog : Program) : Executable :=
-  let : Inhabited Directive := .mk (.byteArray (.mk #[]))
-  let h := hash prog;
-  let layout : Layout := { start := h.toInt64<<<16, size i := prog[i]!.fakeSize h }
-  layout prog
-
-/-- info: Except.ok 42 -/
-#guard_msgs in
-#eval
-  let exe := Program.fakeLayout [
-    .label "main",
-    .instr (.regular .W64 .W64 (.lea (.low .rax .W64) (.mk .none .none (.int64 41)))),
-    .instr (.regular .W64 .W64 (.inc (.reg (.low .rax .W64)))),
-    .instr (.regular .W64 .W64 .ret) ]
-  let start := exe.labels.label "main"
-  let data : MachineData := { dmem := Mem.storeInt {} 0x100 8 0x1337, regs := {rsp := 0x100} }
-  (exe.eval {data, pc := start} (fun st => st.pc = 0x1337)).bind (fun s => .ok s.1.regs.rax)

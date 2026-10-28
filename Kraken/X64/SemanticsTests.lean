@@ -1,18 +1,16 @@
 module
 
 import Kraken.X64.Semantics
+meta import Kraken.X64.Semantics
 
 /-!
-# Semantics shape tests (x86-64)
+# Semantics Shape and Evaluator Tests (x86-64)
 
-Regression guard for the grind/omega-friendliness of the shapes the semantics hand to proofs:
-the flag functions and their value-level projections, and the compare idiom. Every goal here must
-close with `grind`, `omega` or `simp` in milliseconds.
+Regression tests for the `grind`/`omega`/`simp`-friendliness of x86-64 flag projections,
+condition codes, carry-chain limb identities, and the concrete evaluator.
 -/
 
-open Kraken
-
-/-! ### Flag projections (`@[kcond]`) are the value-level facts -/
+/-! ### Flag Projections (`@[kcond]`) and Condition Codes -/
 
 example (a b : BitVec 64) : (StatusFlags.sub a b).cf = decide (a.toNat < b.toNat) := by simp
 example (a b : BitVec 64) : (StatusFlags.sub a b).zf = decide (a = b) := by simp
@@ -25,7 +23,7 @@ example (a : BitVec 64) (cf : Bool) : (StatusFlags.dec a cf).zf = decide (a = 1#
 example (a : BitVec 64) (cf : Bool) : (StatusFlags.dec a cf).cf = cf := by simp
 example (v : BitVec 64) (af : Bool) : (StatusFlags.logical v af).zf = decide (v = 0#64) := by simp
 
--- A branch condition after `cmp a, b` reads as the comparison itself.
+-- Branch conditions after `cmp a, b` simplify directly to value-level comparisons.
 example (a b : BitVec 64) : CondCode.interp .c (StatusFlags.sub a b) = decide (a.toNat < b.toNat) := by
   simp [CondCode.interp]
 example (a b : BitVec 64) : CondCode.interp .be (StatusFlags.sub a b) = decide (a.toNat ≤ b.toNat) := by
@@ -43,7 +41,7 @@ example (a b : BitVec 64) : CondCode.interp .le (StatusFlags.sub a b) = decide (
 example (a b : BitVec 64) : CondCode.interp .z (StatusFlags.sub a b) = decide (a = b) := by
   simp [CondCode.interp]
 
-/-! ### Carry chains: the limb identities feed `omega` directly -/
+/-! ### Carry-Chain Limb Identities -/
 
 example (a0 b0 a1 b1 : BitVec 64) (c : Bool) :
     ((a0 + b0 + BitVec.ofNat 64 c.toNat).toNat : Int) +
@@ -54,3 +52,17 @@ example (a0 b0 a1 b1 : BitVec 64) (c : Bool) :
   have h1 := StatusFlags.adc_toNat a1 b1 (StatusFlags.adc a0 b0 c).cf (by decide)
   simp only [Nat.reducePow] at h0 h1
   omega
+
+/-! ### Concrete Evaluator Tests -/
+
+/-- info: Except.ok 42 -/
+#guard_msgs in
+#eval
+  let exe := Program.fakeLayout [
+    .label "main",
+    .instr (.regular .W64 .W64 (.lea (.low .rax .W64) (.mk .none .none (.int64 41)))),
+    .instr (.regular .W64 .W64 (.inc (.reg (.low .rax .W64)))),
+    .instr (.regular .W64 .W64 .ret) ]
+  let start := exe.labels.label "main"
+  let data : MachineData := { dmem := Mem.storeInt {} 0x100 8 0x1337, regs := { rsp := 0x100 } }
+  (exe.eval { data, pc := start } (fun st => st.pc = 0x1337)).bind (fun s => .ok s.1.regs.rax)
