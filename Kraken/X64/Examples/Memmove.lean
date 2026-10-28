@@ -1,9 +1,5 @@
 module
 
-/-
-Standard System V AMD64 ABI `memmove(dst, src, n)` verification (handling overlapping regions).
--/
-
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
@@ -11,14 +7,19 @@ import Kraken.X64.OmniSemantics
 import Kraken.X64.Parser
 import Kraken.X64.Semantics
 
+/-!
+# x86-64 `memmove` Verification
+
+Functional correctness of System V AMD64 ABI `memmove(dst, src, n)` with arbitrary buffer overlap.
+-/
+
 open Kraken.X64.Parser
-open Std
 open Std.ExtHashMap
 
--- Standard System V AMD64 ABI `memmove(dst, src, n)` (handling overlapping regions)
--- Arguments: %rdi = dst, %rsi = src, %rdx = n, (%rsp) = return address `ra`
--- Returns: %rax = dst, %rsp = rsp₀ + 8, pc = ra, callee-saved registers preserved,
---          and `src` bytes copied into `dst` (copying forward if `dst < src`, backward if `dst > src`).
+/-- System V AMD64 ABI `memmove(dst, src, n)`:
+- Arguments: `%rdi = dst`, `%rsi = src`, `%rdx = n`, `(%rsp) = ra`
+- Returns: `%rax = dst`, `%rsp = rsp₀ + 8`, `pc = ra`, callee-saved registers preserved,
+  and `src` bytes copied into `dst` (copying forward if `dst < src`, backward if `dst > src`). -/
 def memmove : Program := parse("
 memmove:
   movq %rdi, %rax
@@ -48,7 +49,7 @@ done:
   ret
 ")
 
-private theorem memmove_forward_loop_spec [layout : Layout] [Layout.Valid memmove] (s₀ : MachineData)
+private theorem memmove_forward_loop_spec [layout : Host memmove] (s₀ : MachineData)
     (n d : Nat) (pre src : List UInt8) (R : DataMem → Prop) :
     (layout memmove).Spec s₀
       (pc := (layout memmove).label "forward_loop")
@@ -94,7 +95,7 @@ private theorem memmove_forward_loop_spec [layout : Layout] [Layout.Valid memmov
         rw [Mem.At_append_sep (pre.drop 1) (src.take 1) _ (by simp; omega)]
         ecancel
 
-private theorem memmove_backward_loop_spec [layout : Layout] [Layout.Valid memmove] (s₀ : MachineData)
+private theorem memmove_backward_loop_spec [layout : Host memmove] (s₀ : MachineData)
     (n d : Nat) (src_ptr dst_ptr : BitVec 64) (src post : List UInt8) (R : DataMem → Prop) :
     (layout memmove).Spec s₀
       (pc := (layout memmove).label "backward_loop")
@@ -146,27 +147,7 @@ private theorem memmove_backward_loop_spec [layout : Layout] [Layout.Valid memmo
         rw [Mem.At_append_sep (src.drop n) (post.take (d - 1)) _ (by simp; omega)]
         ecancel
 
-/-- Result of copying `n` bytes from `src_off` to `dst_off` within a contiguous buffer `buf`
-(supporting arbitrary overlap between `[dst_off, dst_off + n)` and `[src_off, src_off + n)`). -/
-def memmoveBytes (buf : List UInt8) (dst_off src_off n : Nat) : List UInt8 :=
-  buf.take dst_off ++ (buf.drop src_off).take n ++ buf.drop (dst_off + n)
-
-private theorem memmove_forward_drop_eq (buf : List UInt8) (dst_off d n : Nat)
-    (h_src_bound : dst_off + d + n ≤ buf.length) :
-    (((buf.drop dst_off).take d ++ (buf.drop (dst_off + d)).take n).drop n) ++
-      buf.drop (dst_off + d + n) = buf.drop (dst_off + n) := by
-  rw [← List.drop_drop, ← List.take_add, ← List.drop_append_of_le_length (by simp; omega),
-      show dst_off + d + n = dst_off + (d + n) by omega, ← List.drop_drop,
-      List.take_append_drop, List.drop_drop]
-
-private theorem memmove_backward_take_eq (buf : List UInt8) (src_off d n : Nat) :
-    buf.take src_off ++
-      (((buf.drop src_off).take n ++ (buf.drop (src_off + n)).take d).take d) =
-      buf.take (src_off + d) := by
-  rw [← List.drop_drop, ← List.take_add, List.take_take, Nat.min_eq_left (by omega),
-      ← List.take_add]
-
-theorem memmove_correct [layout : Layout] [Layout.Valid memmove] (s₀ : MachineData)
+theorem memmove_correct [layout : Host memmove] (s₀ : MachineData)
     (base ra : UInt64) (dst_off src_off n : Nat) (buf : List UInt8) (R : DataMem → Prop) :
     (layout memmove).Spec s₀
       (pre :=

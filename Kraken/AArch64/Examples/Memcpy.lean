@@ -1,25 +1,28 @@
 module
 
-/-
-Standard AAPCS64 `memcpy(dst, src, n)` verification.
--/
-
 import Kraken.AArch64.OmniSemantics
 import Kraken.AArch64.Parser
 import Kraken.AArch64.Semantics
+import Kraken.BitVecArith
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
+import Kraken.ToBytes
+
+/-!
+# AArch64 `memcpy` Verification
+
+Functional correctness of AAPCS64 `memcpy(dst, src, n)`.
+-/
 
 open Kraken.AArch64
 open Kraken.AArch64.Parser
-open Std
 open Std.ExtHashMap
 
--- Standard AAPCS64 `memcpy(dst, src, n)`
--- Arguments: x0 = dst, x1 = src, x2 = n, x30 (lr) = return address
--- Returns: x0 = dst, sp = sp₀, pc = x30₀, callee-saved registers preserved,
---          and `src` bytes copied into `dst`.
+/-- AAPCS64 `memcpy(dst, src, n)`:
+- Arguments: `x0 = dst`, `x1 = src`, `x2 = n`, `x30 (lr) = ra`
+- Returns: `x0 = dst`, `sp = sp₀`, `pc = x30₀`, callee-saved registers preserved,
+  and `src` bytes copied into `dst`. -/
 def memcpy : Program := parseAArch64("
 memcpy:
   mov x3, x0
@@ -35,7 +38,7 @@ done:
   ret
 ")
 
-theorem memcpy_correct [layout : Layout] [Layout.Valid memcpy] (s₀ : MachineData)
+theorem memcpy_correct [layout : Host memcpy] (s₀ : MachineData)
     (n : Nat) (dst src : List UInt8) (R : DataMem → Prop) :
     (layout memcpy).Spec s₀
       (pre :=

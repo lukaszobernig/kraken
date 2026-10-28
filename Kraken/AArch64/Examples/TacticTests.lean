@@ -1,69 +1,86 @@
 module
 
-/-
-Regression tests for the composition and frame tactics (`kcall`, `kloop`, `kloop_exit`,
-`kloop_next`, `kframe`, `kframe_eqs`, `≡ … except`) on AArch64 examples.
--/
-
-import all Kraken.AArch64.Examples.P256Beeu
+import Kraken.AArch64.OmniSemantics
+import Kraken.AArch64.Parser
+import Kraken.AArch64.Semantics
 import Kraken.Tactics
+
+/-!
+# AArch64 Composition and Frame Tactic Tests
+
+Regression tests for `kcall`, `kloop`, `kloop_exit`, `kloop_next`, `kframe`, `kframe_eqs`,
+`≡ … except`, and `block_spec` on AArch64 examples.
+-/
 
 open Kraken Kraken.AArch64
 open Kraken.AArch64.Parser
 
+/-! ### Frame Clauses and `kframe_eqs` -/
 
--- (`kloop`/`kloop_exit`/`kloop_next` on a plain loop: see `memcpy_correct` in Memcpy.lean; on a
--- constant-time loop: `memcmp_ct_correct` in Memcmp.lean.)
+/-- Multi-register branch program for testing register frames and register-view projections. -/
+def check_zero_branch : Program := parseAArch64("
+loop:
+  orr x14, x25, x26
+  rbit x15, x25
+  cbz x14, loop_end
+  clz x13, x15
+shift:
+  nop
+loop_end:
+  nop
+")
 
--- A block lemma with a frame ("modifies") clause instead of per-register equalities.
-theorem loop_exit_frame [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime]
+/-- Register-tuple projections for testing view expansion in `kframe`, `kframe_eqs`, and `≡ … except`. -/
+abbrev Reg64s.viewB (r : Reg64s) : Nat := r.X25.toNat + r.X26.toNat
+abbrev Reg64s.viewA (r : Reg64s) : Nat := r.X21.toNat + r.X22.toNat
+abbrev Reg64s.viewX (r : Reg64s) : Nat :=
+  r.X3.toNat + r.X4.toNat + r.X5.toNat + r.X6.toNat + r.X7.toNat
+abbrev Reg64s.viewY (r : Reg64s) : Nat := r.X8.toNat + r.X9.toNat
+
+/-- Block lemma with a register-frame (`≡ … except […]`) postcondition. -/
+theorem loop_exit_frame [layout : Host check_zero_branch]
     (s₀ : MachineData) :
-    (layout beeu_mod_inverse_vartime).Spec s₀
-      (pc := (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop")
-      (pre := s₀.regs.beeuB = 0)
+    (layout check_zero_branch).Spec s₀
+      (pc := (layout check_zero_branch).label "loop")
+      (pre := s₀.regs.viewB = 0)
       (post := fun st =>
-        st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop_end" ∧
+        st.pc = (layout check_zero_branch).label "loop_end" ∧
         st.data.regs ≡ s₀.regs except [X14, X15] ∧
         st.data.dmem = s₀.dmem) := by
   intro h_B_zero
-  have ⟨h25, h26, h27, h28⟩ := val256_eq_zero_limbs
-    s₀.regs.X25 s₀.regs.X26 s₀.regs.X27 s₀.regs.X28 h_B_zero
-  kprologue beeu_mod_inverse_vartime at ".Lbeeu_loop" to ".Lbeeu_shift_A_Y" with s₀
-  kfinish beeu_mod_inverse_vartime
+  dsimp only [Reg64s.viewB] at h_B_zero
+  have h25 : s₀.regs.X25.toBitVec = 0#64 := BitVec.eq_of_toNat_eq (by simp; omega)
+  have h26 : s₀.regs.X26.toBitVec = 0#64 := BitVec.eq_of_toNat_eq (by simp; omega)
+  kprologue check_zero_branch at "loop" to "shift" with s₀
+  kfinish check_zero_branch
 
--- Consumer: composing two frames and using frame equations for derived facts.
-example [layout : Layout] [Layout.Valid beeu_mod_inverse_vartime] (s : MachineData)
-    (hB : s.regs.beeuB = 0) :
-    (layout beeu_mod_inverse_vartime).Spec s
-      (pc := (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop")
+/-- Composing a frame lemma with `kcall` and deriving register-view equalities via `kframe_eqs`. -/
+example [layout : Host check_zero_branch] (s : MachineData)
+    (hB : s.regs.viewB = 0) :
+    (layout check_zero_branch).Spec s
+      (pc := (layout check_zero_branch).label "loop")
       (post := fun st =>
-        st.pc = (layout beeu_mod_inverse_vartime).label ".Lbeeu_loop_end" ∧
+        st.pc = (layout check_zero_branch).label "loop_end" ∧
         st.data.regs ≡ s.regs except [X14, X15, X13] ∧
-        st.data.regs.beeuA = s.regs.beeuA) := by
+        st.data.regs.viewA = s.regs.viewA) := by
   intro _
   kcall loop_exit_frame s hB with st1 ⟨h1_fr, h1_mem⟩
-  kframe_eqs h1_fr   -- field equations `h1_fr_X21 …` and auto-derived `h1_fr_beeuA`
+  kframe_eqs h1_fr
   apply Eventually.done
   refine ⟨rfl, ?_, ?_⟩
   · kframe
-  · exact h1_fr_beeuA
+  · exact h1_fr_viewA
 
+/-! ### `kstep` Bitfield and Shift Normalization -/
 
-/-! ### `kstep` normal form of instruction residues
-
-`extr`/`ubfm`(`lsr #k`) leave `if`s over ground conditions, unfolded shift amounts (`64 - 1`) and
-`setWidth`/`extractLsb'` wrappers in their results. `kstep` now decides the conditions, folds the
-arithmetic and applies the `lsr #k` rule when the value is introduced, so the register values are
-`X1.toBitVec <<< 63 ||| X2.toBitVec >>> 1` and `X3.toBitVec >>> 5` and the post can be stated
-against them directly, with no bridging lemmas. -/
-
+/-- `extr`, `lsr #k`, and `ubfx` normalize to shift/extract expressions during `kstep`. -/
 def extr_lsr : Program := parseAArch64("
   extr x0, x1, x2, #1
   lsr  x4, x3, #5
   ubfx x5, x3, #8, #16
 ")
 
-theorem extr_lsr_correct [layout : Layout] [Layout.Valid extr_lsr] (s₀ : MachineData) :
+theorem extr_lsr_correct [layout : Host extr_lsr] (s₀ : MachineData) :
     (layout extr_lsr).Spec s₀
       (post := fun st =>
         st.data.regs.X0.toBitVec = s₀.regs.X1.toBitVec <<< 63 ||| s₀.regs.X2.toBitVec >>> 1 ∧
@@ -74,12 +91,9 @@ theorem extr_lsr_correct [layout : Layout] [Layout.Valid extr_lsr] (s₀ : Machi
   kprologue extr_lsr with s₀
   kfinish extr_lsr
 
-/-! ### Flags as an abstraction boundary
+/-! ### Flag Abstraction Boundary -/
 
-`subs`/`cmp` leave `status := StatusFlags.subs a b` in the state; the branch condition `b.lo` is
-decided from a value-level hypothesis (`X0.toNat < X1.toNat`) through the `@[kcond]` projection
-`(subs a b).c = decide (b.toNat ≤ a.toNat)`, and the post can talk about the flags by name. -/
-
+/-- `subs` leaves `status := StatusFlags.subs a b` in the state; `b.lo` is decided via `@[kcond]`. -/
 def cmp_branch : Program := parseAArch64("
   subs x2, x0, x1
   b.lo less
@@ -91,7 +105,7 @@ done:
   nop
 ")
 
-theorem cmp_branch_correct [layout : Layout] [Layout.Valid cmp_branch] (s₀ : MachineData) :
+theorem cmp_branch_correct [layout : Host cmp_branch] (s₀ : MachineData) :
     (layout cmp_branch).Spec s₀
       (post := fun st =>
         st.data.regs.X3.toNat = (if s₀.regs.X0.toNat < s₀.regs.X1.toNat then 0 else 1) ∧
@@ -99,20 +113,31 @@ theorem cmp_branch_correct [layout : Layout] [Layout.Valid cmp_branch] (s₀ : M
         st.data.regs ≡ s₀.regs except [X2, X3]) := by
   kprologue cmp_branch with s₀
   by_cases h : X0.toNat < X1.toNat
-  · kstep                             -- `b.lo` taken: decided from `h` through `subs_c`
+  · kstep
     kprologue cmp_branch at "less"
     kfinish cmp_branch
-  · kstep                             -- not taken
+  · kstep
     kprologue cmp_branch at "done"
     kfinish cmp_branch
 
-/-! ### `block_spec`: the same statements without the boilerplate -/
+/-! ### `block_spec` Declarations and Frame Narrowing -/
 
--- `beeu_loop_exit_when_B_zero` in `P256Beeu.lean` is declared with `block_spec`; its generated
--- statement is judgmentally equal to the hand-written `loop_exit_frame` above.
-example : @beeu_loop_exit_when_B_zero = @loop_exit_frame := rfl
+/-- `block_spec` with `writes` expands to the exact `Spec` signature of `loop_exit_frame`. -/
+block_spec loop_exit_spec check_zero_branch s₀
+  from "loop" to "loop_end"
+  (writes := [X14, X15])
+  (pre := s₀.regs.viewB = 0)
+  (post := fun st => st.data.dmem = s₀.dmem) := by
+  intro h_B_zero
+  dsimp only [Reg64s.viewB] at h_B_zero
+  have h25 : s₀.regs.X25.toBitVec = 0#64 := BitVec.eq_of_toNat_eq (by simp; omega)
+  have h26 : s₀.regs.X26.toBitVec = 0#64 := BitVec.eq_of_toNat_eq (by simp; omega)
+  kprologue check_zero_branch at "loop" to "shift" with s₀
+  kfinish check_zero_branch
 
--- A whole-program block (no `from`), with implicit/explicit binders and `ct` constant-time mode.
+example : @loop_exit_spec = @loop_exit_frame := rfl
+
+/-- Whole-program `block_spec` with implicit/explicit binders and `ct` constant-time mode. -/
 block_spec extr_lsr_correct' extr_lsr {n : Nat} s₀ ct
   (writes := [X0, X4, X5])
   (pre := n = 5)
@@ -122,24 +147,24 @@ block_spec extr_lsr_correct' extr_lsr {n : Nat} s₀ ct
   kprologue extr_lsr with s₀
   kfinish extr_lsr
 
--- A consumer composes a `block_spec` lemma with `kcall` as usual, and can narrow an `except`
--- frame into a `preserves` (`≡ … on […]`) frame over registers and derived views.
-block_spec loop_exit_preserves beeu_mod_inverse_vartime s
-  from ".Lbeeu_loop" to ".Lbeeu_loop_end"
-  (preserves := [SP, X29, beeuN, beeuA, beeuY])
-  (pre := s.regs.beeuB = 0)
+/-- Narrowing an `except` frame into a `preserves` (`≡ … on […]`) frame over registers and views. -/
+block_spec loop_exit_preserves check_zero_branch s
+  from "loop" to "loop_end"
+  (preserves := [SP, X29, viewA, viewY])
+  (pre := s.regs.viewB = 0)
   (post := fun st => st.data.dmem = s.dmem) := by
   intro hB
-  kcall beeu_loop_exit_when_B_zero s hB with st1 ⟨h1_fr, h1_mem⟩
+  kcall loop_exit_spec s hB with st1 ⟨h1_fr, h1_mem⟩
   apply Eventually.done
   exact ⟨rfl, by kframe, h1_mem⟩
 
--- Views in `≡ … except […]` / `(writes := […])` expand to the registers they read.
+-- Register views in `≡ … except […]` expand to the underlying registers they read.
 example (r' r : Reg64s) :
-    (r' ≡ r except [beeuX, X13]) = (r' ≡ r except [X3, X4, X5, X6, X7, X13]) := rfl
+    (r' ≡ r except [viewX, X13]) = (r' ≡ r except [X3, X4, X5, X6, X7, X13]) := rfl
 
--- `kloop` with a 1-arg `(exit := fun st => …)` predicate (independent of measure and ghost state),
--- handling prologue, loop body, and epilogue in a single `kloop` call.
+/-! ### `kloop` with 1-Argument Exit Predicate -/
+
+/-- Loop with prologue, body, and epilogue handled in a single `kloop` call. -/
 def count_down_epilogue : Program := parseAArch64("
   mov x0, #0
   cbz x1, done

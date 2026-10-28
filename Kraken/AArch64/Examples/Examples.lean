@@ -1,11 +1,5 @@
 module
 
-/-
-Kraken AArch64 - Example Programs
-
-Demonstrates AArch64 proofs using the `kstep` stepping tactic.
--/
-
 import Kraken.AArch64.OmniSemantics
 import Kraken.AArch64.Parser
 import Kraken.AArch64.Semantics
@@ -14,19 +8,27 @@ import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
 
+/-!
+# AArch64 Example Programs
+
+Example AArch64 assembly programs and correctness proofs demonstrating register arithmetic,
+control flow, and memory addressing modes.
+-/
 
 open Kraken.AArch64
 open Kraken.AArch64.Parser
+open Std
+open Std.ExtHashMap
 
---------------------------------------------------------------------------------
+/-! ### Register and Control-Flow Examples -/
 
--- Register swap example using XOR
+/-- Register swap using `eor`. -/
 def swap : Program := parseAArch64("
   eor x0, x0, x1
   eor x1, x0, x1
   eor x0, x0, x1")
 
-theorem swap_correct [layout : Layout] [Layout.Valid swap] (d : MachineData) :
+theorem swap_correct [layout : Host swap] (d : MachineData) :
     (layout swap).Spec d
       (post := fun st =>
         st.data.regs.getRegOrZr .X0 = d.regs.getRegOrZr .X1 ∧
@@ -34,21 +36,21 @@ theorem swap_correct [layout : Layout] [Layout.Valid swap] (d : MachineData) :
   kprologue swap with d
   kfinish swap
 
--- Example 3: Multi-instruction arithmetic and shift pipeline
+/-- Multi-instruction arithmetic and shift pipeline. -/
 def arith_shift : Program := parseAArch64("
   add x0, x1, #42
   lsl x2, x0, #2
   sub x3, x2, x0
 ")
 
-theorem arith_shift_correct [layout : Layout] [Layout.Valid arith_shift] (d : MachineData) :
+theorem arith_shift_correct [layout : Host arith_shift] (d : MachineData) :
     (layout arith_shift).Spec d
       (post := fun st =>
         st.data.regs.getRegOrZr .X3 = 3 * (d.regs.getRegOrZr .X1 + 42)) := by
   kprologue arith_shift with d
   kfinish arith_shift
 
--- Example 4: Stepping through control flow (branch not taken)
+/-- Stepping through conditional branch (`cbnz` not taken). -/
 def controlflow : Program := parseAArch64("
 start:
   mov x0, #1
@@ -57,15 +59,14 @@ start:
   mov x1, #42
 ")
 
-theorem p4_correct [layout : Layout] [Layout.Valid controlflow] (d : MachineData) :
+theorem p4_correct [layout : Host controlflow] (d : MachineData) :
     (layout controlflow).Spec d (post := fun st => st.data.regs.X1 = 42) := by
   kprologue controlflow with d
   kfinish controlflow
 
--- Example 5: Storing and loading registers to/from memory
-open Std
-open Std.ExtHashMap
+/-! ### Memory Addressing Examples -/
 
+/-- Storing and loading 64-bit registers with immediate byte offsets. -/
 def move_2_regs_to_heap : Program := parseAArch64("
     str x0, [x2]
     str x1, [x2, #8]
@@ -73,7 +74,7 @@ def move_2_regs_to_heap : Program := parseAArch64("
     ldr x4, [x2, #8]
 ")
 
-theorem move_2_regs_to_heap_correct [layout : Layout] [Layout.Valid move_2_regs_to_heap] (s₀ : MachineData)
+theorem move_2_regs_to_heap_correct [layout : Host move_2_regs_to_heap] (s₀ : MachineData)
     (v1 v2 : UInt64) (R : DataMem → Prop) :
     (layout move_2_regs_to_heap).Spec s₀
       (pre :=
@@ -85,7 +86,7 @@ theorem move_2_regs_to_heap_correct [layout : Layout] [Layout.Valid move_2_regs_
   kprologue move_2_regs_to_heap with s₀
   kfinish move_2_regs_to_heap
 
--- Example 6: Memory access with shifted register offset [x1, x2, lsl #3]
+/-- Memory access with shifted register offset `[x1, x2, lsl #3]`. -/
 def reg_offset_example : Program := parseAArch64("
     mov x0, #42
     str x0, [x1, x2, lsl #3]
@@ -93,7 +94,7 @@ def reg_offset_example : Program := parseAArch64("
     ldr x3, [x1, x2, lsl #3]
 ")
 
-theorem reg_offset_example_correct [layout : Layout] [Layout.Valid reg_offset_example] (s₀ : MachineData)
+theorem reg_offset_example_correct [layout : Host reg_offset_example] (s₀ : MachineData)
     (v : UInt64) (R : DataMem → Prop) :
     (layout reg_offset_example).Spec s₀
       (pre :=

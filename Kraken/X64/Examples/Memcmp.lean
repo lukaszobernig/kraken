@@ -1,17 +1,5 @@
 module
 
-/-
-Constant-time byte-by-byte memory comparison `memcmp(a, b, n)` in x86_64 assembly,
-following the System V AMD64 ABI (`%rdi = a`, `%rsi = b`, `%rdx = n`, `(%rsp) = ra`,
-return value in `%rax`).
-
-This file proves both:
-1. Functional correctness: `%rax` holds the bitwise OR of `(a[i] ^^^ b[i])`, which is `0` iff `a = b`.
-2. Constant-time security: for fixed public pointers `p_a`, `p_b`, stack pointer `p_sp`, and length `n`,
-   there exists a single leakage trace `tr` (covering all instruction addresses and memory read
-   addresses) that is produced for *all* secret byte contents `a` and `b`.
--/
-
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
@@ -20,76 +8,22 @@ import Kraken.X64.OmniSemantics
 import Kraken.X64.Parser
 import Kraken.X64.Semantics
 
+/-!
+# x86-64 Constant-Time `memcmp` Verification
+
+Functional correctness and constant-time security of System V AMD64 ABI `memcmp(a, b, n)`:
+1. Functional correctness: `%rax` holds `diffAcc a b` (the bitwise OR of `(a[i] ^^^ b[i])`),
+   which is `0` iff `a = b`.
+2. Constant-time security: for fixed public pointers `p_a`, `p_b`, stack pointer `p_sp`, and
+   length `n`, there exists a single leakage trace `tr` produced for all secret byte slices `a`, `b`.
+-/
+
 open Kraken.X64.Parser
-open Std
 open Std.ExtHashMap
 
-/-- Bitwise OR of all byte-wise XOR differences between `a` and `b`, zero-extended to 64 bits. -/
-def diffAcc : List UInt8 → List UInt8 → BitVec 64
-  | x :: xs, y :: ys => (x.toBitVec.setWidth 64 ^^^ y.toBitVec.setWidth 64) ||| diffAcc xs ys
-  | _, _ => 0#64
-
-@[simp]
-theorem diffAcc_nil_left (b : List UInt8) : diffAcc [] b = 0#64 := rfl
-
-@[simp]
-theorem diffAcc_nil_right (a : List UInt8) : diffAcc a [] = 0#64 := by
-  cases a <;> rfl
-
-theorem diffAcc_eq_zero_iff (a b : List UInt8) (h : a.length = b.length) :
-    diffAcc a b = 0#64 ↔ a = b := by
-  induction a generalizing b with
-  | nil =>
-    cases b with
-    | nil => simp [diffAcc]
-    | cons _ _ => simp at h
-  | cons x xs ih =>
-    cases b with
-    | nil => simp at h
-    | cons y ys =>
-      simp only [List.length_cons, Nat.add_right_cancel_iff] at h
-      simp only [diffAcc, List.cons.injEq]
-      have h_or :
-          ((x.toBitVec.setWidth 64 ^^^ y.toBitVec.setWidth 64) ||| diffAcc xs ys) = 0#64 ↔
-            (x.toBitVec.setWidth 64 ^^^ y.toBitVec.setWidth 64) = 0#64 ∧ diffAcc xs ys = 0#64 := by
-        grind
-      have h_xy : (x.toBitVec.setWidth 64 ^^^ y.toBitVec.setWidth 64) = 0#64 ↔ x = y := by
-        cases x; cases y; simp; grind
-      rw [h_or, h_xy, ih ys h]
-
-private theorem ofInt_ofBytes_singleton (x : UInt8) :
-    BitVec.ofInt 8 (Int.ofBytes [x]) = x.toBitVec := by
-  simp [Int.ofBytes]
-
-theorem diffAcc_one (a b : List UInt8) (ha : a.length = 1) (hb : b.length = 1) (acc : BitVec 64) :
-    acc ||| ((BitVec.ofInt 8 (Int.ofBytes a)).setWidth 64 ^^^
-             (BitVec.ofInt 8 (Int.ofBytes b)).setWidth 64) =
-      acc ||| diffAcc a b := by
-  rcases List.length_eq_one_iff.mp ha with ⟨x, rfl⟩
-  rcases List.length_eq_one_iff.mp hb with ⟨y, rfl⟩
-  rw [ofInt_ofBytes_singleton, ofInt_ofBytes_singleton]
-  simp only [diffAcc]
-  grind
-
-theorem diffAcc_step (a b : List UInt8) (ha : 0 < a.length) (hb : 0 < b.length) (acc : BitVec 64) :
-    (acc ||| ((BitVec.ofInt 8 (Int.ofBytes (a.take 1))).setWidth 64 ^^^
-              (BitVec.ofInt 8 (Int.ofBytes (b.take 1))).setWidth 64)) |||
-      diffAcc (a.drop 1) (b.drop 1) =
-    acc ||| diffAcc a b := by
-  cases a with
-  | nil => simp at ha
-  | cons x xs =>
-    cases b with
-    | nil => simp at hb
-    | cons y ys =>
-      simp only [List.take_succ_cons, List.take_zero, List.drop_succ_cons, List.drop_zero, diffAcc]
-      rw [ofInt_ofBytes_singleton, ofInt_ofBytes_singleton]
-      grind
-
--- Constant-time `memcmp(a, b, n)` in x86_64 assembly
--- Arguments: %rdi = a, %rsi = b, %rdx = n, (%rsp) = return address `ra`
--- Returns: %rax = bitwise OR of all `(a[i] ^ b[i])`, which is 0 iff the buffers are equal.
--- Notice there is no early exit on mismatch: the loop always runs `n` times.
+/-- Constant-time System V AMD64 ABI `memcmp(a, b, n)`:
+- Arguments: `%rdi = a`, `%rsi = b`, `%rdx = n`, `(%rsp) = ra`
+- Returns: `%rax = diffAcc a b` (`0` iff `a = b`), with no early exit on mismatch. -/
 def memcmp : Program := parse("
 memcmp:
   movq $0, %rax
