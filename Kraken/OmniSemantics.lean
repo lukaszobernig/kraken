@@ -1,13 +1,20 @@
 module
 
 import Kraken.Attribute
+public import Kraken.Data.List.Infix
 public import Kraken.Semantics
 
 @[expose] public section
 
-/-
-Common Kraken Temporal Logic and OmniSemantics.
+/-!
+# Common Kraken Temporal Logic and Omni-Semantics
+
+Temporal logic (`Eventually`), traced and constant-time execution (`TracedEventually`, `CtEventually`),
+loop rules, effect monotonicity (`OmniDirective`), host program validity (`Host`), and program/block
+specifications (`Spec`, `Exec`, `ExecSpec`).
 -/
+
+/-! ### Temporal Logic (`Eventually`) and Loop Rules -/
 
 abbrev Post {State : Type} := State → Prop
 
@@ -135,6 +142,8 @@ theorem tailrec_loop_simple {State Measure : Type _} {Ghost : Sort _}
         (hbody v g state hP))
     (fun s h => .done s h)
 
+/-! ### Leakage Traces and `Effects.All` -/
+
 abbrev TracedPost (MD : Type) := Kraken.MachineState MD → List LeakageEvent → Prop
 
 @[kstep] def TracedPost.prepend {MD : Type} (pfx : List LeakageEvent) (P : TracedPost MD) : TracedPost MD :=
@@ -184,6 +193,8 @@ theorem Effects.All_mono {MD : Type} (eff : Kraken.Effects MD)
     exact ih () (fun a tr => hpq a (.exec p :: tr))
   | require_const_time vals cont ih =>
     exact ih () (fun a tr => hpq a (.var_time vals :: tr))
+
+/-! ### Traced and Constant-Time Execution (`TracedEventually`, `CtEventually`) -/
 
 def step1 {D MD : Type} [ArchDirective D MD]
     (e : Kraken.Executable D) (s : Kraken.MachineState MD)
@@ -370,6 +381,8 @@ theorem tailrec_loop_cps_traced {D MD Measure Pub Secret Ghost : Type _}
     exact ⟨(tr_init ++ tr_loop) ++ tr_post, fun s₀ sec hI =>
       ((henter s₀ sec hI).bind (hloop (s₀, sec) (g0 s₀ sec))).bind (hpost s₀ sec)⟩
 
+/-! ### Monotonicity of Effects and Directives (`OmniDirective`) -/
+
 theorem Effects.undefined_mono {MD α : Type} [NondetSupportingType α]
     {k₁ k₂ : α → Kraken.Effects MD} {P Q : TracedPost MD} {pfx : List LeakageEvent}
     (hk : ∀ v pfx', (k₁ v).All (P.prepend pfx') → (k₂ v).All (Q.prepend pfx')) :
@@ -426,6 +439,8 @@ class OmniDirective (D : Type) {MD : outParam Type}
     (ArchDirective.interp d s p next₁ jmp₁).All (P.prepend pfx) →
     (ArchDirective.interp d s p next₂ jmp₂).All (Q.prepend pfx)
 
+/-! ### Inert Directives and Host Program Validity (`Host`) -/
+
 /-- `d` is inert if it falls through with the same machine state and no observable effect. -/
 def Directive.Inert {D MD : Type} [ArchDirective D MD]
     (d : D) : Prop :=
@@ -435,14 +450,84 @@ def Directive.Inert {D MD : Type} [ArchDirective D MD]
     (post : TracedPost MD),
     (ArchDirective.interp d s p next jmp).All post ↔ (next s).All post
 
-/-- Abstract validity assumptions about the `Layout` of a program `prog`. -/
-class Layout.Valid {D MD : Type} [ArchDirective D MD]
-    [layout : Kraken.Layout D] (prog : List D) : Prop where
+namespace Kraken
+
+/-- Abstract validity assumptions about the `Layout` of a host program `prog`. -/
+class Host {D : Type} {MD : outParam Type} [ArchDirective D MD]
+    (prog : outParam (List D)) extends Kraken.Layout D where
   /-- Any directive that occupies zero space in the executable must be semantically inert. -/
-  zero_inert : ∀ i d, prog[i]? = some d → layout.size i = 0 → Directive.Inert d
+  zero_inert : ∀ i d, prog[i]? = some d → size i = 0 → Directive.Inert d
   /-- Two directives at the same address have the same offset in the executable. -/
-  addr_determines_offset : ∀ j k, (layout prog).addrOf j = (layout prog).addrOf k →
-    (layout prog).sizeBefore j = (layout prog).sizeBefore k
+  addr_determines_offset : ∀ j k, (toLayout.apply prog).addrOf j = (toLayout.apply prog).addrOf k →
+    (toLayout.apply prog).sizeBefore j = (toLayout.apply prog).sizeBefore k
+
+instance {D MD : Type} [ArchDirective D MD] {prog : List D} :
+    CoeFun (Host prog) (fun _ => List D → Kraken.Executable D) where
+  coe h := h.toLayout.apply
+
+end Kraken
+
+export Kraken (Host)
+
+namespace Kraken.Host
+
+variable {D MD : Type} [ArchDirective D MD] {p : List D} [h : Host p]
+
+def prog : List D := p
+
+@[instance_reducible]
+def layout : Kraken.Layout D := h.toLayout
+
+def exe : Kraken.Executable D := h.toLayout.apply p
+
+def addrOf (k : Nat) : Int64 := (h.toLayout.apply p).addrOf k
+
+@[instance_reducible]
+def labels : Labels := Kraken.Executable.labels (Host.exe (p := p))
+
+theorem sizeBefore_eq_of_addrOf_eq {j k : Nat}
+    (heq : (h.toLayout.apply p).addrOf j = (h.toLayout.apply p).addrOf k) :
+    (h.toLayout.apply p).sizeBefore j = (h.toLayout.apply p).sizeBefore k :=
+  h.addr_determines_offset j k heq
+
+theorem inert_of_getElem? {i : Nat} {d : D} (hd : p[i]? = some d)
+    (hz : h.size i = 0) : Directive.Inert d :=
+  h.zero_inert i d hd hz
+
+def startAddr [DecidableEq D] {sub : List D} (hinf : sub.IsInfix p) : Int64 :=
+  (h.toLayout.apply p).addrOf (sub.infixIdx p hinf)
+
+def endAddr [DecidableEq D] {sub : List D} (hinf : sub.IsInfix p) : Int64 :=
+  (h.toLayout.apply p).addrOf (sub.infixIdx p hinf + sub.length)
+
+theorem exe_getElem? (i : Nat) :
+    (h.toLayout.apply p).program[i]? =
+      p[i]?.map (fun d => {directive := d, size := h.size i}) :=
+  Kraken.Layout.apply_getElem? p i
+
+theorem addrOf_succ {k : Nat} {d : D} (hd : p[k]? = some d) :
+    (h.toLayout.apply p).addrOf (k + 1) =
+      (h.toLayout.apply p).addrOf k + .ofNat (h.size k) :=
+  Kraken.Executable.addrOf_apply_succ (layout := h.toLayout) hd
+
+theorem inert_of_size_zero {d : D}
+    (hmem : {directive := d, size := 0} ∈ (h.toLayout.apply p).program) : Directive.Inert d := by
+  obtain ⟨m, hm⟩ := List.mem_iff_getElem?.mp hmem
+  rw [Kraken.Layout.apply_getElem?] at hm
+  obtain ⟨d', hd', h_eq⟩ := Option.map_eq_some_iff.mp hm
+  injection h_eq with hd_eq hz_eq
+  subst hd_eq
+  exact h.zero_inert m d' hd' hz_eq
+
+theorem directivesAtAddress_addrOf {k : Nat} {c : Kraken.Sized D}
+    (hc : (h.toLayout.apply p).program[k]? = some c) (hz : 0 < c.size) :
+    ∃ pre, (h.toLayout.apply p).directivesAtAddress ((h.toLayout.apply p).addrOf k) = pre ++ [c] ∧
+      ∀ c ∈ pre, c.size = 0 :=
+  Kraken.Executable.directivesAtAddress_addrOf (h.toLayout.apply p) h.addr_determines_offset hc hz
+
+end Kraken.Host
+
+export Kraken.Host (startAddr endAddr)
 
 section
 variable {D MD : Type} [ArchDirective D MD]
@@ -465,17 +550,11 @@ theorem Directives.interp_inert_append [Labels] {pre rest : List (Kraken.Sized D
     rw [hinert]
     exact ih (fun c hc => hpre c (List.mem_cons_of_mem _ hc)) s
 
-variable [layout : Kraken.Layout D] {prog : List D}
-  [hv : Layout.Valid prog]
+variable {prog : List D} [layout : Host prog]
 
 theorem Directive.inert_of_size_zero {d : D}
-    (h : {directive := d, size := 0} ∈ (layout prog).program) : Directive.Inert d := by
-  obtain ⟨m, hm⟩ := List.mem_iff_getElem?.mp h
-  rw [Kraken.Layout.apply_getElem?] at hm
-  obtain ⟨d', hd', h_eq⟩ := Option.map_eq_some_iff.mp hm
-  injection h_eq with hd_eq hz_eq
-  subst hd_eq
-  exact hv.zero_inert m d' hd' hz_eq
+    (h : {directive := d, size := 0} ∈ (layout prog).program) : Directive.Inert d :=
+  Kraken.Host.inert_of_size_zero h
 
 theorem eventually_of_getElem? {k : Nat} {d : D}
     (hd_prog : prog[k]? = some d) {post : @Post (Kraken.MachineState MD)} {s : MD}
@@ -496,7 +575,7 @@ theorem eventually_of_getElem? {k : Nat} {d : D}
     exact Eventually.done _ h
   · refine Eventually.step _ post ?_ fun _ hb => Eventually.done _ hb
     obtain ⟨pre, hat, hpre⟩ :=
-      Kraken.Executable.directivesAtAddress_addrOf (layout prog) hv.addr_determines_offset hd hz
+      Kraken.Executable.directivesAtAddress_addrOf (layout prog) layout.addr_determines_offset hd hz
     have hinert : ∀ c ∈ pre, c.size = 0 ∧ Directive.Inert c.directive := fun c hc =>
       ⟨hpre c hc, Directive.inert_of_size_zero (prog := prog) (hpre c hc ▸
         Kraken.Executable.mem_of_mem_directivesAtAddress (hat ▸ List.mem_append_left _ hc))⟩
@@ -505,6 +584,15 @@ theorem eventually_of_getElem? {k : Nat} {d : D}
     rw [hat]
     refine (Directives.interp_inert_append hinert _ _ _ _).mpr ?_
     simpa only [Directives.interp] using h
+
+theorem Kraken.Host.eventually_of_interp {k : Nat} {d : D} {p : List D}
+    (hdp : (d :: p).IsInfixAt prog k) {post : @Post (Kraken.MachineState MD)} {s : MD}
+    (h : (@ArchDirective.interp _ _ _ (Kraken.Executable.labels (layout prog)) d s
+      ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩
+      (fun s' => .done ⟨s', (layout prog).addrOf (k + 1)⟩)
+      (fun a s' => .done ⟨s', a⟩)).All (fun mid _ => post mid)) :
+    Eventually (step1 (layout prog)) post ⟨s, (layout prog).addrOf k⟩ :=
+  eventually_of_getElem? hdp.cons.1 h
 
 theorem eventually_of_getElem?_traced {k : Nat} {d : D}
     (hd_prog : prog[k]? = some d) {post : @Post (Kraken.MachineState MD × List LeakageEvent)}
@@ -528,7 +616,7 @@ theorem eventually_of_getElem?_traced {k : Nat} {d : D}
     exact Eventually.done _ h
   · refine Eventually.step _ post ?_ fun _ hb => Eventually.done _ hb
     obtain ⟨pre, hat, hpre⟩ :=
-      Kraken.Executable.directivesAtAddress_addrOf (layout prog) hv.addr_determines_offset hd hz
+      Kraken.Executable.directivesAtAddress_addrOf (layout prog) layout.addr_determines_offset hd hz
     have hinert : ∀ c ∈ pre, c.size = 0 ∧ Directive.Inert c.directive := fun c hc =>
       ⟨hpre c hc, Directive.inert_of_size_zero (prog := prog) (hpre c hc ▸
         Kraken.Executable.mem_of_mem_directivesAtAddress (hat ▸ List.mem_append_left _ hc))⟩
@@ -537,6 +625,8 @@ theorem eventually_of_getElem?_traced {k : Nat} {d : D}
     rw [hat]
     refine (Directives.interp_inert_append hinert _ _ _ _).mpr ?_
     simpa only [Directives.interp] using h
+
+/-! ### Program and Subprogram Specifications (`Spec`, `Exec`, `ExecSpec`) -/
 
 variable [OmniDirective D]
 
@@ -864,7 +954,7 @@ theorem step1_cps_subprog {sub : List D}
     Eventually (step1 (layout prog)) post ⟨s, pc⟩ := by
   letI := Kraken.Executable.labels (layout prog)
   refine step1_cps_slice k sub.length post hpc ?_
-  rw [← Kraken.Layout.program_shift_of_slice layout hsub]
+  rw [← Kraken.Layout.program_shift_of_slice layout.toLayout hsub]
   exact (@hexec (layout.shift prog k) _).mono (fun ⟨s', pc'⟩ hp => hcont s' pc' hp)
 
 theorem step1_subprog {sub : List D}
@@ -880,7 +970,7 @@ theorem step1_subprog {sub : List D}
     Eventually (step1 (layout prog)) post ⟨s, pc⟩ := by
   refine step1_cps_subprog k hsub hpc (fun [layout' : Kraken.Layout D] [Labels] => hexec hpre) ?_
   rintro s' _ ⟨rfl, hQ⟩
-  rw [Kraken.Layout.addrOf_shift_of_slice layout hsub (Nat.le_refl _)] at hQ ⊢
+  rw [Kraken.Layout.addrOf_shift_of_slice layout.toLayout hsub (Nat.le_refl _)] at hQ ⊢
   exact hcont s' hQ
 
 theorem step1_cps_subprog_traced {sub : List D}
@@ -898,7 +988,7 @@ theorem step1_cps_subprog_traced {sub : List D}
     Eventually (step1Traced (layout prog)) post ⟨⟨s, pc⟩, pfx⟩ := by
   letI := Kraken.Executable.labels (layout prog)
   refine step1_cps_slice_accum k sub.length post hpc ?_
-  rw [← Kraken.Layout.program_shift_of_slice layout hsub]
+  rw [← Kraken.Layout.program_shift_of_slice layout.toLayout hsub]
   refine Effects.All_mono _ (fun ⟨s', pc'⟩ tr' ⟨htr, hp⟩ => ?_) (@hexec (layout.shift prog k) _)
   dsimp only [TracedPost.prepend] at htr ⊢
   subst htr
@@ -923,7 +1013,7 @@ theorem step1_subprog_traced {sub : List D}
   refine step1_cps_subprog_traced k hsub hpc
     (fun [layout' : Kraken.Layout D] [Labels] => hexec hpre) ?_
   rintro s' _ ⟨rfl, hQ⟩
-  rw [Kraken.Layout.addrOf_shift_of_slice layout hsub (Nat.le_refl _)] at hQ ⊢
+  rw [Kraken.Layout.addrOf_shift_of_slice layout.toLayout hsub (Nat.le_refl _)] at hQ ⊢
   exact hcont s' hQ
 
 end

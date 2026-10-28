@@ -1,17 +1,18 @@
 module
 
-/-
-Common infrastructure for Kraken's differential instruction fuzzers:
-- Status flag bitmasks (`StatusFlagBits`, `UndefFlags`) and determinism checking (`stepDeterministic`)
-- Random instruction and operand generation (`GenM`, `Gen`, `gen_ctors%`, `genInt64`)
-- Assembler filtering (`filterAssemblable`), sequence generation (`genSequence`), and CLI (`handleCli?`)
--/
-
 public import Kraken.Layout
 public import Kraken.Mem
 public import Kraken.Semantics
 public import Lean.Data.Json
 public meta import Lean.Elab.Term
+
+/-!
+# Common Infrastructure for Differential Instruction Fuzzers
+
+- Status flag bitmasks (`StatusFlagBits`, `UndefFlags`) and determinism checking (`stepDeterministic`)
+- Random instruction and operand generation (`GenM`, `Gen`, `gen_ctors%`, `genInt64`)
+- Assembler filtering (`filterAssemblable`), sequence generation (`genSequence`), and CLI (`handleCli?`)
+-/
 
 public section
 

@@ -8,26 +8,13 @@ meta import Kraken.Mem
 
 @[expose] public section
 
-/-
-Common Kraken execution semantics: effects, machine state, memory access, and directive stepping.
+/-!
+# Common Kraken Execution Semantics
+
+Effects, machine state, memory load/store operations, and architecture-generic directive stepping.
 -/
 
--- injective coercions only
-attribute [-instance] BitVec.instNatCast
-attribute [-instance] BitVec.instIntCast
-instance : Coe Bool Nat where coe := Bool.toNat
-
-namespace BitVec
-@[kstep] def unsigned {w} (x : BitVec w) : Int := x.toNat
-@[kstep] def signed {w} (x : BitVec w) : Int := x.toInt
-@[kstep] def take {w} (x : BitVec w) (n : Nat) : BitVec n := x.extractLsb' 0 n
-@[kstep] def drop {w} (x : BitVec w) (n : Nat) : BitVec (w - n) := x.extractLsb' n (w-n)
-end BitVec
-
-attribute [kstep]
-  BitVec.ofInt_add
-  BitVec.ofInt_toInt
-  BitVec.truncate
+/-! ### Nondeterminism and Machine Effects -/
 
 abbrev DataMem := Mem 64
 instance : Repr DataMem where reprPrec _ _ := "<opaque memory>"
@@ -78,24 +65,16 @@ end Kraken
 export Kraken (LeakageEvent)
 export Kraken.Effects (unimplemented unaligned nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access require_const_time)
 
+/-! ### Memory Load and Store Operations -/
+
 class HasDataMem (MachineData : Type) where
   dmem : MachineData → DataMem
   withDmem : MachineData → DataMem → MachineData
 
 attribute [reducible, kstep] HasDataMem.dmem HasDataMem.withDmem
 
--- Since MMIO can cause devices to do arbitrary actions, a load might actually
--- *modify* memory. For instance:
--- A TEST instruction might load a flag from an MMIO address and bitwise-and it with
--- an immediate, and if the result is non-zero, it might mean that some device has
--- finished processing a buffer and therefore now passes ownership of that buffer
--- to the CPU.
--- Note that `ret` takes a whole `MachineData` instead of only `DataMem`, which
--- provides a bit more flexibility than we need: MachineData.load might change
--- dmem, but will not change the registers or status flags.
--- But this superfluous flexibility helps us simplify the state-threading:
--- Instead of writing `fun v dmem => ... { s with dmem } ...` everywhere, we
--- can just write `fun v s => ...` and the new `s` will shadow the old `s`.
+/-- Load `w` bytes at `addr`. On an unmapped address (`nonmem_load`, e.g. MMIO), the device may
+update `DataMem`; `ret` receives the updated `MD` directly to simplify state threading. -/
 def MachineData.load {MD : Type} [HasDataMem MD]
     (s : MD) (addr : BitVec 64) (w : Width)
     (ret : w.type → MD → Kraken.Effects MD) : Kraken.Effects MD :=
@@ -104,6 +83,7 @@ def MachineData.load {MD : Type} [HasDataMem MD]
     | .some i => ret (.ofInt _ i) s
     | .none => nonmem_load (HasDataMem.dmem s) addr w (fun v dmem => ret v (HasDataMem.withDmem s dmem)))
 
+/-- Store `v` of width `w` at `addr`. -/
 def MachineData.store {MD : Type} [HasDataMem MD]
     (s : MD) (addr : BitVec 64) {w : Width} (v : w.type)
     (ret : MD → Kraken.Effects MD) : Kraken.Effects MD :=
@@ -112,6 +92,8 @@ def MachineData.store {MD : Type} [HasDataMem MD]
     | .some _ =>
         ret (HasDataMem.withDmem s (Mem.storeInt (HasDataMem.dmem s) addr w.bytes v.toInt))
     | .none => nonmem_store (HasDataMem.dmem s) addr v (fun dmem' => ret (HasDataMem.withDmem s dmem')))
+
+/-! ### Architecture Directives, Labels, and Stepping -/
 
 class ArchDirective (D : Type) (MD : outParam Type) where
   label? : D → Option Label
@@ -213,15 +195,6 @@ theorem labels_label_eq_layout_addrOf {D MD : Type} [ArchDirective D MD]
     (h : prog.findIdx? (fun d => ArchDirective.label? d == some l) = some k)
     (layout : Kraken.Layout D) :
     ((layout prog).labels).label l = layout.addrOf k :=
-  label_eq_layout_addrOf prog l k h layout
-
-theorem withAddresses_label_eq_layout_addrOf {D MD : Type} [ArchDirective D MD]
-    (prog : List D) (l : Label) (k : Nat)
-    (h : prog.findIdx? (fun d => ArchDirective.label? d == some l) = some k)
-    (layout : Kraken.Layout D) :
-    ((layout prog).withAddresses.findSome?
-      (fun {directive, addr, ..} => if ArchDirective.label? directive = some l then .some addr else .none)).getD (-1) =
-      layout.addrOf k :=
   label_eq_layout_addrOf prog l k h layout
 
 def directivesFromLabel {D MD : Type} [ArchDirective D MD]

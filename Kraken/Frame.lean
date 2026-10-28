@@ -1,7 +1,9 @@
 module
 
-/-
-Register frames ("modifies" clauses) for Kraken block specifications.
+public meta import Lean
+
+/-!
+# Register Frames (`≡ … except` and `≡ … on`)
 
 A block specification states which registers a block *writes*; every other register is
 preserved. `r' ≡ r except [X13, X14]` says that register files `r'` and `r` agree on every
@@ -10,11 +12,11 @@ instance of the register-file type, so the notation (and the tactics `kframe`/`k
 work for any architecture.
 -/
 
-public meta import Lean
-
 @[expose] public section
 
 namespace Kraken
+
+/-! ### Register Files and Frame Relations -/
 
 /-- A register file `R` with a finite set of register `Name`s, all holding 64-bit values. -/
 class RegFile (R : Type) where
@@ -92,15 +94,19 @@ open Lean Meta Elab Term
 
 namespace Kraken.RegFile
 
+/-! ### Syntax and Elaboration for `≡ … except` and `≡ … on` -/
+
 /-- `r' ≡ r except [a, b, …]`: `r'` and `r` agree on all registers but `a, b, …`
 (see `Kraken.RegFile.EqExcept`). Each entry may be a constructor of the register-name type of
 `r'`/`r` (possibly nested one level, e.g. `X13` for `XRegOrSp.reg XReg.X13`) or a derived view
-`f : R → α` (e.g. `beeuX`, which expands to the registers `[X3, X4, X5, X6, X7]` it reads). -/
+`f : R → α` (e.g. a tuple view `fun r => (r.X3, r.X4)`, which expands to the registers `[X3, X4]`
+it reads). -/
 syntax:50 term:51 " ≡ " term:51 " except " "[" ident,* "]" : term
 
 /-- `r' ≡ r on [a, b, …]`: `r'` and `r` agree on the listed registers or derived views
-(e.g. `SP`, `X29`, `beeuN`; see `Kraken.RegFile.EqOn`). Each name is resolved on the register-file
-type `R` first (`R.<name>`), or elaborated directly as a function `R → α`. -/
+(e.g. `SP`, `X29`, or a custom projection `f : R → α`; see `Kraken.RegFile.EqOn`). Each name is
+resolved on the register-file type `R` first (`R.<name>`), or elaborated directly as a function
+`R → α`. -/
 syntax:50 term:51 " ≡ " term:51 " on " "[" ident,* "]" : term
 
 /-- Resolve a register name against the constructors of `nameTy` (one level of nesting allowed). -/

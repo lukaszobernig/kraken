@@ -4,9 +4,15 @@ import Kraken.Mem
 import Kraken.Separation
 import Kraken.SeparationTactics
 
+/-!
+# Tests for `Kraken.Separation` and `Kraken.SeparationTactics`
+-/
+
 open Std.ExtHashMap
 
 namespace Kraken.SeparationTests
+
+/-! ### Basic `ecancel` Permutations and Existentials -/
 
 def indexed {w} (index : Nat) (p : Mem w → Prop) : Mem w → Prop :=
   fun m => p m ∧ index = index
