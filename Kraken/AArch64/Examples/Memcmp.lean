@@ -1,10 +1,5 @@
 module
 
-/-
-Constant-time byte-slice comparison `memcmp(a, b, n)` on AArch64:
-functional correctness and constant-time execution (leakage trace independence from buffer contents).
--/
-
 import Kraken.AArch64.OmniSemantics
 import Kraken.AArch64.Parser
 import Kraken.AArch64.Semantics
@@ -13,80 +8,24 @@ import Kraken.SeparationTactics
 import Kraken.Tactics
 import Kraken.ToBytes
 
+/-!
+# AArch64 Constant-Time `memcmp` Verification
+
+Functional correctness and constant-time security of AAPCS64 `memcmp(a, b, n)`:
+1. Functional correctness: `x0` holds `diffAcc a b` (the bitwise OR of `(a[i] ^^^ b[i])`),
+   which is `0` iff `a = b`.
+2. Constant-time security: for fixed public pointers `p_a`, `p_b` and length `n`,
+   there exists a single leakage trace `tr` produced for all secret byte slices `a`, `b`.
+-/
+
 open Kraken.AArch64
 open Kraken.AArch64.Parser
-open Std
 open Std.ExtHashMap
 
-/-- Bitwise OR of byte-wise XOR differences across two byte lists. -/
-def diffAcc : List UInt8 → List UInt8 → BitVec 64
-  | x :: xs, y :: ys => (x.toBitVec.setWidth 64 ^^^ y.toBitVec.setWidth 64) ||| diffAcc xs ys
-  | _, _ => 0#64
-
-@[simp]
-theorem diffAcc_nil_left (b : List UInt8) : diffAcc [] b = 0#64 := rfl
-
-@[simp]
-theorem diffAcc_nil_right (a : List UInt8) : diffAcc a [] = 0#64 := by
-  cases a <;> rfl
-
-theorem diffAcc_eq_zero_iff (a b : List UInt8) (h : a.length = b.length) :
-    diffAcc a b = 0#64 ↔ a = b := by
-  induction a generalizing b with
-  | nil =>
-    cases b with
-    | nil => simp [diffAcc]
-    | cons _ _ => simp at h
-  | cons x xs ih =>
-    cases b with
-    | nil => simp at h
-    | cons y ys =>
-      simp only [List.length_cons, Nat.add_right_cancel_iff] at h
-      simp only [diffAcc, List.cons.injEq]
-      have h_or :
-          ((x.toBitVec.setWidth 64 ^^^ y.toBitVec.setWidth 64) ||| diffAcc xs ys) = 0#64 ↔
-            (x.toBitVec.setWidth 64 ^^^ y.toBitVec.setWidth 64) = 0#64 ∧ diffAcc xs ys = 0#64 := by
-        grind
-      have h_xy : (x.toBitVec.setWidth 64 ^^^ y.toBitVec.setWidth 64) = 0#64 ↔ x = y := by
-        cases x; cases y; simp; grind
-      rw [h_or, h_xy, ih ys h]
-
-private theorem ofInt_ofBytes_singleton (x : UInt8) :
-    BitVec.ofInt 8 (Int.ofBytes [x]) = x.toBitVec := by
-  simp [Int.ofBytes]
-
-theorem diffAcc_one (a b : List UInt8) (ha : a.length = 1) (hb : b.length = 1) (acc : BitVec 64) :
-    acc |||
-      (((BitVec.ofInt 8 (Int.ofBytes a)).setWidth 32 ^^^
-        (BitVec.ofInt 8 (Int.ofBytes b)).setWidth 32).setWidth 64) =
-      acc ||| diffAcc a b := by
-  rcases List.length_eq_one_iff.mp ha with ⟨x, rfl⟩
-  rcases List.length_eq_one_iff.mp hb with ⟨y, rfl⟩
-  rw [ofInt_ofBytes_singleton, ofInt_ofBytes_singleton]
-  simp only [diffAcc]
-  grind
-
-theorem diffAcc_step (a b : List UInt8) (ha : 0 < a.length) (hb : 0 < b.length) (acc : BitVec 64) :
-    (acc |||
-      (((BitVec.ofInt 8 (Int.ofBytes (a.take 1))).setWidth 32 ^^^
-        (BitVec.ofInt 8 (Int.ofBytes (b.take 1))).setWidth 32).setWidth 64)) |||
-      diffAcc (a.drop 1) (b.drop 1) =
-      acc ||| diffAcc a b := by
-  cases a with
-  | nil => simp at ha
-  | cons x xs =>
-    cases b with
-    | nil => simp at hb
-    | cons y ys =>
-      simp only [List.take_succ_cons, List.take_zero, List.drop_succ_cons, List.drop_zero, diffAcc]
-      rw [ofInt_ofBytes_singleton, ofInt_ofBytes_singleton]
-      grind
-
--- Constant-time AAPCS64 byte-slice comparison `memcmp(a, b, n)`
--- Arguments: x0 = a, x1 = b, x2 = n, x30 (lr) = return address
--- Returns: x0 = diffAcc a b (0 iff a = b), sp = sp₀, pc = x30₀,
---          callee-saved registers and memory preserved,
---          and execution leakage trace depends only on public `(p_a, p_b, n)`.
+/-- Constant-time AAPCS64 `memcmp(a, b, n)`:
+- Arguments: `x0 = a`, `x1 = b`, `x2 = n`, `x30 (lr) = ra`
+- Returns: `x0 = diffAcc a b` (`0` iff `a = b`), `sp = sp₀`, `pc = x30₀`,
+  callee-saved registers and memory preserved, with no early exit on mismatch. -/
 def memcmp : Program := parseAArch64("
 memcmp:
   mov x3, #0
@@ -165,7 +104,7 @@ block_spec memcmp_ct_correct memcmp (p_a p_b : BitVec 64) (n : Nat)
       kintro s₀ ⟨a, b, R⟩ ⟨a_bs, b_bs, acc, frame⟩ ⟨s, pc⟩
         ⟨rfl, h_x2_v, h_x0_v, h_x1_v, h_x3_v, h_x30, h_sp, h_cs, h_a_v, h_b_v, h_mem_v⟩
       kprologue memcmp at "loop" to "done" with s
-      have := diffAcc_one a_bs b_bs h_a_v h_b_v acc
+      have := diffAcc_one_32 a_bs b_bs h_a_v h_b_v acc
       kfinish memcmp
     · kloop_next (v - 1) (a_ptr + 1#64, b_ptr + 1#64)
       kintro s₀ ⟨a, b, R⟩ ⟨a_bs, b_bs, acc, frame⟩ ⟨s, pc⟩
@@ -183,7 +122,7 @@ block_spec memcmp_ct_correct memcmp (p_a p_b : BitVec 64) (n : Nat)
       rintro t_s ⟨hQ_pc, hQ_x3, hQ_x30, hQ_sp, hQ_cs, _, hQ_mem⟩
       refine ⟨hQ_pc, ?_, hQ_x30, hQ_sp, hQ_cs, by omega, by ecancel⟩
       rw [hQ_x3]
-      exact diffAcc_step a_bs b_bs (by omega) (by omega) acc
+      exact diffAcc_step_32 a_bs b_bs (by omega) (by omega) acc
   · kintro s₀ ⟨a, b, R⟩ ⟨st, pc⟩ ⟨rfl, h_x3, h_x30, h_sp, h_cs, h_ab_len, h_mem_q⟩
     kprologue memcmp at "done" with st
     have h_diff := diffAcc_eq_zero_iff a b h_ab_len

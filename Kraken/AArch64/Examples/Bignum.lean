@@ -1,23 +1,26 @@
 module
 
-/-
-Verification of BoringSSL's `bn_add_words` and `bn_sub_words`
-from `third_party/openssl/boringssl/src/gen/bcm/bn-armv8-linux.S`.
--/
-
 import Kraken.AArch64.OmniSemantics
 import Kraken.AArch64.Parser
 import Kraken.AArch64.Semantics
+import Kraken.BitVecArith
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
+import Kraken.ToBytes
+
+/-!
+# Verification of BoringSSL's `bn_add_words` and `bn_sub_words`
+
+Functional correctness of `bn_add_words` and `bn_sub_words` from BoringSSL's
+`third_party/openssl/boringssl/src/gen/bcm/bn-armv8-linux.S` (stripped of assembler directives
+and `AARCH64_VALID_CALL_TARGET` BTI macro annotations).
+-/
 
 open Kraken.AArch64
 open Kraken.AArch64.Parser
-open Std
 open Std.ExtHashMap
 
--- Stripped of assembler directives and `AARCH64_VALID_CALL_TARGET` BTI macro annotations.
 def bn_add_words : Program := parseAArch64("
 // BN_ULONG bn_add_words(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,
 //                       size_t num);
@@ -89,30 +92,9 @@ bn_sub_words:
 	ret
 ")
 
-/-! ## Helper Lemmas for Multi-Limb Carry/Borrow Arithmetic -/
+/-! ## Multi-Limb Carry/Borrow Arithmetic -/
 
-theorem Int.ofBytes_take_16 (bs : List UInt8) (h : 16 ≤ bs.length) :
-    Int.ofBytes (bs.take 16) =
-      Int.ofBytes (bs.take 8) + 256 ^ 8 * Int.ofBytes ((bs.drop 8).take 8) := by
-  have h_split : bs.take 16 = bs.take 8 ++ (bs.drop 8).take 8 := by
-    rw [← List.take_add]
-  rw [h_split, Int.ofBytes_append, List.length_take_of_le (by omega)]
-
-theorem Int.ofBytes_take_mul_16_succ (bs : List UInt8) (v : Nat) (hv : 0 < v) (h : 16 * v ≤ bs.length) :
-    Int.ofBytes (bs.take (16 * v)) =
-      Int.ofBytes (bs.take 16) + 256 ^ 16 * Int.ofBytes ((bs.drop 16).take (16 * (v - 1))) := by
-  have h_eq : 16 * v = 16 + 16 * (v - 1) := by omega
-  rw [h_eq, List.take_add, Int.ofBytes_append, List.length_take_of_le (by omega)]
-
-theorem Int.ofBytes_take_drop_pair (bs : List UInt8) (n : Nat) (h : n ≤ bs.length) :
-    Int.ofBytes bs = Int.ofBytes (bs.take n) + 256 ^ n * Int.ofBytes (bs.drop n) := by
-  conv => lhs; rw [← List.take_append_drop n bs]
-  rw [Int.ofBytes_append, List.length_take_of_le h]
-
-theorem pow_256_add (a b : Nat) : (256 : Int) ^ (a + b) = 256 ^ a * 256 ^ b := by
-  rw [Int.pow_add]
-
-theorem pow_256_16_mul_pred (v : Nat) (hv : 0 < v) :
+private theorem pow_256_16_mul_pred (v : Nat) (hv : 0 < v) :
     (256 : Int) ^ 16 * 256 ^ (16 * (v - 1)) = 256 ^ (16 * v) := by
   rw [← Int.pow_add, show 16 + 16 * (v - 1) = 16 * v by omega]
 
@@ -219,7 +201,7 @@ block_spec bn_add_words_correct bn_add_words s₀
         Int.ofBytes (ap_bs.take (16 * 1)) + Int.ofBytes (bp_bs.take (16 * 1)) +
         (if flags.c then 1 else 0)
       rw [Nat.mul_one, Int.ofBytes_append, Int.toBytes_length,
-          Int.ofBytes_take_16 ap_bs (by omega), Int.ofBytes_take_16 bp_bs (by omega)]
+          Int.ofBytes_take_add ap_bs 8 8 (by omega), Int.ofBytes_take_add bp_bs 8 8 (by omega)]
       dsimp +zetaDelta only [v0, v1, c1, adcsCarry, adcsWord] at h_step0 h_step1 ⊢
       omega
     · kprologue bn_add_words at ".Ladd_loop" to ".Ladd_tail" with s
@@ -252,9 +234,9 @@ block_spec bn_add_words_correct bn_add_words s₀
       · rw [hQ_x0, BitVec.add_assoc, ← BitVec.ofNat_add, h_16_v]
       · rw [hQ_x1, BitVec.add_assoc, ← BitVec.ofNat_add, h_16_v]
       · rw [hQ_x2, BitVec.add_assoc, ← BitVec.ofNat_add, h_16_v]
-      · rw [Int.ofBytes_append, h_w01_len,
-            Int.ofBytes_take_mul_16_succ ap_bs v hv (by omega),
-            Int.ofBytes_take_mul_16_succ bp_bs v hv (by omega)]
+      · rw [Int.ofBytes_append, h_w01_len, ← h_16_v,
+            Int.ofBytes_take_add ap_bs 16 (16 * (v - 1)) (by omega),
+            Int.ofBytes_take_add bp_bs 16 (16 * (v - 1)) (by omega), h_16_v]
         have h_pair_val : Int.ofBytes (Int.toBytes 8 v0 ++ Int.toBytes 8 v1) =
             Int.ofBytes (ap_bs.take 8) + 256 ^ 8 * Int.ofBytes ((ap_bs.drop 8).take 8) +
             (Int.ofBytes (bp_bs.take 8) + 256 ^ 8 * Int.ofBytes ((bp_bs.drop 8).take 8)) +
@@ -263,10 +245,13 @@ block_spec bn_add_words_correct bn_add_words s₀
           rw [Int.ofBytes_append, Int.toBytes_length]
           dsimp +zetaDelta only [v0, v1, c1, adcsCarry, adcsWord] at h_step0 h_step1 ⊢
           omega
-        have h_ap16 := Int.ofBytes_take_16 ap_bs (by omega)
-        have h_bp16 := Int.ofBytes_take_16 bp_bs (by omega)
+        have h_ap16 : Int.ofBytes (ap_bs.take 16) =
+            Int.ofBytes (ap_bs.take 8) + 256 ^ 8 * Int.ofBytes ((ap_bs.drop 8).take 8) :=
+          Int.ofBytes_take_add ap_bs 8 8 (by omega)
+        have h_bp16 : Int.ofBytes (bp_bs.take 16) =
+            Int.ofBytes (bp_bs.take 8) + 256 ^ 8 * Int.ofBytes ((bp_bs.drop 8).take 8) :=
+          Int.ofBytes_take_add bp_bs 8 8 (by omega)
         have h_pow := pow_256_16_mul_pred v hv
-        -- Combine `h_pair_val` and `256 ^ 16 * h_r_rest_val`
         have h_mul := congrArg ((256 : Int) ^ 16 * ·) h_r_rest_val
         try dsimp only at h_mul
         rw [Int.mul_add, Int.mul_add, Int.mul_left_comm, h_pow] at h_mul
@@ -440,7 +425,7 @@ block_spec bn_sub_words_correct bn_sub_words s₀
         Int.ofBytes (ap_bs.take (16 * 1)) - Int.ofBytes (bp_bs.take (16 * 1)) -
         (if flags.c then 0 else 1)
       rw [Nat.mul_one, Int.ofBytes_append, Int.toBytes_length,
-          Int.ofBytes_take_16 ap_bs (by omega), Int.ofBytes_take_16 bp_bs (by omega)]
+          Int.ofBytes_take_add ap_bs 8 8 (by omega), Int.ofBytes_take_add bp_bs 8 8 (by omega)]
       dsimp +zetaDelta only [v0, v1, c1, sbcsCarry, sbcsWord] at h_step0 h_step1 ⊢
       omega
     · kprologue bn_sub_words at ".Lsub_loop" to ".Lsub_tail" with s
@@ -473,9 +458,9 @@ block_spec bn_sub_words_correct bn_sub_words s₀
       · rw [hQ_x0, BitVec.add_assoc, ← BitVec.ofNat_add, h_16_v]
       · rw [hQ_x1, BitVec.add_assoc, ← BitVec.ofNat_add, h_16_v]
       · rw [hQ_x2, BitVec.add_assoc, ← BitVec.ofNat_add, h_16_v]
-      · rw [Int.ofBytes_append, h_w01_len,
-            Int.ofBytes_take_mul_16_succ ap_bs v hv (by omega),
-            Int.ofBytes_take_mul_16_succ bp_bs v hv (by omega)]
+      · rw [Int.ofBytes_append, h_w01_len, ← h_16_v,
+            Int.ofBytes_take_add ap_bs 16 (16 * (v - 1)) (by omega),
+            Int.ofBytes_take_add bp_bs 16 (16 * (v - 1)) (by omega), h_16_v]
         have h_pair_val : Int.ofBytes (Int.toBytes 8 v0 ++ Int.toBytes 8 v1) =
             Int.ofBytes (ap_bs.take 8) + 256 ^ 8 * Int.ofBytes ((ap_bs.drop 8).take 8) -
             (Int.ofBytes (bp_bs.take 8) + 256 ^ 8 * Int.ofBytes ((bp_bs.drop 8).take 8)) -
@@ -484,8 +469,12 @@ block_spec bn_sub_words_correct bn_sub_words s₀
           rw [Int.ofBytes_append, Int.toBytes_length]
           dsimp +zetaDelta only [v0, v1, c1, sbcsCarry, sbcsWord] at h_step0 h_step1 ⊢
           omega
-        have h_ap16 := Int.ofBytes_take_16 ap_bs (by omega)
-        have h_bp16 := Int.ofBytes_take_16 bp_bs (by omega)
+        have h_ap16 : Int.ofBytes (ap_bs.take 16) =
+            Int.ofBytes (ap_bs.take 8) + 256 ^ 8 * Int.ofBytes ((ap_bs.drop 8).take 8) :=
+          Int.ofBytes_take_add ap_bs 8 8 (by omega)
+        have h_bp16 : Int.ofBytes (bp_bs.take 16) =
+            Int.ofBytes (bp_bs.take 8) + 256 ^ 8 * Int.ofBytes ((bp_bs.drop 8).take 8) :=
+          Int.ofBytes_take_add bp_bs 8 8 (by omega)
         have h_pow := pow_256_16_mul_pred v hv
         have h_mul := congrArg ((256 : Int) ^ 16 * ·) h_r_rest_val
         try dsimp only at h_mul

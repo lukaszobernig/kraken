@@ -1,9 +1,5 @@
 module
 
-/-
-Standard System V AMD64 ABI `memcpy(dst, src, n)` verification.
--/
-
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
@@ -11,14 +7,19 @@ import Kraken.X64.OmniSemantics
 import Kraken.X64.Parser
 import Kraken.X64.Semantics
 
+/-!
+# x86-64 `memcpy` Verification
+
+Functional correctness of System V AMD64 ABI `memcpy(dst, src, n)`.
+-/
+
 open Kraken.X64.Parser
-open Std
 open Std.ExtHashMap
 
--- Standard System V AMD64 ABI `memcpy(dst, src, n)`
--- Arguments: %rdi = dst, %rsi = src, %rdx = n, (%rsp) = return address `ra`
--- Returns: %rax = dst, %rsp = rsp₀ + 8, pc = ra, callee-saved registers preserved,
---          and `src` bytes copied into `dst`.
+/-- System V AMD64 ABI `memcpy(dst, src, n)`:
+- Arguments: `%rdi = dst`, `%rsi = src`, `%rdx = n`, `(%rsp) = ra`
+- Returns: `%rax = dst`, `%rsp = rsp₀ + 8`, `pc = ra`, callee-saved registers preserved,
+  and `src` bytes copied into `dst`. -/
 def memcpy : Program := parse("
 memcpy:
   movq %rdi, %rax
@@ -35,7 +36,7 @@ done:
   ret
 ")
 
-theorem memcpy_correct [layout : Layout] [Layout.Valid memcpy] (s₀ : MachineData)
+theorem memcpy_correct [layout : Host memcpy] (s₀ : MachineData)
     (n : Nat) (ra : UInt64) (dst src : List UInt8) (R : DataMem → Prop) :
     (layout memcpy).Spec s₀
       (pre :=
