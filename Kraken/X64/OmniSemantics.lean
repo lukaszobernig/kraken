@@ -1,14 +1,19 @@
 module
 
-/-
-Omnisemantics for x64.
--/
-
 import Kraken.Attribute
 public import Kraken.OmniSemantics
 public import Kraken.X64.Semantics
 
+/-!
+# Omnisemantics for x86-64
+
+Monotonicity theorems (`*_mono`) for x86-64 operands, memory helpers, instructions, and
+directives, discharging the `OmniDirective Directive` instance.
+-/
+
 @[expose] public section
+
+/-! ### Operand and Memory Monotonicity -/
 
 theorem MachineData.loadAvx_mono (s : MachineData) (addr : BitVec 64) (w : AvxWidth) (ca : Bool)
     {k₁ k₂ : w.type → MachineData → Effects} {P Q : TracedPost MachineData} {pfx : List LeakageEvent}
@@ -109,6 +114,8 @@ theorem MachineData.setAvxLegacy_mono {w} (s : MachineData) (d : AvxDst w) (v : 
   cases d
   · exact hk _ pfx
   · exact MachineData.storeAvx_mono _ _ v ca hk
+
+/-! ### Instruction and Directive Monotonicity -/
 
 set_option maxHeartbeats 2000000 in
 theorem Operation.interp_mono {w} (op : Operation w) (p : Std.Rco Int64) (s : MachineData)

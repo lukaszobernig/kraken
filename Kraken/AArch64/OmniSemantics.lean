@@ -1,25 +1,36 @@
 module
 
-/-
-Omnisemantics for AArch64.
--/
-
 public import Kraken.AArch64.Semantics
 import Kraken.Attribute
 public import Kraken.OmniSemantics
 
+/-!
+# Omnisemantics for AArch64
+
+Monotonicity theorems (`*_mono`) for AArch64 operands, memory helpers, instructions, and
+directives, discharging the `OmniDirective Directive` instance.
+-/
+
 @[expose] public section
 
-theorem AddrExpr.checkSPAlignment_mono (mem : AddrExpr) (s : MachineData)
+/-! ### Operand and Memory Monotonicity -/
+
+theorem RegOrSp.checkSPAlignment_mono (base : RegOrSp .W64) (s : MachineData)
     {k₁ k₂ : Unit → Effects} {Q₁ Q₂ : TracedPost MachineData} {pfx : List LeakageEvent}
     (hk : ∀ u pfx', (k₁ u).All (Q₁.prepend pfx') → (k₂ u).All (Q₂.prepend pfx')) :
-    (mem.checkSPAlignment s k₁).All (Q₁.prepend pfx) → (mem.checkSPAlignment s k₂).All (Q₂.prepend pfx) := by
-  unfold AddrExpr.checkSPAlignment
+    (base.checkSPAlignment s k₁).All (Q₁.prepend pfx) → (base.checkSPAlignment s k₂).All (Q₂.prepend pfx) := by
+  unfold RegOrSp.checkSPAlignment
   split
   · split
     · exact False.elim
     · exact hk () pfx
   · exact hk () pfx
+
+theorem AddrExpr.checkSPAlignment_mono (mem : AddrExpr) (s : MachineData)
+    {k₁ k₂ : Unit → Effects} {Q₁ Q₂ : TracedPost MachineData} {pfx : List LeakageEvent}
+    (hk : ∀ u pfx', (k₁ u).All (Q₁.prepend pfx') → (k₂ u).All (Q₂.prepend pfx')) :
+    (mem.checkSPAlignment s k₁).All (Q₁.prepend pfx) → (mem.checkSPAlignment s k₂).All (Q₂.prepend pfx) :=
+  mem.base.checkSPAlignment_mono s hk
 
 theorem AddrExpr.interpLoad_mono [Labels] {w : Width} (mem : AddrExpr)
     (s : MachineData) (p : Std.Rco Int64)
@@ -42,13 +53,8 @@ theorem AddrExpr.interpStore_mono [Labels] {w : Width} (mem : AddrExpr)
 theorem UnscaledAddrExpr.checkSPAlignment_mono (mem : UnscaledAddrExpr) (s : MachineData)
     {k₁ k₂ : Unit → Effects} {Q₁ Q₂ : TracedPost MachineData} {pfx : List LeakageEvent}
     (hk : ∀ u pfx', (k₁ u).All (Q₁.prepend pfx') → (k₂ u).All (Q₂.prepend pfx')) :
-    (mem.checkSPAlignment s k₁).All (Q₁.prepend pfx) → (mem.checkSPAlignment s k₂).All (Q₂.prepend pfx) := by
-  unfold UnscaledAddrExpr.checkSPAlignment
-  split
-  · split
-    · exact False.elim
-    · exact hk () pfx
-  · exact hk () pfx
+    (mem.checkSPAlignment s k₁).All (Q₁.prepend pfx) → (mem.checkSPAlignment s k₂).All (Q₂.prepend pfx) :=
+  mem.base.checkSPAlignment_mono s hk
 
 theorem UnscaledAddrExpr.interpLoad_mono [Labels] {w : Width} (mem : UnscaledAddrExpr)
     (s : MachineData) (p : Std.Rco Int64)
@@ -99,6 +105,8 @@ theorem MachineData.setRegOrZr_mono (s : MachineData) {w} (r : RegOrZr w) (v : w
     (hk : ∀ s' pfx', (k₁ s').All (Q₁.prepend pfx') → (k₂ s').All (Q₂.prepend pfx')) :
     (s.setRegOrZr r v k₁).All (Q₁.prepend pfx) → (s.setRegOrZr r v k₂).All (Q₂.prepend pfx) :=
   hk _ pfx
+
+/-! ### Instruction and Directive Monotonicity -/
 
 set_option maxHeartbeats 2000000 in
 theorem Operation.interp_mono [Labels] {w} (op : Operation w) (p : Std.Rco Int64) (s : MachineData)
