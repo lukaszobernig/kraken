@@ -67,6 +67,15 @@ example (x k : BitVec 64) (hk63 : k ≤ 63#64) :
   rw [toNat_and_mask x hk63]
   exact Nat.mod_lt _ (Nat.two_pow_pos _)
 
+-- Page + 12-bit offset reconstruction (`adrp` + `:lo12:`).
+example (x : BitVec 64) : (x &&& ~~~0xFFF#64) + (x &&& 0xFFF#64) = x := by
+  simp
+
+example (x : BitVec 64) :
+    (x &&& 18446744073709547520#64) +
+      BitVec.ofInt 64 (Int64.ofNat (x &&& 4095#64).toNat).toInt = x := by
+  simp
+
 /-! ### Clamped count-trailing-zeros (`rbit; orr #1; clz`) -/
 
 example (x : BitVec 64) : (x.reverse ||| 1#64).clz ≤ 63#64 := clz_reverse_or_one_le_63 x

@@ -11,12 +11,17 @@ public meta import Lean.Elab.SyntheticMVars
 public section
 
 /-!
-# Separation-logic interface to Kraken memory-access operations
+# Separation-Logic Interface to Kraken Memory Operations
+
+Notation `v @ a`, separation-logic load/store/splitting lemmas on `Mem`, overlapping byte-slice
+copy helpers, and `@[kspec]` symbolic execution rules for `MachineData.load` and `MachineData.store`.
 -/
 
 open Std
 open Std.ExtHashMap
 open List
+
+/-! ### `v @ a` Notation -/
 
 syntax:62 (name := memAtStx) term:63 " @ " term:63 : term
 
@@ -33,54 +38,7 @@ meta def elabMemAt : Lean.Elab.Term.TermElab := fun stx expectedType? => do
       Lean.Elab.Term.exprToSyntax aExpr
   Lean.Elab.Term.elabTerm (← `(Eq (($v).At $addrStx))) expectedType?
 
-private theorem Std.ExtHashMap.get_union_l_disjoint {key value : Type} [BEq key] [EquivBEq key] [Hashable key] [LawfulHashable key] [LawfulBEq key]
-    (m1 m2 : ExtHashMap key value) (k : key) (v : value) (h_disj : m1.inter m2 = ∅) (h : m1.get? k = some v) :
-    (m1.union m2).get? k = some v := by
-  rw [get?_eq_getElem?] at h
-  rw [get?_eq_getElem?, union_comm_of_disjoint m1 m2 h_disj]
-  simp only [union_eq, getElem?_union, h, Option.some_or]
-
-private theorem Std.ExtHashMap.union_union_override {key value : Type} [BEq key] [EquivBEq key] [Hashable key] [LawfulHashable key] [LawfulBEq key]
-    (m1 m2 m3 : ExtHashMap key value) (h_sub : ∀ k, k ∈ m1 → k ∈ m3) :
-    (m1.union m2).union m3 = m2.union m3 := by
-  apply ExtHashMap.ext_getElem?
-  intro k
-  simp only [union_eq]
-  rw [getElem?_union, getElem?_union, getElem?_union]
-  cases h3 : m3[k]?
-  · have h_not_mem3 : ¬ k ∈ m3 := by
-      intro h_mem
-      have h_some := getElem?_eq_some_getElem h_mem
-      rw [h3] at h_some
-      contradiction
-    have h_not_mem1 : ¬ k ∈ m1 := fun h => h_not_mem3 (h_sub k h)
-    have h1 := getElem?_eq_none h_not_mem1
-    rw [h1]
-    cases h2 : m2[k]?
-    · rfl
-    · rfl
-  · rfl
-
-private theorem List.mapM_loop_id_some {α : Type} (xs : List α) (acc : List α) :
-    List.mapM.loop id (xs.map some) acc = some (acc.reverse ++ xs) := by
-  induction xs generalizing acc <;> simp_all [List.mapM.loop]
-
-private theorem List.allSome_map_some {α : Type} (l : List α) : List.allSome (l.map some) = some l := by
-  exact List.mapM_loop_id_some l []
-
-private theorem List.range_get_eq_map_some {α : Type} (l : List α) :
-    (List.range l.length).map (fun i => if h : i < l.length then some (l.get ⟨i, h⟩) else none) = l.map some := by
-  apply List.ext_get <;> simp
-
-private theorem mem_At_samerange {w : Nat} (_bs bs : List UInt8) (a : BitVec w) (h_len : _bs.length = bs.length) (k : BitVec w) :
-    (k ∈ bs.At a) = (k ∈ _bs.At a) := by
-  exact propext (by simp [mem_At_iff, h_len])
-
-private theorem disjoint_Atsame_l_same_r {w : Nat} (_bs bs : List UInt8) (a : BitVec w) (m2 : Mem w)
-    (h_disj : (_bs.At a).inter m2 = ∅) (h_len : _bs.length = bs.length) :
-    (bs.At a).inter m2 = ∅ := by
-  simpa [eq_empty_iff_forall_not_mem, inter_eq, mem_inter_iff,
-    mem_At_samerange _bs bs a h_len] using h_disj
+/-! ### Separation-Logic Memory Lemmas -/
 
 namespace Mem
 
@@ -205,6 +163,30 @@ theorem length_drop_take_of_le {α : Type} (bs : List α) (off k : Nat)
   omega
 
 end Mem
+
+/-! ### Overlapping Buffer Copy Helpers -/
+
+/-- Result of copying `n` bytes from `src_off` to `dst_off` within a contiguous buffer `buf`
+(allowing arbitrary overlap between `[dst_off, dst_off + n)` and `[src_off, src_off + n)`). -/
+@[expose] def memmoveBytes (buf : List UInt8) (dst_off src_off n : Nat) : List UInt8 :=
+  buf.take dst_off ++ (buf.drop src_off).take n ++ buf.drop (dst_off + n)
+
+theorem memmove_forward_drop_eq (buf : List UInt8) (dst_off d n : Nat)
+    (h_src_bound : dst_off + d + n ≤ buf.length) :
+    (((buf.drop dst_off).take d ++ (buf.drop (dst_off + d)).take n).drop n) ++
+      buf.drop (dst_off + d + n) = buf.drop (dst_off + n) := by
+  rw [← List.drop_drop, ← List.take_add, ← List.drop_append_of_le_length (by simp; omega),
+      show dst_off + d + n = dst_off + (d + n) by omega, ← List.drop_drop,
+      List.take_append_drop, List.drop_drop]
+
+theorem memmove_backward_take_eq (buf : List UInt8) (src_off d n : Nat) :
+    buf.take src_off ++
+      (((buf.drop src_off).take n ++ (buf.drop (src_off + n)).take d).take d) =
+      buf.take (src_off + d) := by
+  rw [← List.drop_drop, ← List.take_add, List.take_take, Nat.min_eq_left (by omega),
+      ← List.take_add]
+
+/-! ### Machine Load and Store Specifications -/
 
 theorem store_sep {MD : Type} [HasDataMem MD]
     (s : MD) (addr : BitVec 64) (w : Width) (v : w.type)

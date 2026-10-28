@@ -2,20 +2,32 @@ module
 
 public import Std.Data.ExtHashMap
 
+/-!
+# Separation Logic over `ExtHashMap`
+
+Defines the separating conjunction `p ⋆ q` and empty-map predicate `emp` over `Std.ExtHashMap`,
+together with disjoint-union properties, commutativity, associativity, identity, and extraction
+lemmas used by `ecancel`.
+-/
+
 public section
 
 namespace Std.ExtHashMap
 
 variable {key value : Type} [BEq key] [EquivBEq key] [Hashable key] [LawfulHashable key] [LawfulBEq key]
 
-def sep (p q : ExtHashMap key value → Prop) (m : ExtHashMap key value) : Prop :=
- ∃ a b, a.union b = m ∧ a.inter b = ∅ ∧ p a ∧ q b
+/-! ### Separating conjunction and empty map -/
 
--- type with: \st
+def sep (p q : ExtHashMap key value → Prop) (m : ExtHashMap key value) : Prop :=
+  ∃ a b, a.union b = m ∧ a.inter b = ∅ ∧ p a ∧ q b
+
+-- Type with: \st
 infixl:60 " ⋆ " => sep
 notation:70 m " =⋆ " P => P m
 
 def emp : ExtHashMap key value → Prop := fun m => m = ∅
+
+/-! ### Disjoint union and intersection lemmas -/
 
 omit [LawfulBEq key] in
 theorem disjoint_symm {m1 m2 : ExtHashMap key value} (h : m1.inter m2 = ∅) :
@@ -38,6 +50,30 @@ theorem union_comm_of_disjoint (m1 m2 : ExtHashMap key value) (h_disj : m1.inter
   cases h1 : m1[k]? <;> cases h2 : m2[k]? <;> simp <;>
     simp_all [mem_iff_isSome_getElem?]
 
+theorem get_union_l_disjoint (m1 m2 : ExtHashMap key value) (k : key) (v : value)
+    (h_disj : m1.inter m2 = ∅) (h : m1.get? k = some v) :
+    (m1.union m2).get? k = some v := by
+  rw [get?_eq_getElem?] at h
+  rw [get?_eq_getElem?, union_comm_of_disjoint m1 m2 h_disj]
+  simp only [union_eq, getElem?_union, h, Option.some_or]
+
+theorem union_union_override (m1 m2 m3 : ExtHashMap key value) (h_sub : ∀ k, k ∈ m1 → k ∈ m3) :
+    (m1.union m2).union m3 = m2.union m3 := by
+  apply ExtHashMap.ext_getElem?
+  intro k
+  simp only [union_eq]
+  rw [getElem?_union, getElem?_union, getElem?_union]
+  cases h3 : m3[k]?
+  · have h_not_mem3 : ¬ k ∈ m3 := by
+      intro h_mem
+      have h_some := getElem?_eq_some_getElem h_mem
+      rw [h3] at h_some
+      contradiction
+    have h_not_mem1 : ¬ k ∈ m1 := fun h => h_not_mem3 (h_sub k h)
+    rw [getElem?_eq_none h_not_mem1]
+    cases m2[k]? <;> rfl
+  · rfl
+
 private theorem union_assoc (m1 m2 m3 : ExtHashMap key value) :
     (m1.union m2).union m3 = m1.union (m2.union m3) := by
   apply ExtHashMap.ext_getElem?
@@ -54,9 +90,9 @@ private theorem disjoint_union_l (a b c : ExtHashMap key value) :
 omit [LawfulBEq key] in
 private theorem disjoint_union_r (a b c : ExtHashMap key value) :
     (a.inter (b.union c) = ∅) = (a.inter b = ∅ ∧ a.inter c = ∅) := by
-  rw [disjoint_symm_iff]
-  rw [disjoint_union_l]
-  rw [disjoint_symm_iff (m1:=b), disjoint_symm_iff (m1:=c)]
+  rw [disjoint_symm_iff, disjoint_union_l, disjoint_symm_iff (m1 := b), disjoint_symm_iff (m1 := c)]
+
+/-! ### Algebraic laws and extraction lemmas for `sep` -/
 
 theorem sep_comm (p q : ExtHashMap key value → Prop) : p ⋆ q = q ⋆ p := by
   have h (p q : ExtHashMap key value → Prop) (m) (h : (p ⋆ q) m) : (q ⋆ p) m := by
@@ -138,3 +174,5 @@ instance : Std.LawfulIdentity (sep : (ExtHashMap key value → Prop) → _) emp 
   right_id := sep_emp
 
 end Std.ExtHashMap
+
+end
