@@ -13,7 +13,8 @@ import Kraken.X64.Semantics
 # x86-64 Example Programs
 
 Example x86-64 assembly programs and correctness proofs demonstrating straight-line
-symbolic execution, memory and stack addressing, loops, and composable block specifications.
+symbolic execution, memory and stack addressing, loops, composable block specifications,
+function pointers, and jump tables.
 -/
 
 open Kraken.X64.Parser
@@ -400,3 +401,120 @@ block_spec swap_and_add_ct_correct swap_and_add (x_ptr y_ptr : BitVec 64)
   kcall swap_and_add_finish_ct_spec.choose_spec s₁ with s₂ ⟨h_rax₂, h_dmem₂⟩
   kdone
   exact ⟨by grind, h_dmem₂ ▸ h_mem₁⟩
+
+/-! ### Function Pointers and Jump Tables -/
+
+/-- Materializing a subroutine's address with `%rip`-relative `leaq`, calling it indirectly with
+`callq %rcx`, and returning with `retq`. -/
+def fn_ptr_call : Program := parse("
+  leaq add_ten(%rip), %rcx
+  callq %rcx
+  jmp done
+add_ten:
+  addq $10, %rax
+  retq
+done:
+  nop
+")
+
+theorem fn_ptr_call_correct [layout : Host fn_ptr_call] (s₀ : MachineData)
+    (ret_slot : UInt64) (R : DataMem → Prop) :
+    (layout fn_ptr_call).Spec s₀
+      (pre := s₀.dmem =⋆ ret_slot @ (s₀.regs.rsp - 8) ⋆ R)
+      (post := fun st =>
+        st.data.regs.rax = s₀.regs.rax + 10 ∧
+        st.data.regs.rsp = s₀.regs.rsp) := by
+  intro h_mem
+  kprologue fn_ptr_call to "add_ten" with s₀
+  kstep
+  kprologue fn_ptr_call at "add_ten"
+  kstep
+  kprologue fn_ptr_call at 2
+  kfinish fn_ptr_call
+
+/-- Higher-order caller that invokes a callback at `fn_ptr` via `callq %rcx` and increments its return value. -/
+def apply_callback : Program := parse("
+  callq %rcx
+  addq $1, %rax
+")
+
+theorem apply_callback_correct [layout : Host apply_callback] (s₀ : MachineData)
+    (fn_ptr : Int64) (f : UInt64 → UInt64) (ret_slot : UInt64) (R : DataMem → Prop)
+    (h_cb : ∀ (s : MachineData) (ra : UInt64),
+      (layout apply_callback).Spec s
+        (pc := fn_ptr)
+        (pre := s.dmem =⋆ ra @ s.regs.rsp ⋆ R)
+        (post := fun st =>
+          st.pc = Int64.ofBitVec ra.toBitVec ∧
+          st.data.regs.rax = f s.regs.rax ∧
+          st.data.regs.rsp = s.regs.rsp + 8 ∧
+          (st.data.dmem =⋆ ra @ s.regs.rsp ⋆ R))) :
+    (layout apply_callback).Spec s₀
+      (pre :=
+        Int64.ofBitVec s₀.regs.rcx.toBitVec = fn_ptr ∧
+        (s₀.dmem =⋆ ret_slot @ (s₀.regs.rsp - 8) ⋆ R))
+      (post := fun st =>
+        st.data.regs.rax = f s₀.regs.rax + 1 ∧
+        st.data.regs.rsp = s₀.regs.rsp) := by
+  rintro ⟨h_fn, h_mem⟩
+  kprologue apply_callback take 1 with s₀
+  kstep
+  rw [h_fn]
+  kcall h_cb _ (UInt64.ofBitVec ((layout apply_callback).addrOf 0 + Int64.ofNat (layout.size 0)).toBitVec)
+    with s₁ ⟨h_rax, h_rsp, h_mem₁⟩
+  kprologue apply_callback at 1
+  kfinish apply_callback
+
+/-- 3-way jump-table dispatch (`%rip`-relative `leaq` + SIB indirect `jmp (%rcx, %rdi, 8)`). -/
+def jump_table : Program := parse("
+  leaq .Ltable(%rip), %rcx
+  jmp (%rcx, %rdi, 8)
+.Lcase0:
+  movq $10, %rax
+  jmp .Ldone
+.Lcase1:
+  movq $20, %rax
+  jmp .Ldone
+.Lcase2:
+  movq $30, %rax
+  jmp .Ldone
+.Ltable:
+.Ldone:
+  nop
+")
+
+theorem jump_table_correct [layout : Host jump_table] (s₀ : MachineData) (R : DataMem → Prop) :
+    (layout jump_table).Spec s₀
+      (pre :=
+        let tbl := ((layout jump_table).label ".Ltable").toBitVec
+        let c0 := UInt64.ofBitVec ((layout jump_table).label ".Lcase0").toBitVec
+        let c1 := UInt64.ofBitVec ((layout jump_table).label ".Lcase1").toBitVec
+        let c2 := UInt64.ofBitVec ((layout jump_table).label ".Lcase2").toBitVec
+        s₀.regs.rdi.toNat < 3 ∧
+        (s₀.dmem =⋆ c0 @ tbl ⋆ c1 @ (tbl + 8#64) ⋆ c2 @ (tbl + 16#64) ⋆ R))
+      (post := fun st =>
+        st.data.regs.rax = match s₀.regs.rdi.toNat with | 0 => 10 | 1 => 20 | _ => 30) := by
+  rintro ⟨h_idx, h_mem⟩
+  have h_cases : s₀.regs.rdi = 0 ∨ s₀.regs.rdi = 1 ∨ s₀.regs.rdi = 2 := by
+    rcases (show s₀.regs.rdi.toNat = 0 ∨ s₀.regs.rdi.toNat = 1 ∨ s₀.regs.rdi.toNat = 2 by omega) with h | h | h
+    · left; exact UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (by simp [h]))
+    · right; left; exact UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (by simp [h]))
+    · right; right; exact UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (by simp [h]))
+  rcases h_cases with h0 | h1 | h2
+  · kprologue jump_table to ".Lcase0" with s₀
+    subst h0
+    kstep
+    kprologue jump_table at ".Lcase0"
+    kfinish jump_table
+  · kprologue jump_table to ".Lcase0" with s₀
+    subst h1
+    kstep
+    kprologue jump_table at ".Lcase1"
+    kfinish jump_table
+  · kprologue jump_table to ".Lcase0" with s₀
+    subst h2
+    kstep
+    kprologue jump_table at ".Lcase2"
+    kfinish jump_table
+
+
