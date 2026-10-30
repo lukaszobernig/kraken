@@ -2,7 +2,6 @@ module
 
 public import Kraken.SeparationMem
 public import Kraken.Tactics
-public import Kraken.X64.OmniSemantics
 public import Kraken.X64.Parser
 public import Kraken.X64.Semantics
 public import Kraken.X64.Sep
