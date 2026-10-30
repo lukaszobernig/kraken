@@ -1,6 +1,5 @@
 module
 
-public import Kraken.AArch64.OmniSemantics
 public import Kraken.AArch64.Parser
 public import Kraken.AArch64.Semantics
 public import Kraken.AArch64.Sep

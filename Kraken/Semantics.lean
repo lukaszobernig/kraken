@@ -47,6 +47,7 @@ inductive LeakageEvent where
 
 inductive Effects (MachineData : Type)
   | done (a : MachineState MachineData)
+  | next (s : MachineData)
   | unimplemented (msg : String)
   | unaligned (addr : BitVec 64) (align : Nat)
   -- loads and stores *outside* the data memory, eg. MMIO, might still affect the data memory:
@@ -59,6 +60,21 @@ inductive Effects (MachineData : Type)
   | require_write_access (addr : BitVec 64) (w : Width) (ok : Unit → Effects MachineData)
   | require_exec_access (p : Std.Rco Int64) (ok : Unit → Effects MachineData)
   | require_const_time (vals : List (BitVec 64)) (ok : Unit → Effects MachineData)
+
+@[kstep] def Effects.onNext {MD : Type} (eff : Effects MD)
+    (next : MD → Effects MD) (jmp : Int64 → MD → Effects MD) : Effects MD :=
+  match eff with
+  | .next s => next s
+  | .done ⟨s, a⟩ => jmp a s
+  | .unimplemented msg => .unimplemented msg
+  | .unaligned addr align => .unaligned addr align
+  | .nonmem_load dmem addr w ret => .nonmem_load dmem addr w (fun v dmem' => (ret v dmem').onNext next jmp)
+  | .nonmem_store dmem addr v ret => .nonmem_store dmem addr v (fun dmem' => (ret dmem').onNext next jmp)
+  | @Kraken.Effects.undefined _ α _ ret => .undefined (fun v : α => (ret v).onNext next jmp)
+  | .require_read_access addr w ok => .require_read_access addr w (fun u => (ok u).onNext next jmp)
+  | .require_write_access addr w ok => .require_write_access addr w (fun u => (ok u).onNext next jmp)
+  | .require_exec_access p ok => .require_exec_access p (fun u => (ok u).onNext next jmp)
+  | .require_const_time vals ok => .require_const_time vals (fun u => (ok u).onNext next jmp)
 
 end Kraken
 
@@ -97,10 +113,7 @@ def MachineData.store {MD : Type} [HasDataMem MD]
 
 class ArchDirective (D : Type) (MD : outParam Type) where
   label? : D → Option Label
-  interp : [Labels] → (d : D) → (s : MD) → (p : Std.Rco Int64) →
-    (next : MD → Kraken.Effects MD) →
-    (jmp : Int64 → MD → Kraken.Effects MD) →
-    Kraken.Effects MD
+  interp : [Labels] → (d : D) → (s : MD) → (p : Std.Rco Int64) → Kraken.Effects MD
   undefSeed : MD → UInt64 := fun _ => 0
 
 attribute [simp] ArchDirective.label?
@@ -112,20 +125,21 @@ def Directives.interp {D MD : Type} [ArchDirective D MD] [Labels]
   match ds with
   | [] => ret pc s
   | {directive, size := sz} :: ds =>
-    ArchDirective.interp directive s (.mk pc (pc + .ofNat sz)) (jmp := ret) (next := fun s =>
-      interp ds s (pc + .ofNat sz) ret)
+    (ArchDirective.interp directive s (.mk pc (pc + .ofNat sz))).onNext
+      (fun s => interp ds s (pc + .ofNat sz) ret)
+      ret
 
 namespace Kraken.Executable
 
 @[instance_reducible]
-def labels {D MD : Type} [ArchDirective D MD]
-    (e : Kraken.Executable D) : Labels :=
+def labels {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr) : Labels :=
   { label l := (e.withAddresses.findSome?
       (fun {directive, addr, ..} => if ArchDirective.label? directive = some l then .some addr else .none)).getD (-1) }
 
 @[reducible]
-def label {D MD : Type} [ArchDirective D MD]
-    (e : Kraken.Executable D) (l : Label) : Int64 :=
+def label {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr) (l : Label) : Int64 :=
   (e.labels).label l
 
 private theorem findSome?_eq_of_getElem? {α β : Type _} {xs : List α} (p : α → Prop) [DecidablePred p]
@@ -167,10 +181,10 @@ private theorem findIdx?_eq_some_elim {α : Type _} {p : α → Bool} {xs : List
         simpa using hp
       | succ j => exact hprior j (Nat.lt_of_succ_lt_succ hj) y hy
 
-theorem label_eq_layout_addrOf {D MD : Type} [ArchDirective D MD]
-    (prog : List D) (l : Label) (k : Nat)
+theorem label_eq_layout_addrOf {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (prog : List (Kraken.Directive Instr)) (l : Label) (k : Nat)
     (h : prog.findIdx? (fun d => ArchDirective.label? d == some l) = some k)
-    (layout : Kraken.Layout D) :
+    (layout : Kraken.Layout Instr) :
     (layout prog).label l = layout.addrOf k := by
   obtain ⟨d, hd, hpd, hprior, hlt⟩ := findIdx?_eq_some_elim h
   have hget : (layout prog).withAddresses[k]? =
@@ -190,32 +204,33 @@ theorem label_eq_layout_addrOf {D MD : Type} [ArchDirective D MD]
     layout.addrOf k
   rw [hfind, Option.getD_some, Kraken.Executable.addrOf_apply_eq layout prog k (Nat.le_of_lt hlt)]
 
-theorem labels_label_eq_layout_addrOf {D MD : Type} [ArchDirective D MD]
-    (prog : List D) (l : Label) (k : Nat)
+theorem labels_label_eq_layout_addrOf {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (prog : List (Kraken.Directive Instr)) (l : Label) (k : Nat)
     (h : prog.findIdx? (fun d => ArchDirective.label? d == some l) = some k)
-    (layout : Kraken.Layout D) :
+    (layout : Kraken.Layout Instr) :
     ((layout prog).labels).label l = layout.addrOf k :=
   label_eq_layout_addrOf prog l k h layout
 
-def directivesFromLabel {D MD : Type} [ArchDirective D MD]
-    (e : Kraken.Executable D) (l : Label) : List (Kraken.Sized D) :=
+def directivesFromLabel {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr) (l : Label) : List (Kraken.Sized (Kraken.Directive Instr)) :=
   e.program.dropWhile (fun x => ArchDirective.label? x.directive != some l)
 
-def step {D MD : Type} [ArchDirective D MD]
-    (e : Kraken.Executable D) (s : Kraken.MachineState MD)
+def step {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr) (s : Kraken.MachineState MD)
     (ret : Kraken.MachineState MD → Kraken.Effects MD) : Kraken.Effects MD :=
   let := e.labels
   Directives.interp (e.directivesAtAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
 
 -- Concrete evaluators for expedient testing
-partial def eval {D MD : Type} [ArchDirective D MD]
-    (e : Kraken.Executable D) (s : Kraken.MachineState MD)
+partial def eval {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr) (s : Kraken.MachineState MD)
     (until_ : Kraken.MachineState MD → Bool) : Except String (Kraken.MachineState MD) :=
   if until_ s then .ok s else handleEffects (e.step s .done)
 where
   handleEffects es :=
     match es with
     | .done s => eval e s until_
+    | .next _ => .error "Unexpected fall-through"
     | .unimplemented msg => .error msg
     | .unaligned addr w => .error s!"Unaligned memory access at {repr addr} (required {w}-byte alignment)"
     | .require_read_access _ _ ok => handleEffects (ok ())
@@ -225,10 +240,10 @@ where
     | .nonmem_load _ addr _ _ => .error s!"Load at unmapped address {repr addr}"
     | .nonmem_store _ addr _ _ => .error s!"Store at unmapped address {repr addr}"
     | @Kraken.Effects.undefined _ _ t cont =>
-        handleEffects (cont (t.from_hash (ArchDirective.undefSeed (D := D) s.data)))
+        handleEffects (cont (t.from_hash (ArchDirective.undefSeed (D := Kraken.Directive Instr) s.data)))
 
 end Kraken.Executable
 
-abbrev eval {D MD : Type} [ArchDirective D MD]
-    [layout : Kraken.Layout D] (prog : List D) :=
+abbrev eval {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    [layout : Kraken.Layout Instr] (prog : List (Kraken.Directive Instr)) :=
   Kraken.Executable.eval (layout prog)

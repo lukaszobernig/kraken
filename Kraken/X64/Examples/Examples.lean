@@ -4,7 +4,6 @@ import Kraken.Eval
 import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
-import Kraken.X64.OmniSemantics
 import Kraken.X64.Parser
 import Kraken.X64.PrettyPrint
 import Kraken.X64.Semantics

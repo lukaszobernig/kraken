@@ -746,7 +746,7 @@ instance : ArchDirective Directive MachineData where
   label?
     | .label l => some l
     | _ => none
-  interp := Directive.interp
+  interp d s p := Directive.interp d s p .next (fun a s' => .done ⟨s', a⟩)
   undefSeed s := hash s.regs
 
 abbrev Layout := Kraken.Layout Instr

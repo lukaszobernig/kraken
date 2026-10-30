@@ -10,7 +10,7 @@ public import Kraken.Semantics
 # Common Kraken Temporal Logic and Omni-Semantics
 
 Temporal logic (`Eventually`), traced and constant-time execution (`TracedEventually`, `CtEventually`),
-loop rules, effect monotonicity (`OmniDirective`), host program validity (`Host`), and program/block
+loop rules, effect monotonicity (`Effects.onNext_mono`), host program validity (`Host`), and program/block
 specifications (`Spec`, `Exec`, `ExecSpec`).
 -/
 
@@ -144,15 +144,28 @@ theorem tailrec_loop_simple {State Measure : Type _} {Ghost : Sort _}
 
 /-! ### Leakage Traces and `Effects.All` -/
 
-abbrev TracedPost (MD : Type) := Kraken.MachineState MD → List LeakageEvent → Prop
+inductive StepResult (MD : Type)
+  | done (a : Kraken.MachineState MD)
+  | next (s : MD)
+
+abbrev TracedPost (MD : Type) := StepResult MD → List LeakageEvent → Prop
+
+@[reducible, kstep] def TracedPost.ofPost {MD : Type}
+    (P : Kraken.MachineState MD → List LeakageEvent → Prop) : TracedPost MD :=
+  fun r tr => match r with
+  | .done a => P a tr
+  | .next _ => False
 
 @[kstep] def TracedPost.prepend {MD : Type} (pfx : List LeakageEvent) (P : TracedPost MD) : TracedPost MD :=
   fun a tr => P a (pfx ++ tr)
 
+@[kstep] def TracedPost.consEvent {MD : Type} (e : LeakageEvent) (P : TracedPost MD) : TracedPost MD :=
+  fun a tr => P a (e :: tr)
+
 theorem TracedPost.prepend_cons {MD : Type} (pfx : List LeakageEvent) (e : LeakageEvent) (P : TracedPost MD) :
-    (fun a tr => P.prepend pfx a (e :: tr)) = P.prepend (pfx ++ [e]) := by
+    (P.prepend pfx).consEvent e = P.prepend (pfx ++ [e]) := by
   funext a tr
-  simp [TracedPost.prepend]
+  simp [TracedPost.prepend, TracedPost.consEvent]
 
 @[simp]
 theorem TracedPost.prepend_nil {MD : Type} (P : TracedPost MD) :
@@ -160,29 +173,35 @@ theorem TracedPost.prepend_nil {MD : Type} (P : TracedPost MD) :
   funext a tr
   simp [TracedPost.prepend]
 
+@[kstep] def TracedPost.prependEvents {MD : Type} : List LeakageEvent → TracedPost MD → TracedPost MD
+  | [], P => P
+  | e :: es, P => TracedPost.prependEvents es (P.consEvent e)
+
 @[kstep] def Kraken.Effects.All {MD : Type} (post : TracedPost MD) :
     Kraken.Effects MD → Prop
-  | .done a => post a []
+  | .done a => post (.done a) []
+  | .next s => post (.next s) []
   | .unimplemented _ => False
   | .unaligned .. => False
   | .nonmem_load .. => False
   | .nonmem_store .. => False
   | @Kraken.Effects.undefined _ α _ cont => ∀ v : α, (cont v).All post
   | .require_read_access addr w cont =>
-      (cont ()).All (fun a tr => post a (.read addr w :: tr))
+      (cont ()).All (post.consEvent (.read addr w))
   | .require_write_access addr w cont =>
-      (cont ()).All (fun a tr => post a (.write addr w :: tr))
+      (cont ()).All (post.consEvent (.write addr w))
   | .require_exec_access p cont =>
-      (cont ()).All (fun a tr => post a (.exec p :: tr))
+      (cont ()).All (post.consEvent (.exec p))
   | .require_const_time vals cont =>
-      (cont ()).All (fun a tr => post a (.var_time vals :: tr))
+      (cont ()).All (post.consEvent (.var_time vals))
 
 theorem Effects.All_mono {MD : Type} (eff : Kraken.Effects MD)
     {P Q : TracedPost MD}
     (hpq : ∀ a tr, P a tr → Q a tr) :
     eff.All P → eff.All Q := by
   induction eff generalizing P Q with
-  | done a => exact hpq a []
+  | done a => exact hpq (.done a) []
+  | next s => exact hpq (.next s) []
   | unimplemented _ | unaligned _ _ | nonmem_load _ _ _ _ | nonmem_store _ _ _ _ => exact False.elim
   | undefined cont ih => exact fun h v => ih v (fun a tr => hpq a tr) (h v)
   | require_read_access addr w cont ih =>
@@ -194,17 +213,49 @@ theorem Effects.All_mono {MD : Type} (eff : Kraken.Effects MD)
   | require_const_time vals cont ih =>
     exact ih () (fun a tr => hpq a (.var_time vals :: tr))
 
+def onNextPost {MD : Type} (post : TracedPost MD)
+    (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD) : TracedPost MD
+  | .next s, tr => (next s).All (post.prependEvents tr)
+  | .done st, tr => (jmp st.pc st.data).All (post.prependEvents tr)
+
+private theorem onNextPost_cons {MD : Type} (post : TracedPost MD)
+    (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD) (e : LeakageEvent) :
+    (onNextPost post next jmp).consEvent e =
+      onNextPost (post.consEvent e) next jmp := by
+  funext r tr
+  cases r <;> rfl
+
+theorem Effects.All_onNext {MD : Type} (eff : Kraken.Effects MD)
+    (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
+    (post : TracedPost MD) :
+    (eff.onNext next jmp).All post =
+      eff.All (onNextPost post next jmp) := by
+  induction eff generalizing post with
+  | next s => rfl
+  | done a => rfl
+  | unimplemented _ | unaligned _ _ | nonmem_load _ _ _ _ | nonmem_store _ _ _ _ => rfl
+  | undefined cont ih =>
+    simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih]
+  | require_read_access addr w cont ih =>
+    simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih, onNextPost_cons]
+  | require_write_access addr w cont ih =>
+    simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih, onNextPost_cons]
+  | require_exec_access p cont ih =>
+    simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih, onNextPost_cons]
+  | require_const_time vals cont ih =>
+    simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih, onNextPost_cons]
+
 /-! ### Traced and Constant-Time Execution (`TracedEventually`, `CtEventually`) -/
 
-def step1 {D MD : Type} [ArchDirective D MD]
-    (e : Kraken.Executable D) (s : Kraken.MachineState MD)
+def step1 {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr) (s : Kraken.MachineState MD)
     (post : @Post (Kraken.MachineState MD)) : Prop :=
-  (e.step s .done).All (fun a _ => post a)
+  (e.step s .done).All (TracedPost.ofPost fun a _ => post a)
 
-def step1Traced {D MD : Type} [ArchDirective D MD]
-    (e : Kraken.Executable D) (st : Kraken.MachineState MD × List LeakageEvent)
+def step1Traced {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr) (st : Kraken.MachineState MD × List LeakageEvent)
     (post : @Post (Kraken.MachineState MD × List LeakageEvent)) : Prop :=
-  (e.step st.1 .done).All (fun a tr => post (a, st.2 ++ tr))
+  (e.step st.1 .done).All (TracedPost.ofPost fun a tr => post (a, st.2 ++ tr))
 
 def TracedGoal {MD : Type} (post : @Post (Kraken.MachineState MD)) (tr : List LeakageEvent) :
     @Post (Kraken.MachineState MD × List LeakageEvent) :=
@@ -215,21 +266,21 @@ theorem TracedGoal.done {MD : Type} {post : @Post (Kraken.MachineState MD)}
     TracedGoal post tr (st, tr) :=
   ⟨rfl, h⟩
 
-def TracedEventually {D MD : Type} [ArchDirective D MD]
-    (e : Kraken.Executable D)
+def TracedEventually {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr)
     (post : @Post (Kraken.MachineState MD))
     (tr : List LeakageEvent)
     (st : Kraken.MachineState MD) : Prop :=
   Eventually (step1Traced e) (TracedGoal post tr) (st, [])
 
-theorem TracedEventually.done {D MD : Type} [ArchDirective D MD]
-    {e : Kraken.Executable D} {post : @Post (Kraken.MachineState MD)}
+theorem TracedEventually.done {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    {e : Kraken.Executable Instr} {post : @Post (Kraken.MachineState MD)}
     {st : Kraken.MachineState MD} {tr : List LeakageEvent} (h : post st) :
     Eventually (step1Traced e) (TracedGoal post tr) (st, tr) :=
   Eventually.done (st, tr) ⟨rfl, h⟩
 
-theorem Eventually.traced_shift {D MD : Type} [ArchDirective D MD]
-    {e : Kraken.Executable D}
+theorem Eventually.traced_shift {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    {e : Kraken.Executable Instr}
     {post : @Post (Kraken.MachineState MD × List LeakageEvent)}
     {st : Kraken.MachineState MD} {pfx tr : List LeakageEvent}
     (h : Eventually (step1Traced e) (fun x => post (x.1, pfx ++ x.2)) (st, tr)) :
@@ -244,20 +295,23 @@ theorem Eventually.traced_shift {D MD : Type} [ArchDirective D MD]
     refine Eventually.step (st, pfx ++ tr)
       (fun x => ∃ tr'', x.2 = pfx ++ tr'' ∧ mid_p (x.1, tr'')) ?_ ?_
     · dsimp only [step1Traced] at hstep ⊢
-      refine Effects.All_mono _ (fun a tr' hm => ⟨tr ++ tr', by simp [List.append_assoc], hm⟩) hstep
+      refine Effects.All_mono _ (fun r tr' hm => ?_) hstep
+      cases r with
+      | done a => exact ⟨tr ++ tr', by simp [List.append_assoc], hm⟩
+      | next s => exact False.elim hm
     · rintro ⟨st', _⟩ ⟨tr'', rfl, hm⟩
       exact ih (st', tr'') hm rfl
 
-theorem TracedEventually.weaken {D MD : Type} [ArchDirective D MD]
-    {e : Kraken.Executable D} {p q : @Post (Kraken.MachineState MD)}
+theorem TracedEventually.weaken {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    {e : Kraken.Executable Instr} {p q : @Post (Kraken.MachineState MD)}
     {tr : List LeakageEvent} {st : Kraken.MachineState MD}
     (h : TracedEventually e p tr st) (hpq : ∀ st', p st' → q st') :
     TracedEventually e q tr st :=
   eventually_weaken (step1Traced e) _ _ (st, [])
     (fun x ⟨htr, hp⟩ => ⟨htr, hpq x.1 hp⟩) h
 
-theorem TracedEventually.bind {D MD : Type} [ArchDirective D MD]
-    {e : Kraken.Executable D} {p q : @Post (Kraken.MachineState MD)}
+theorem TracedEventually.bind {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    {e : Kraken.Executable Instr} {p q : @Post (Kraken.MachineState MD)}
     {tr₁ tr₂ : List LeakageEvent} {st : Kraken.MachineState MD}
     (h₁ : TracedEventually e p tr₁ st)
     (h₂ : ∀ st', p st' → TracedEventually e q tr₂ st') :
@@ -272,22 +326,22 @@ theorem TracedEventually.bind {D MD : Type} [ArchDirective D MD]
 /-- Constant-time Hoare triple over a family of secret contexts `sec : Secret`:
 there exists a single leakage trace `tr` such that for all `sec : Secret` and
 initial states `st` satisfying `pre sec st`, execution reaches `post sec` with trace `tr`. -/
-def CtEventually {D MD : Type} [ArchDirective D MD] {Secret : Sort _}
-    (e : Kraken.Executable D)
+def CtEventually {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD] {Secret : Sort _}
+    (e : Kraken.Executable Instr)
     (pre post : Secret → @Post (Kraken.MachineState MD)) : Prop :=
   ∃ tr : List LeakageEvent,
     ∀ sec st, pre sec st → TracedEventually e (post sec) tr st
 
-theorem CtEventually.weaken {D MD : Type} [ArchDirective D MD] {Secret : Sort _}
-    {e : Kraken.Executable D} {pre post₁ post₂ : Secret → @Post (Kraken.MachineState MD)}
+theorem CtEventually.weaken {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD] {Secret : Sort _}
+    {e : Kraken.Executable Instr} {pre post₁ post₂ : Secret → @Post (Kraken.MachineState MD)}
     (h : CtEventually e pre post₁)
     (himp : ∀ sec st, post₁ sec st → post₂ sec st) :
     CtEventually e pre post₂ := by
   obtain ⟨tr, htr⟩ := h
   exact ⟨tr, fun sec st hpre => (htr sec st hpre).weaken (himp sec)⟩
 
-theorem CtEventually.conseq {D MD : Type} [ArchDirective D MD] {Secret : Sort _}
-    {e : Kraken.Executable D} {pre₁ pre₂ post₁ post₂ : Secret → @Post (Kraken.MachineState MD)}
+theorem CtEventually.conseq {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD] {Secret : Sort _}
+    {e : Kraken.Executable Instr} {pre₁ pre₂ post₁ post₂ : Secret → @Post (Kraken.MachineState MD)}
     (hpre : ∀ sec st, pre₂ sec st → pre₁ sec st)
     (hpost : ∀ sec st, post₁ sec st → post₂ sec st)
     (h : CtEventually e pre₁ post₁) :
@@ -295,8 +349,8 @@ theorem CtEventually.conseq {D MD : Type} [ArchDirective D MD] {Secret : Sort _}
   obtain ⟨tr, htr⟩ := h
   exact ⟨tr, fun sec st hp => (htr sec st (hpre sec st hp)).weaken (hpost sec)⟩
 
-theorem CtEventually.bind {D MD : Type} [ArchDirective D MD] {Secret : Sort _}
-    {e : Kraken.Executable D} {P R Q : Secret → @Post (Kraken.MachineState MD)}
+theorem CtEventually.bind {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD] {Secret : Sort _}
+    {e : Kraken.Executable Instr} {P R Q : Secret → @Post (Kraken.MachineState MD)}
     (h₁ : CtEventually e P R)
     (h₂ : CtEventually e R Q) :
     CtEventually e P Q := by
@@ -312,9 +366,9 @@ theorem exists_forall_unpack_first {T α β : Type _} {P : T → α × β → Pr
     (∃ tr : T, ∀ p : α × β, P tr p) = (∃ tr : T, ∀ (a : α) (b : β), P tr (a, b)) :=
   propext ⟨fun ⟨tr, h⟩ => ⟨tr, fun a b => h (a, b)⟩, fun ⟨tr, h⟩ => ⟨tr, fun ⟨a, b⟩ => h a b⟩⟩
 
-theorem tailrec_loop_traced {D MD Measure Pub Secret Ghost : Type _}
-    [ArchDirective D MD]
-    (e : Kraken.Executable D)
+theorem tailrec_loop_traced {Instr MD Measure Pub Secret Ghost : Type _}
+    [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr)
     (Inv : Measure → Pub → Prop := fun _ _ => True)
     (P Q : Measure → Pub → Secret → Ghost → @Post (Kraken.MachineState MD))
     (v0 : Measure) (pub0 : Pub)
@@ -339,9 +393,9 @@ theorem tailrec_loop_traced {D MD Measure Pub Secret Ghost : Type _}
       rintro mid_s ⟨g', hP', hQ_impl⟩
       exact (hrest sec g' mid_s hP').weaken hQ_impl
 
-theorem tailrec_loop_cps_traced {D MD Measure Pub Secret Ghost : Type _}
-    [ArchDirective D MD]
-    (e : Kraken.Executable D)
+theorem tailrec_loop_cps_traced {Instr MD Measure Pub Secret Ghost : Type _}
+    [ArchDirective (Kraken.Directive Instr) MD]
+    (e : Kraken.Executable Instr)
     (pc : Int64 := e.startAddr)
     {pre : MD → Secret → Prop}
     {post : MD → Secret → @Post (Kraken.MachineState MD)}
@@ -381,63 +435,38 @@ theorem tailrec_loop_cps_traced {D MD Measure Pub Secret Ghost : Type _}
     exact ⟨(tr_init ++ tr_loop) ++ tr_post, fun s₀ sec hI =>
       ((henter s₀ sec hI).bind (hloop (s₀, sec) (g0 s₀ sec))).bind (hpost s₀ sec)⟩
 
-/-! ### Monotonicity of Effects and Directives (`OmniDirective`) -/
+/-! ### Monotonicity of `Effects.onNext` -/
 
-theorem Effects.undefined_mono {MD α : Type} [NondetSupportingType α]
-    {k₁ k₂ : α → Kraken.Effects MD} {P Q : TracedPost MD} {pfx : List LeakageEvent}
-    (hk : ∀ v pfx', (k₁ v).All (P.prepend pfx') → (k₂ v).All (Q.prepend pfx')) :
-    (Kraken.Effects.undefined k₁).All (P.prepend pfx) →
-    (Kraken.Effects.undefined k₂).All (Q.prepend pfx) :=
-  fun h v => hk v pfx (h v)
-
-theorem Effects.require_const_time_mono {MD : Type} (vals : List (BitVec 64))
-    {k₁ k₂ : Unit → Kraken.Effects MD} {P Q : TracedPost MD} {pfx : List LeakageEvent}
-    (hk : ∀ u pfx', (k₁ u).All (P.prepend pfx') → (k₂ u).All (Q.prepend pfx')) :
-    (Kraken.Effects.require_const_time vals k₁).All (P.prepend pfx) →
-    (Kraken.Effects.require_const_time vals k₂).All (Q.prepend pfx) := by
-  dsimp only [Kraken.Effects.All]
-  rw [TracedPost.prepend_cons, TracedPost.prepend_cons]
-  exact hk () _
-
-theorem MachineData.load_mono {MD : Type} [HasDataMem MD]
-    (s : MD) (addr : BitVec 64) (w : Width)
-    {k₁ k₂ : w.type → MD → Kraken.Effects MD}
-    {P Q : TracedPost MD} {pfx : List LeakageEvent}
-    (hk : ∀ v s' pfx', (k₁ v s').All (P.prepend pfx') → (k₂ v s').All (Q.prepend pfx')) :
-    (MachineData.load s addr w k₁).All (P.prepend pfx) →
-    (MachineData.load s addr w k₂).All (Q.prepend pfx) := by
-  unfold MachineData.load
-  dsimp only [Kraken.Effects.All]
-  rw [TracedPost.prepend_cons, TracedPost.prepend_cons]
-  split
-  · exact hk _ _ _
-  · exact False.elim
-
-theorem MachineData.store_mono {MD : Type} [HasDataMem MD]
-    (s : MD) (addr : BitVec 64) {w : Width} (v : w.type)
-    {k₁ k₂ : MD → Kraken.Effects MD}
-    {P Q : TracedPost MD} {pfx : List LeakageEvent}
-    (hk : ∀ s' pfx', (k₁ s').All (P.prepend pfx') → (k₂ s').All (Q.prepend pfx')) :
-    (MachineData.store s addr v k₁).All (P.prepend pfx) →
-    (MachineData.store s addr v k₂).All (Q.prepend pfx) := by
-  unfold MachineData.store
-  dsimp only [Kraken.Effects.All]
-  rw [TracedPost.prepend_cons, TracedPost.prepend_cons]
-  split
-  · exact hk _ _
-  · exact False.elim
-
-class OmniDirective (D : Type) {MD : outParam Type}
-    [ArchDirective D MD] : Prop where
-  interp_mono : ∀ [Labels] (d : D) (s : MD) (p : Std.Rco Int64)
+theorem Effects.onNext_mono {MD : Type} (eff : Kraken.Effects MD)
     {P Q : TracedPost MD}
     {next₁ next₂ : MD → Kraken.Effects MD}
     {jmp₁ jmp₂ : Int64 → MD → Kraken.Effects MD}
-    {pfx : List LeakageEvent},
-    (∀ s' pfx', (next₁ s').All (P.prepend pfx') → (next₂ s').All (Q.prepend pfx')) →
-    (∀ a s' pfx', (jmp₁ a s').All (P.prepend pfx') → (jmp₂ a s').All (Q.prepend pfx')) →
-    (ArchDirective.interp d s p next₁ jmp₁).All (P.prepend pfx) →
-    (ArchDirective.interp d s p next₂ jmp₂).All (Q.prepend pfx)
+    {pfx : List LeakageEvent}
+    (hnext : ∀ s' pfx', (next₁ s').All (P.prepend pfx') → (next₂ s').All (Q.prepend pfx'))
+    (hjmp : ∀ a s' pfx', (jmp₁ a s').All (P.prepend pfx') → (jmp₂ a s').All (Q.prepend pfx')) :
+    (eff.onNext next₁ jmp₁).All (P.prepend pfx) →
+    (eff.onNext next₂ jmp₂).All (Q.prepend pfx) := by
+  induction eff generalizing pfx with
+  | next s => exact hnext s pfx
+  | done a => exact hjmp a.pc a.data pfx
+  | unimplemented _ | unaligned _ _ | nonmem_load _ _ _ _ | nonmem_store _ _ _ _ => exact False.elim
+  | undefined cont ih => exact fun h v => ih v (h v)
+  | require_read_access addr w cont ih =>
+    dsimp only [Kraken.Effects.onNext, Kraken.Effects.All]
+    rw [TracedPost.prepend_cons, TracedPost.prepend_cons]
+    exact ih ()
+  | require_write_access addr w cont ih =>
+    dsimp only [Kraken.Effects.onNext, Kraken.Effects.All]
+    rw [TracedPost.prepend_cons, TracedPost.prepend_cons]
+    exact ih ()
+  | require_exec_access p cont ih =>
+    dsimp only [Kraken.Effects.onNext, Kraken.Effects.All]
+    rw [TracedPost.prepend_cons, TracedPost.prepend_cons]
+    exact ih ()
+  | require_const_time vals cont ih =>
+    dsimp only [Kraken.Effects.onNext, Kraken.Effects.All]
+    rw [TracedPost.prepend_cons, TracedPost.prepend_cons]
+    exact ih ()
 
 /-! ### Inert Directives and Host Program Validity (`Host`) -/
 
@@ -448,21 +477,22 @@ def Directive.Inert {D MD : Type} [ArchDirective D MD]
     (next : MD → Kraken.Effects MD)
     (jmp : Int64 → MD → Kraken.Effects MD)
     (post : TracedPost MD),
-    (ArchDirective.interp d s p next jmp).All post ↔ (next s).All post
+    ((ArchDirective.interp d s p).onNext next jmp).All post ↔ (next s).All post
 
 namespace Kraken
 
 /-- Abstract validity assumptions about the `Layout` of a host program `prog`. -/
-class Host {D : Type} {MD : outParam Type} [ArchDirective D MD]
-    (prog : outParam (List D)) extends Kraken.Layout D where
+class Host {Instr : Type} {MD : outParam Type} [ArchDirective (Kraken.Directive Instr) MD]
+    (prog : outParam (List (Kraken.Directive Instr))) extends Kraken.Layout Instr where
   /-- Any directive that occupies zero space in the executable must be semantically inert. -/
   zero_inert : ∀ i d, prog[i]? = some d → size i = 0 → Directive.Inert d
   /-- Two directives at the same address have the same offset in the executable. -/
   addr_determines_offset : ∀ j k, (toLayout.apply prog).addrOf j = (toLayout.apply prog).addrOf k →
     (toLayout.apply prog).sizeBefore j = (toLayout.apply prog).sizeBefore k
 
-instance {D MD : Type} [ArchDirective D MD] {prog : List D} :
-    CoeFun (Host prog) (fun _ => List D → Kraken.Executable D) where
+instance {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+    {prog : List (Kraken.Directive Instr)} :
+    CoeFun (Host prog) (fun _ => List (Kraken.Directive Instr) → Kraken.Executable Instr) where
   coe h := h.toLayout.apply
 
 end Kraken
@@ -471,14 +501,15 @@ export Kraken (Host)
 
 namespace Kraken.Host
 
-variable {D MD : Type} [ArchDirective D MD] {p : List D} [h : Host p]
+variable {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
+  {p : List (Kraken.Directive Instr)} [h : Host p]
 
-def prog : List D := p
+def prog : List (Kraken.Directive Instr) := p
 
 @[instance_reducible]
-def layout : Kraken.Layout D := h.toLayout
+def layout : Kraken.Layout Instr := h.toLayout
 
-def exe : Kraken.Executable D := h.toLayout.apply p
+def exe : Kraken.Executable Instr := h.toLayout.apply p
 
 def addrOf (k : Nat) : Int64 := (h.toLayout.apply p).addrOf k
 
@@ -490,14 +521,14 @@ theorem sizeBefore_eq_of_addrOf_eq {j k : Nat}
     (h.toLayout.apply p).sizeBefore j = (h.toLayout.apply p).sizeBefore k :=
   h.addr_determines_offset j k heq
 
-theorem inert_of_getElem? {i : Nat} {d : D} (hd : p[i]? = some d)
+theorem inert_of_getElem? {i : Nat} {d : Kraken.Directive Instr} (hd : p[i]? = some d)
     (hz : h.size i = 0) : Directive.Inert d :=
   h.zero_inert i d hd hz
 
-def startAddr [DecidableEq D] {sub : List D} (hinf : sub.IsInfix p) : Int64 :=
+def startAddr [DecidableEq Instr] {sub : List (Kraken.Directive Instr)} (hinf : sub.IsInfix p) : Int64 :=
   (h.toLayout.apply p).addrOf (sub.infixIdx p hinf)
 
-def endAddr [DecidableEq D] {sub : List D} (hinf : sub.IsInfix p) : Int64 :=
+def endAddr [DecidableEq Instr] {sub : List (Kraken.Directive Instr)} (hinf : sub.IsInfix p) : Int64 :=
   (h.toLayout.apply p).addrOf (sub.infixIdx p hinf + sub.length)
 
 theorem exe_getElem? (i : Nat) :
@@ -505,12 +536,12 @@ theorem exe_getElem? (i : Nat) :
       p[i]?.map (fun d => {directive := d, size := h.size i}) :=
   Kraken.Layout.apply_getElem? p i
 
-theorem addrOf_succ {k : Nat} {d : D} (hd : p[k]? = some d) :
+theorem addrOf_succ {k : Nat} {d : Kraken.Directive Instr} (hd : p[k]? = some d) :
     (h.toLayout.apply p).addrOf (k + 1) =
       (h.toLayout.apply p).addrOf k + .ofNat (h.size k) :=
   Kraken.Executable.addrOf_apply_succ (layout := h.toLayout) hd
 
-theorem inert_of_size_zero {d : D}
+theorem inert_of_size_zero {d : Kraken.Directive Instr}
     (hmem : {directive := d, size := 0} ∈ (h.toLayout.apply p).program) : Directive.Inert d := by
   obtain ⟨m, hm⟩ := List.mem_iff_getElem?.mp hmem
   rw [Kraken.Layout.apply_getElem?] at hm
@@ -519,7 +550,7 @@ theorem inert_of_size_zero {d : D}
   subst hd_eq
   exact h.zero_inert m d' hd' hz_eq
 
-theorem directivesAtAddress_addrOf {k : Nat} {c : Kraken.Sized D}
+theorem directivesAtAddress_addrOf {k : Nat} {c : Kraken.Sized (Kraken.Directive Instr)}
     (hc : (h.toLayout.apply p).program[k]? = some c) (hz : 0 < c.size) :
     ∃ pre, (h.toLayout.apply p).directivesAtAddress ((h.toLayout.apply p).addrOf k) = pre ++ [c] ∧
       ∀ c ∈ pre, c.size = 0 :=
@@ -530,9 +561,9 @@ end Kraken.Host
 export Kraken.Host (startAddr endAddr)
 
 section
-variable {D MD : Type} [ArchDirective D MD]
+variable {Instr MD : Type} [ArchDirective (Kraken.Directive Instr) MD]
 
-theorem Directives.interp_inert_append [Labels] {pre rest : List (Kraken.Sized D)}
+theorem Directives.interp_inert_append [Labels] {pre rest : List (Kraken.Sized (Kraken.Directive Instr))}
     (hpre : ∀ c ∈ pre, c.size = 0 ∧ Directive.Inert c.directive) (s : MD) (pc : Int64)
     (ret : Int64 → MD → Kraken.Effects MD)
     (post : TracedPost MD) :
@@ -550,18 +581,18 @@ theorem Directives.interp_inert_append [Labels] {pre rest : List (Kraken.Sized D
     rw [hinert]
     exact ih (fun c hc => hpre c (List.mem_cons_of_mem _ hc)) s
 
-variable {prog : List D} [layout : Host prog]
+variable {prog : List (Kraken.Directive Instr)} [layout : Host prog]
 
-theorem Directive.inert_of_size_zero {d : D}
+theorem Directive.inert_of_size_zero {d : Kraken.Directive Instr}
     (h : {directive := d, size := 0} ∈ (layout prog).program) : Directive.Inert d :=
   Kraken.Host.inert_of_size_zero h
 
-theorem eventually_of_getElem? {k : Nat} {d : D}
+theorem eventually_of_getElem? {k : Nat} {d : Kraken.Directive Instr}
     (hd_prog : prog[k]? = some d) {post : @Post (Kraken.MachineState MD)} {s : MD}
-    (h : (@ArchDirective.interp _ _ _ (Kraken.Executable.labels (layout prog)) d s
-      ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩
+    (h : ((@ArchDirective.interp _ _ _ (Kraken.Executable.labels (layout prog)) d s
+      ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩).onNext
       (fun s' => .done ⟨s', (layout prog).addrOf (k + 1)⟩)
-      (fun a s' => .done ⟨s', a⟩)).All (fun mid _ => post mid)) :
+      (fun a s' => .done ⟨s', a⟩)).All (TracedPost.ofPost fun mid _ => post mid)) :
     Eventually (step1 (layout prog)) post ⟨s, (layout prog).addrOf k⟩ := by
   have hd : (layout prog).program[k]? = some {directive := d, size := layout.size k} := by
     rw [Kraken.Layout.apply_getElem?, hd_prog]; rfl
@@ -585,22 +616,23 @@ theorem eventually_of_getElem? {k : Nat} {d : D}
     refine (Directives.interp_inert_append hinert _ _ _ _).mpr ?_
     simpa only [Directives.interp] using h
 
-theorem Kraken.Host.eventually_of_interp {k : Nat} {d : D} {p : List D}
+theorem Kraken.Host.eventually_of_interp {k : Nat} {d : Kraken.Directive Instr}
+    {p : List (Kraken.Directive Instr)}
     (hdp : (d :: p).IsInfixAt prog k) {post : @Post (Kraken.MachineState MD)} {s : MD}
-    (h : (@ArchDirective.interp _ _ _ (Kraken.Executable.labels (layout prog)) d s
-      ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩
+    (h : ((@ArchDirective.interp _ _ _ (Kraken.Executable.labels (layout prog)) d s
+      ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩).onNext
       (fun s' => .done ⟨s', (layout prog).addrOf (k + 1)⟩)
-      (fun a s' => .done ⟨s', a⟩)).All (fun mid _ => post mid)) :
+      (fun a s' => .done ⟨s', a⟩)).All (TracedPost.ofPost fun mid _ => post mid)) :
     Eventually (step1 (layout prog)) post ⟨s, (layout prog).addrOf k⟩ :=
   eventually_of_getElem? hdp.cons.1 h
 
-theorem eventually_of_getElem?_traced {k : Nat} {d : D}
+theorem eventually_of_getElem?_traced {k : Nat} {d : Kraken.Directive Instr}
     (hd_prog : prog[k]? = some d) {post : @Post (Kraken.MachineState MD × List LeakageEvent)}
     {s : MD} {pfx : List LeakageEvent}
-    (h : (@ArchDirective.interp _ _ _ (Kraken.Executable.labels (layout prog)) d s
-      ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩
+    (h : ((@ArchDirective.interp _ _ _ (Kraken.Executable.labels (layout prog)) d s
+      ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩).onNext
       (fun s' => .done ⟨s', (layout prog).addrOf (k + 1)⟩)
-      (fun a s' => .done ⟨s', a⟩)).All (fun mid tr => post ⟨mid, pfx ++ tr⟩)) :
+      (fun a s' => .done ⟨s', a⟩)).All (TracedPost.ofPost fun mid tr => post ⟨mid, pfx ++ tr⟩)) :
     Eventually (step1Traced (layout prog)) post ⟨⟨s, (layout prog).addrOf k⟩, pfx⟩ := by
   have hd : (layout prog).program[k]? = some {directive := d, size := layout.size k} := by
     rw [Kraken.Layout.apply_getElem?, hd_prog]; rfl
@@ -611,7 +643,7 @@ theorem eventually_of_getElem?_traced {k : Nat} {d : D}
     rw [Directive.inert_of_size_zero (List.mem_of_getElem? hd)] at h
     have h0' : (layout prog).addrOf k + Int64.ofNat 0 = (layout prog).addrOf k := by simp
     rw [h0'] at h
-    dsimp only [Kraken.Effects.All] at h
+    dsimp only [Kraken.Effects.All, TracedPost.ofPost] at h
     rw [List.append_nil] at h
     exact Eventually.done _ h
   · refine Eventually.step _ post ?_ fun _ hb => Eventually.done _ hb
@@ -628,18 +660,16 @@ theorem eventually_of_getElem?_traced {k : Nat} {d : D}
 
 /-! ### Program and Subprogram Specifications (`Spec`, `Exec`, `ExecSpec`) -/
 
-variable [OmniDirective D]
-
-omit layout [OmniDirective D] in
-theorem Eventually.bind_at {e : Kraken.Executable D} {p q : @Post (Kraken.MachineState MD)}
+omit layout in
+theorem Eventually.bind_at {e : Kraken.Executable Instr} {p q : @Post (Kraken.MachineState MD)}
     {s : MD} {pc pc' : Int64}
     (h₁ : Eventually (step1 e) p ⟨s, pc'⟩) (hpc : pc = pc')
     (h₂ : ∀ s', p s' → Eventually (step1 e) q s') :
     Eventually (step1 e) q ⟨s, pc⟩ :=
   hpc ▸ eventually_trans (step1 e) p q ⟨s, pc'⟩ h₁ h₂
 
-omit layout [OmniDirective D] in
-theorem Eventually.bind_at_traced {e : Kraken.Executable D}
+omit layout in
+theorem Eventually.bind_at_traced {e : Kraken.Executable Instr}
     {p : @Post (Kraken.MachineState MD)}
     {q : @Post (Kraken.MachineState MD × List LeakageEvent)}
     {s : MD} {pc pc' : Int64} {pfx tr₁ : List LeakageEvent}
@@ -661,7 +691,7 @@ theorem Eventually.bind_at_traced {e : Kraken.Executable D}
 in state `s₀`, optionally tracking a constant-time leakage `trace`, requiring `pre`
 and ensuring `post` eventually holds. -/
 @[reducible]
-def Kraken.Executable.Spec (e : Kraken.Executable D) (s₀ : MD)
+def Kraken.Executable.Spec (e : Kraken.Executable Instr) (s₀ : MD)
     (pc : Int64 := e.startAddr)
     (trace : Option (List LeakageEvent) := none)
     (pre : Prop := True)
@@ -670,8 +700,8 @@ def Kraken.Executable.Spec (e : Kraken.Executable D) (s₀ : MD)
   | none => pre → Eventually (step1 e) post ⟨s₀, pc⟩
   | some tr => pre → TracedEventually e post tr ⟨s₀, pc⟩
 
-omit layout [OmniDirective D] in
-theorem Kraken.Executable.Spec.bind {e : Kraken.Executable D} {pre : Prop}
+omit layout in
+theorem Kraken.Executable.Spec.bind {e : Kraken.Executable Instr} {pre : Prop}
     {p q : @Post (Kraken.MachineState MD)} {s : MD} {pc : Int64}
     (h₁ : e.Spec s (pc := pc) (pre := pre) (post := p))
     (h₂ : ∀ s', p s' → Eventually (step1 e) q s')
@@ -679,8 +709,8 @@ theorem Kraken.Executable.Spec.bind {e : Kraken.Executable D} {pre : Prop}
     Eventually (step1 e) q ⟨s, pc⟩ :=
   eventually_trans (step1 e) p q ⟨s, pc⟩ (h₁ hpre) h₂
 
-omit layout [OmniDirective D] in
-theorem Kraken.Executable.Spec.bind_at {e : Kraken.Executable D} {pre : Prop}
+omit layout in
+theorem Kraken.Executable.Spec.bind_at {e : Kraken.Executable Instr} {pre : Prop}
     {p q : @Post (Kraken.MachineState MD)} {s : MD} {pc pc' : Int64}
     (h₁ : e.Spec s (pc := pc') (pre := pre) (post := p))
     (hpc : pc = pc')
@@ -689,8 +719,8 @@ theorem Kraken.Executable.Spec.bind_at {e : Kraken.Executable D} {pre : Prop}
     Eventually (step1 e) q ⟨s, pc⟩ :=
   Eventually.bind_at (h₁ hpre) hpc h₂
 
-omit layout [OmniDirective D] in
-theorem Kraken.Executable.Spec.bind_traced {e : Kraken.Executable D} {pre : Prop}
+omit layout in
+theorem Kraken.Executable.Spec.bind_traced {e : Kraken.Executable Instr} {pre : Prop}
     {p : @Post (Kraken.MachineState MD)}
     {q : @Post (Kraken.MachineState MD × List LeakageEvent)}
     {s : MD} {pc : Int64} {pfx tr₁ : List LeakageEvent}
@@ -700,8 +730,8 @@ theorem Kraken.Executable.Spec.bind_traced {e : Kraken.Executable D} {pre : Prop
     Eventually (step1Traced e) q (⟨s, pc⟩, pfx) :=
   Eventually.bind_at_traced (h₁ hpre) rfl h₂
 
-omit layout [OmniDirective D] in
-theorem Kraken.Executable.Spec.bind_at_traced {e : Kraken.Executable D} {pre : Prop}
+omit layout in
+theorem Kraken.Executable.Spec.bind_at_traced {e : Kraken.Executable Instr} {pre : Prop}
     {p : @Post (Kraken.MachineState MD)}
     {q : @Post (Kraken.MachineState MD × List LeakageEvent)}
     {s : MD} {pc pc' : Int64} {pfx tr₁ : List LeakageEvent}
@@ -713,7 +743,7 @@ theorem Kraken.Executable.Spec.bind_at_traced {e : Kraken.Executable D} {pre : P
   Eventually.bind_at_traced (h₁ hpre) hpc h₂
 
 omit layout in
-theorem Directives.interp_mono [Labels] (cs : List (Kraken.Sized D)) (s : MD) (pc : Int64)
+theorem Directives.interp_mono [Labels] (cs : List (Kraken.Sized (Kraken.Directive Instr))) (s : MD) (pc : Int64)
     {ret₁ ret₂ : Int64 → MD → Kraken.Effects MD}
     {P Q : TracedPost MD} {pfx : List LeakageEvent}
     (hret : ∀ a s' pfx', (ret₁ a s').All (P.prepend pfx') → (ret₂ a s').All (Q.prepend pfx')) :
@@ -722,26 +752,27 @@ theorem Directives.interp_mono [Labels] (cs : List (Kraken.Sized D)) (s : MD) (p
   induction cs generalizing s pc pfx with
   | nil => exact hret pc s pfx
   | cons c cs ih =>
-    exact OmniDirective.interp_mono c.directive s ⟨pc, pc + .ofNat c.size⟩
+    exact Effects.onNext_mono (ArchDirective.interp c.directive s ⟨pc, pc + .ofNat c.size⟩)
       (fun s' pfx' => ih s' (pc + .ofNat c.size) (pfx := pfx')) hret
 
 /-- Symbolic execution of all directives in an `Executable` starting from `e.startAddr`. -/
-def Kraken.Executable.Exec [Labels] (e : Kraken.Executable D) (s : MD)
+def Kraken.Executable.Exec [Labels] (e : Kraken.Executable Instr) (s : MD)
     (post : @Post (Kraken.MachineState MD)) : Prop :=
-  (Directives.interp e.program s e.startAddr (fun pc s' => .done ⟨s', pc⟩)).All (fun a _ => post a)
+  (Directives.interp e.program s e.startAddr (fun pc s' => .done ⟨s', pc⟩)).All
+    (TracedPost.ofPost fun a _ => post a)
 
 /-- Symbolic execution of all directives in an `Executable` starting from `e.startAddr`,
 tracking constant-time leakage trace `tr`. -/
-def Kraken.Executable.ExecTraced [Labels] (e : Kraken.Executable D) (s : MD)
+def Kraken.Executable.ExecTraced [Labels] (e : Kraken.Executable Instr) (s : MD)
     (tr : List LeakageEvent) (post : @Post (Kraken.MachineState MD)) : Prop :=
   (Directives.interp e.program s e.startAddr (fun pc s' => .done ⟨s', pc⟩)).All
-    (fun a tr' => TracedGoal post tr (a, tr'))
+    (TracedPost.ofPost fun a tr' => TracedGoal post tr (a, tr'))
 
 /-- Specification for straight-line symbolic execution of all directives in an `Executable`
 starting from `e.startAddr` in state `s₀`, optionally tracking a constant-time leakage `trace`,
 requiring `pre` and ensuring `post`. -/
 @[reducible]
-def Kraken.Executable.ExecSpec [Labels] (e : Kraken.Executable D) (s₀ : MD)
+def Kraken.Executable.ExecSpec [Labels] (e : Kraken.Executable Instr) (s₀ : MD)
     (trace : Option (List LeakageEvent) := none)
     (pre : Prop := True)
     (post : @Post (Kraken.MachineState MD)) : Prop :=
@@ -750,21 +781,21 @@ def Kraken.Executable.ExecSpec [Labels] (e : Kraken.Executable D) (s₀ : MD)
   | some tr => pre → e.ExecTraced s₀ tr post
 
 omit layout in
-theorem Kraken.Executable.Exec.mono [Labels] {e : Kraken.Executable D} {s : MD}
+theorem Kraken.Executable.Exec.mono [Labels] {e : Kraken.Executable Instr} {s : MD}
     {P Q : @Post (Kraken.MachineState MD)}
     (h : e.Exec s P) (hpq : ∀ st, P st → Q st) : e.Exec s Q :=
   Directives.interp_mono e.program s e.startAddr
-    (P := fun a _ => P a) (Q := fun a _ => Q a) (pfx := [])
+    (P := TracedPost.ofPost fun a _ => P a) (Q := TracedPost.ofPost fun a _ => Q a) (pfx := [])
     (ret₁ := fun pc s' => .done ⟨s', pc⟩) (ret₂ := fun pc s' => .done ⟨s', pc⟩)
     (fun a s' _ hp => hpq ⟨s', a⟩ hp) h
 
 omit layout in
-theorem Kraken.Executable.ExecTraced.mono [Labels] {e : Kraken.Executable D} {s : MD}
+theorem Kraken.Executable.ExecTraced.mono [Labels] {e : Kraken.Executable Instr} {s : MD}
     {tr : List LeakageEvent} {P Q : @Post (Kraken.MachineState MD)}
     (h : e.ExecTraced s tr P) (hpq : ∀ st, P st → Q st) : e.ExecTraced s tr Q :=
   Directives.interp_mono e.program s e.startAddr
-    (P := fun a tr' => TracedGoal P tr (a, tr'))
-    (Q := fun a tr' => TracedGoal Q tr (a, tr')) (pfx := [])
+    (P := TracedPost.ofPost fun a tr' => TracedGoal P tr (a, tr'))
+    (Q := TracedPost.ofPost fun a tr' => TracedGoal Q tr (a, tr')) (pfx := [])
     (ret₁ := fun pc s' => .done ⟨s', pc⟩) (ret₂ := fun pc s' => .done ⟨s', pc⟩)
     (fun a s' _ ⟨htr, hp⟩ => ⟨htr, hpq ⟨s', a⟩ hp⟩) h
 
@@ -773,13 +804,13 @@ theorem step1_cps_slice (k n : Nat) (post : @Post (Kraken.MachineState MD))
     (h : (@Directives.interp _ _ _ (Kraken.Executable.labels (layout prog))
           (((layout prog).program.drop k).take n) s ((layout prog).addrOf k)
           (fun pc s => .done ⟨s, pc⟩)).All
-        (fun mid _ => Eventually (step1 (layout prog)) post mid)) :
+        (TracedPost.ofPost fun mid _ => Eventually (step1 (layout prog)) post mid)) :
     Eventually (step1 (layout prog)) post ⟨s, pc⟩ := by
   subst hpc
   letI := Kraken.Executable.labels (layout prog)
   induction n generalizing k s with
   | zero =>
-    simpa only [List.take_zero, Directives.interp, Kraken.Effects.All] using h
+    simpa only [List.take_zero, Directives.interp, Kraken.Effects.All, TracedPost.ofPost] using h
   | succ n ih =>
     by_cases hk : k < prog.length
     · have hd_prog : prog[k]? = some prog[k] := List.getElem?_eq_getElem hk
@@ -788,10 +819,10 @@ theorem step1_cps_slice (k n : Nat) (post : @Post (Kraken.MachineState MD))
       obtain ⟨hlt_exe, hget_exe⟩ := List.getElem?_eq_some_iff.mp hd_exe
       rw [List.drop_eq_getElem_cons hlt_exe, hget_exe, List.take_succ_cons,
           Directives.interp, ← Kraken.Executable.addrOf_apply_succ hd_prog] at h
-      have hstep := OmniDirective.interp_mono prog[k] s
-        ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩
-        (P := fun mid _ => Eventually (step1 (layout prog)) post mid)
-        (Q := fun mid _ => Eventually (step1 (layout prog)) post mid)
+      have hstep := Effects.onNext_mono
+        (ArchDirective.interp prog[k] s ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩)
+        (P := TracedPost.ofPost fun mid _ => Eventually (step1 (layout prog)) post mid)
+        (Q := TracedPost.ofPost fun mid _ => Eventually (step1 (layout prog)) post mid)
         (pfx := [])
         (next₂ := fun s' => .done ⟨s', (layout prog).addrOf (k + 1)⟩)
         (jmp₂ := fun a s' => .done ⟨s', a⟩)
@@ -801,14 +832,14 @@ theorem step1_cps_slice (k n : Nat) (post : @Post (Kraken.MachineState MD))
       exact eventually_trans _ _ _ _ (eventually_of_getElem? hd_prog hstep) (fun _ h => h)
     · have hdrop : (layout prog).program.drop k = [] :=
         List.drop_eq_nil_of_le (by simp [Kraken.Layout.apply]; omega)
-      simpa only [hdrop, List.take_nil, Directives.interp, Kraken.Effects.All] using h
+      simpa only [hdrop, List.take_nil, Directives.interp, Kraken.Effects.All, TracedPost.ofPost] using h
 
 theorem step1_cps_at (k : Nat) (post : @Post (Kraken.MachineState MD))
     {s : MD} {pc : Int64} (hpc : pc = (layout prog).addrOf k)
     (h : (@Directives.interp _ _ _ (Kraken.Executable.labels (layout prog))
           ((layout prog).program.drop k) s ((layout prog).addrOf k)
           (fun pc s => .done ⟨s, pc⟩)).All
-        (fun mid _ => Eventually (step1 (layout prog)) post mid)) :
+        (TracedPost.ofPost fun mid _ => Eventually (step1 (layout prog)) post mid)) :
     Eventually (step1 (layout prog)) post ⟨s, pc⟩ := by
   refine step1_cps_slice k (layout prog).program.length post hpc ?_
   rw [List.take_of_length_le (by simp)]
@@ -819,11 +850,11 @@ theorem step1_cps (post : @Post (Kraken.MachineState MD))
     (h : (@Directives.interp _ _ _ (Kraken.Executable.labels (layout prog))
           ((layout prog).directivesFromAddress initial.pc) initial.data initial.pc
           (fun pc s => .done ⟨s, pc⟩)).All
-        (fun mid _ => Eventually (step1 (layout prog)) post mid)) :
+        (TracedPost.ofPost fun mid _ => Eventually (step1 (layout prog)) post mid)) :
     Eventually (step1 (layout prog)) post initial := by
   rcases initial with ⟨s, pc⟩
   rcases Kraken.Executable.directivesFromAddress_cases (layout prog) pc with hnil | ⟨j, _, hpc, hdrop⟩
-  · simpa only [hnil, Directives.interp, Kraken.Effects.All] using h
+  · simpa only [hnil, Directives.interp, Kraken.Effects.All, TracedPost.ofPost] using h
   · rw [hdrop, ← hpc] at h
     exact step1_cps_at j post hpc.symm h
 
@@ -833,13 +864,13 @@ theorem step1_cps_slice_accum (k n : Nat)
     (h : (@Directives.interp _ _ _ (Kraken.Executable.labels (layout prog))
           (((layout prog).program.drop k).take n) s ((layout prog).addrOf k)
           (fun pc s => .done ⟨s, pc⟩)).All
-        (TracedPost.prepend pfx (fun mid tr => Eventually (step1Traced (layout prog)) post ⟨mid, tr⟩))) :
+        (TracedPost.prepend pfx (TracedPost.ofPost fun mid tr => Eventually (step1Traced (layout prog)) post ⟨mid, tr⟩))) :
     Eventually (step1Traced (layout prog)) post ⟨⟨s, pc⟩, pfx⟩ := by
   subst hpc
   letI := Kraken.Executable.labels (layout prog)
   induction n generalizing k s pfx with
   | zero =>
-    dsimp only [List.take_zero, Directives.interp, Kraken.Effects.All, TracedPost.prepend] at h
+    dsimp only [List.take_zero, Directives.interp, Kraken.Effects.All, TracedPost.prepend, TracedPost.ofPost] at h
     simpa only [List.append_nil] using h
   | succ n ih =>
     by_cases hk : k < prog.length
@@ -849,34 +880,35 @@ theorem step1_cps_slice_accum (k n : Nat)
       obtain ⟨hlt_exe, hget_exe⟩ := List.getElem?_eq_some_iff.mp hd_exe
       rw [List.drop_eq_getElem_cons hlt_exe, hget_exe, List.take_succ_cons,
           Directives.interp, ← Kraken.Executable.addrOf_apply_succ hd_prog] at h
-      have hstep := OmniDirective.interp_mono prog[k] s
-        ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩
-        (P := fun mid tr => Eventually (step1Traced (layout prog)) post (mid, tr))
-        (Q := fun mid tr => Eventually (step1Traced (layout prog)) post (mid, tr))
+      have hstep := Effects.onNext_mono
+        (ArchDirective.interp prog[k] s ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩)
+        (P := TracedPost.ofPost fun mid tr => Eventually (step1Traced (layout prog)) post (mid, tr))
+        (Q := TracedPost.ofPost fun mid tr => Eventually (step1Traced (layout prog)) post (mid, tr))
         (pfx := pfx)
         (next₂ := fun s' => .done ⟨s', (layout prog).addrOf (k + 1)⟩)
         (jmp₂ := fun a s' => .done ⟨s', a⟩)
         (fun s' pfx' hs' => by
-          dsimp only [Kraken.Effects.All, TracedPost.prepend]
+          dsimp only [Kraken.Effects.All, TracedPost.prepend, TracedPost.ofPost]
           rw [List.append_nil]
           exact ih (k + 1) hs')
         (fun _ _ pfx' ha => by
-          dsimp only [Kraken.Effects.All, TracedPost.prepend] at ha ⊢
+          dsimp only [Kraken.Effects.All, TracedPost.prepend, TracedPost.ofPost] at ha ⊢
           simpa only [List.append_nil] using ha)
         h
-      have hstep' : (@ArchDirective.interp _ _ _ (Kraken.Executable.labels (layout prog)) prog[k] s
-          ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩
+      have hstep' : ((@ArchDirective.interp _ _ _ (Kraken.Executable.labels (layout prog)) prog[k] s
+          ⟨(layout prog).addrOf k, (layout prog).addrOf (k + 1)⟩).onNext
           (fun s' => .done ⟨s', (layout prog).addrOf (k + 1)⟩)
           (fun a s' => .done ⟨s', a⟩)).All
-          (fun mid tr => Eventually (step1Traced (layout prog)) post ⟨mid, pfx ++ tr⟩) := by
-        refine Effects.All_mono _ (fun a tr ha => ?_) hstep
-        dsimp only [TracedPost.prepend] at ha
-        exact ha
+          (TracedPost.ofPost fun mid tr => Eventually (step1Traced (layout prog)) post ⟨mid, pfx ++ tr⟩) := by
+        refine Effects.All_mono _ (fun r tr ha => ?_) hstep
+        cases r with
+        | done a => exact ha
+        | next s => exact False.elim ha
       exact eventually_trans _ _ _ _ (eventually_of_getElem?_traced hd_prog hstep') (fun _ h => h)
     · have hdrop : (layout prog).program.drop k = [] :=
         List.drop_eq_nil_of_le (by simp [Kraken.Layout.apply]; omega)
       simpa only [hdrop, List.take_nil, Directives.interp, Kraken.Effects.All,
-                  TracedPost.prepend, List.append_nil] using h
+                  TracedPost.prepend, TracedPost.ofPost, List.append_nil] using h
 
 theorem step1_cps_at_accum (k : Nat)
     (post : @Post (Kraken.MachineState MD × List LeakageEvent))
@@ -884,7 +916,7 @@ theorem step1_cps_at_accum (k : Nat)
     (h : (@Directives.interp _ _ _ (Kraken.Executable.labels (layout prog))
           ((layout prog).program.drop k) s ((layout prog).addrOf k)
           (fun pc s => .done ⟨s, pc⟩)).All
-        (TracedPost.prepend pfx (fun mid tr => Eventually (step1Traced (layout prog)) post ⟨mid, tr⟩))) :
+        (TracedPost.prepend pfx (TracedPost.ofPost fun mid tr => Eventually (step1Traced (layout prog)) post ⟨mid, tr⟩))) :
     Eventually (step1Traced (layout prog)) post ⟨⟨s, pc⟩, pfx⟩ := by
   refine step1_cps_slice_accum k (layout prog).program.length post hpc ?_
   rw [List.take_of_length_le (by simp)]
@@ -895,7 +927,7 @@ theorem step1_cps_slice_traced (k n : Nat) (post : @Post (Kraken.MachineState MD
     (h : (@Directives.interp _ _ _ (Kraken.Executable.labels (layout prog))
           (((layout prog).program.drop k).take n) s ((layout prog).addrOf k)
           (fun pc s => .done ⟨s, pc⟩)).All
-        (fun mid tr_slice =>
+        (TracedPost.ofPost fun mid tr_slice =>
           Eventually (step1Traced (layout prog)) (TracedGoal post tr) (mid, tr_slice))) :
     TracedEventually (layout prog) post tr ⟨s, pc⟩ :=
   step1_cps_slice_accum k n (TracedGoal post tr) (pfx := []) hpc h
@@ -905,7 +937,7 @@ theorem step1_cps_at_traced (k : Nat) (post : @Post (Kraken.MachineState MD))
     (h : (@Directives.interp _ _ _ (Kraken.Executable.labels (layout prog))
           ((layout prog).program.drop k) s ((layout prog).addrOf k)
           (fun pc s => .done ⟨s, pc⟩)).All
-        (fun mid tr_slice =>
+        (TracedPost.ofPost fun mid tr_slice =>
           Eventually (step1Traced (layout prog)) (TracedGoal post tr) (mid, tr_slice))) :
     TracedEventually (layout prog) post tr ⟨s, pc⟩ := by
   refine step1_cps_slice_traced k (layout prog).program.length post hpc ?_
@@ -917,12 +949,12 @@ theorem step1_cps_traced (post : @Post (Kraken.MachineState MD))
     (h : (@Directives.interp _ _ _ (Kraken.Executable.labels (layout prog))
           ((layout prog).directivesFromAddress initial.pc) initial.data initial.pc
           (fun pc s => .done ⟨s, pc⟩)).All
-        (fun mid tr_slice =>
+        (TracedPost.ofPost fun mid tr_slice =>
           Eventually (step1Traced (layout prog)) (TracedGoal post tr) (mid, tr_slice))) :
     TracedEventually (layout prog) post tr initial := by
   rcases initial with ⟨s, pc⟩
   rcases Kraken.Executable.directivesFromAddress_cases (layout prog) pc with hnil | ⟨j, _, hpc, hdrop⟩
-  · simpa only [hnil, Directives.interp, Kraken.Effects.All, TracedEventually] using h
+  · simpa only [hnil, Directives.interp, Kraken.Effects.All, TracedPost.ofPost, TracedEventually] using h
   · rw [hdrop, ← hpc] at h
     exact step1_cps_at_traced j post hpc.symm h
 
@@ -941,14 +973,17 @@ theorem Kraken.Executable.ExecTraced.eventually {s : MD} {tr : List LeakageEvent
   letI := Kraken.Executable.labels (layout prog)
   refine step1_cps_at_traced 0 post (by simp [Kraken.Layout.apply]) ?_
   simpa only [List.drop_zero, Kraken.Executable.addrOf_zero, Kraken.Executable.ExecTraced] using
-    Effects.All_mono _ (fun mid tr' hmid => Eventually.done (mid, tr') hmid) h
+    Effects.All_mono _ (fun r tr' hmid => by
+      cases r with
+      | done mid => exact Eventually.done (mid, tr') hmid
+      | next s => exact False.elim hmid) h
 
-theorem step1_cps_subprog {sub : List D}
-    (k : Nat) {s : MD} {pc : Int64} {P : Kraken.Layout D → @Post (Kraken.MachineState MD)}
+theorem step1_cps_subprog {sub : List (Kraken.Directive Instr)}
+    (k : Nat) {s : MD} {pc : Int64} {P : Kraken.Layout Instr → @Post (Kraken.MachineState MD)}
     {post : @Post (Kraken.MachineState MD)}
     (hsub : (prog.drop k).take sub.length = sub)
     (hpc : pc = (layout prog).addrOf k)
-    (hexec : ∀ [layout' : Kraken.Layout D] [Labels], (layout' sub).Exec s (P layout'))
+    (hexec : ∀ [layout' : Kraken.Layout Instr] [Labels], (layout' sub).Exec s (P layout'))
     (hcont : ∀ s' pc', P (layout.shift prog k) ⟨s', pc'⟩ →
       Eventually (step1 (layout prog)) post ⟨s', pc'⟩) :
     Eventually (step1 (layout prog)) post ⟨s, pc⟩ := by
@@ -957,9 +992,9 @@ theorem step1_cps_subprog {sub : List D}
   rw [← Kraken.Layout.program_shift_of_slice layout.toLayout hsub]
   exact (@hexec (layout.shift prog k) _).mono (fun ⟨s', pc'⟩ hp => hcont s' pc' hp)
 
-theorem step1_subprog {sub : List D}
+theorem step1_subprog {sub : List (Kraken.Directive Instr)}
     (k : Nat) {s : MD} {pc : Int64} {pre : Prop} {Q post : @Post (Kraken.MachineState MD)}
-    (hexec : ∀ [layout' : Kraken.Layout D] [Labels],
+    (hexec : ∀ [layout' : Kraken.Layout Instr] [Labels],
       (layout' sub).ExecSpec s (pre := pre)
         (post := fun st => st.pc = (layout' sub).addrOf sub.length ∧ Q st))
     (hpre : pre := by trivial)
@@ -968,19 +1003,19 @@ theorem step1_subprog {sub : List D}
     (hcont : ∀ s', Q ⟨s', (layout prog).addrOf (k + sub.length)⟩ →
       Eventually (step1 (layout prog)) post ⟨s', (layout prog).addrOf (k + sub.length)⟩) :
     Eventually (step1 (layout prog)) post ⟨s, pc⟩ := by
-  refine step1_cps_subprog k hsub hpc (fun [layout' : Kraken.Layout D] [Labels] => hexec hpre) ?_
+  refine step1_cps_subprog k hsub hpc (fun [layout' : Kraken.Layout Instr] [Labels] => hexec hpre) ?_
   rintro s' _ ⟨rfl, hQ⟩
   rw [Kraken.Layout.addrOf_shift_of_slice layout.toLayout hsub (Nat.le_refl _)] at hQ ⊢
   exact hcont s' hQ
 
-theorem step1_cps_subprog_traced {sub : List D}
+theorem step1_cps_subprog_traced {sub : List (Kraken.Directive Instr)}
     (k : Nat) {s : MD} {pc : Int64} {pfx : List LeakageEvent}
-    {tr_sub : Kraken.Layout D → Labels → List LeakageEvent}
-    {P : Kraken.Layout D → @Post (Kraken.MachineState MD)}
+    {tr_sub : Kraken.Layout Instr → Labels → List LeakageEvent}
+    {P : Kraken.Layout Instr → @Post (Kraken.MachineState MD)}
     {post : @Post (Kraken.MachineState MD × List LeakageEvent)}
     (hsub : (prog.drop k).take sub.length = sub)
     (hpc : pc = (layout prog).addrOf k)
-    (hexec : ∀ [layout' : Kraken.Layout D] [labels' : Labels],
+    (hexec : ∀ [layout' : Kraken.Layout Instr] [labels' : Labels],
       (layout' sub).ExecTraced s (tr_sub layout' labels') (P layout'))
     (hcont : ∀ s' pc', P (layout.shift prog k) ⟨s', pc'⟩ →
       Eventually (step1Traced (layout prog)) post
@@ -989,17 +1024,21 @@ theorem step1_cps_subprog_traced {sub : List D}
   letI := Kraken.Executable.labels (layout prog)
   refine step1_cps_slice_accum k sub.length post hpc ?_
   rw [← Kraken.Layout.program_shift_of_slice layout.toLayout hsub]
-  refine Effects.All_mono _ (fun ⟨s', pc'⟩ tr' ⟨htr, hp⟩ => ?_) (@hexec (layout.shift prog k) _)
-  dsimp only [TracedPost.prepend] at htr ⊢
-  subst htr
-  exact hcont s' pc' hp
+  refine Effects.All_mono _ (fun r tr' h => ?_) (@hexec (layout.shift prog k) _)
+  cases r with
+  | done a =>
+    rcases h with ⟨htr, hp⟩
+    dsimp only [TracedPost.prepend, TracedPost.ofPost] at htr ⊢
+    subst htr
+    exact hcont a.data a.pc hp
+  | next s => exact False.elim h
 
-theorem step1_subprog_traced {sub : List D}
+theorem step1_subprog_traced {sub : List (Kraken.Directive Instr)}
     (k : Nat) {s : MD} {pc : Int64} {pfx : List LeakageEvent}
-    {tr_sub : Kraken.Layout D → Labels → List LeakageEvent}
+    {tr_sub : Kraken.Layout Instr → Labels → List LeakageEvent}
     {pre : Prop} {Q : @Post (Kraken.MachineState MD)}
     {post : @Post (Kraken.MachineState MD × List LeakageEvent)}
-    (hexec : ∀ [layout' : Kraken.Layout D] [labels' : Labels],
+    (hexec : ∀ [layout' : Kraken.Layout Instr] [labels' : Labels],
       (layout' sub).ExecSpec s (trace := some (tr_sub layout' labels')) (pre := pre)
         (post := fun st => st.pc = (layout' sub).addrOf sub.length ∧ Q st))
     (hpre : pre := by trivial)
@@ -1011,7 +1050,7 @@ theorem step1_subprog_traced {sub : List D}
          pfx ++ tr_sub (layout.shift prog k) (Kraken.Executable.labels (layout prog))⟩) :
     Eventually (step1Traced (layout prog)) post ⟨⟨s, pc⟩, pfx⟩ := by
   refine step1_cps_subprog_traced k hsub hpc
-    (fun [layout' : Kraken.Layout D] [Labels] => hexec hpre) ?_
+    (fun [layout' : Kraken.Layout Instr] [Labels] => hexec hpre) ?_
   rintro s' _ ⟨rfl, hQ⟩
   rw [Kraken.Layout.addrOf_shift_of_slice layout.toLayout hsub (Nat.le_refl _)] at hQ ⊢
   exact hcont s' hQ

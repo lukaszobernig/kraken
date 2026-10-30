@@ -1,6 +1,7 @@
 module
 
-public import Kraken.X64.OmniSemantics
+public import Kraken.OmniSemantics
+public import Kraken.X64.Semantics
 
 /-!
 # x86-64 Inert Directives

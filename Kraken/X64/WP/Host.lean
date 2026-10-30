@@ -61,9 +61,9 @@ theorem directivesAtAddress_addrOf {k : Nat} {c : Kraken.Sized Directive}
 
 theorem eventually_of_interp {k : Nat} {d : Directive} {sub : Program}
     (hdp : (d :: sub).IsInfixAt Host.prog k) {post : @Post MachineState} {s : MachineData}
-    (hinterp : (d.interp s ⟨Host.addrOf k, Host.addrOf (k + 1)⟩
+    (hinterp : ((ArchDirective.interp d s ⟨Host.addrOf k, Host.addrOf (k + 1)⟩).onNext
       (fun s' => .done ⟨s', Host.addrOf (k + 1)⟩)
-      (fun a s' => .done ⟨s', a⟩)).All (fun mid _ => post mid)) :
+      (fun a s' => .done ⟨s', a⟩)).All (TracedPost.ofPost fun mid _ => post mid)) :
     Eventually (step1 Host.exe) post ⟨s, Host.addrOf k⟩ :=
   Kraken.Host.eventually_of_interp hdp hinterp
 
