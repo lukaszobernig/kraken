@@ -214,16 +214,12 @@ theorem Effects.All_mono {MD : Type} (eff : Kraken.Effects MD)
     exact ih () (fun a tr => hpq a (.var_time vals :: tr))
 
 def onNextPost {MD : Type} (post : TracedPost MD)
-    (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD) : TracedPost MD
-  | .next s, tr => (next s).All (post.prependEvents tr)
-  | .done st, tr => (jmp st.pc st.data).All (post.prependEvents tr)
-
-private theorem onNextPost_cons {MD : Type} (post : TracedPost MD)
-    (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD) (e : LeakageEvent) :
-    (onNextPost post next jmp).consEvent e =
-      onNextPost (post.consEvent e) next jmp := by
-  funext r tr
-  cases r <;> rfl
+    (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD) : TracedPost MD :=
+  fun r tr =>
+    Kraken.Effects.All (post.prependEvents tr)
+      (match r with
+       | .next s => next s
+       | .done st => jmp st.pc st.data)
 
 theorem Effects.All_onNext {MD : Type} (eff : Kraken.Effects MD)
     (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
@@ -236,14 +232,10 @@ theorem Effects.All_onNext {MD : Type} (eff : Kraken.Effects MD)
   | unimplemented _ | unaligned _ _ | nonmem_load _ _ _ _ | nonmem_store _ _ _ _ => rfl
   | undefined cont ih =>
     simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih]
-  | require_read_access addr w cont ih =>
-    simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih, onNextPost_cons]
-  | require_write_access addr w cont ih =>
-    simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih, onNextPost_cons]
-  | require_exec_access p cont ih =>
-    simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih, onNextPost_cons]
-  | require_const_time vals cont ih =>
-    simp only [Kraken.Effects.onNext, Kraken.Effects.All, ih, onNextPost_cons]
+  | require_read_access addr w cont ih => exact ih () _
+  | require_write_access addr w cont ih => exact ih () _
+  | require_exec_access p cont ih => exact ih () _
+  | require_const_time vals cont ih => exact ih () _
 
 /-! ### Traced and Constant-Time Execution (`TracedEventually`, `CtEventually`) -/
 

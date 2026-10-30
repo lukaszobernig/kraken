@@ -104,37 +104,13 @@ theorem onNextPost_done {MD : Type}
     onNextPost post next jmp (.done st) tr =
     Kraken.Effects.All (post.prependEvents tr) (jmp st.pc st.data) := rfl
 
-theorem Effects_All_onNextPost_next₀ {MD : Type}
+theorem Effects_All_onNextPost_next {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (s : MD) :
     Kraken.Effects.All (onNextPost post next jmp) (.next s) =
     Kraken.Effects.All post (next s) := rfl
 
-theorem Effects_All_onNextPost_next₁ {MD : Type}
-    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
-    (e₁ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All ((onNextPost post next jmp).consEvent e₁) (.next s) =
-    Kraken.Effects.All (post.consEvent e₁) (next s) := rfl
-
-theorem Effects_All_onNextPost_next₂ {MD : Type}
-    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
-    (e₁ e₂ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All (((onNextPost post next jmp).consEvent e₁).consEvent e₂) (.next s) =
-    Kraken.Effects.All ((post.consEvent e₁).consEvent e₂) (next s) := rfl
-
-theorem Effects_All_onNextPost_next₃ {MD : Type}
-    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
-    (e₁ e₂ e₃ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All ((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃) (.next s) =
-    Kraken.Effects.All (((post.consEvent e₁).consEvent e₂).consEvent e₃) (next s) := rfl
-
-theorem Effects_All_onNextPost_next₄ {MD : Type}
-    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
-    (e₁ e₂ e₃ e₄ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All (((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (.next s) =
-    Kraken.Effects.All ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (next s) := rfl
-
-theorem Effects_All_onNextPost_interp_cons₀ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_cons {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
     (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (s : MD) :
     Kraken.Effects.All
@@ -145,114 +121,18 @@ theorem Effects_All_onNextPost_interp_cons₀ {D MD : Type} [ArchDirective D MD]
       (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
   Effects.All_onNext _ _ _ _
 
-theorem Effects_All_onNextPost_interp_cons₁ {D MD : Type} [ArchDirective D MD] [Labels]
-    (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
-    (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All
-      ((onNextPost post (fun s => Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) ret).consEvent e₁)
-      (.next s) =
-    Kraken.Effects.All
-      (onNextPost (post.consEvent e₁) (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
-  Effects.All_onNext _ _ _ _
-
-theorem Effects_All_onNextPost_interp_cons₂ {D MD : Type} [ArchDirective D MD] [Labels]
-    (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
-    (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All
-      (((onNextPost post (fun s => Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) ret).consEvent e₁).consEvent e₂)
-      (.next s) =
-    Kraken.Effects.All
-      (onNextPost ((post.consEvent e₁).consEvent e₂) (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
-  Effects.All_onNext _ _ _ _
-
-theorem Effects_All_onNextPost_interp_cons₃ {D MD : Type} [ArchDirective D MD] [Labels]
-    (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
-    (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ e₃ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All
-      ((((onNextPost post (fun s => Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) ret).consEvent e₁).consEvent e₂).consEvent e₃)
-      (.next s) =
-    Kraken.Effects.All
-      (onNextPost (((post.consEvent e₁).consEvent e₂).consEvent e₃) (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
-  Effects.All_onNext _ _ _ _
-
-theorem Effects_All_onNextPost_interp_cons₄ {D MD : Type} [ArchDirective D MD] [Labels]
-    (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
-    (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ e₃ e₄ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All
-      (((((onNextPost post (fun s => Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) ret).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄)
-      (.next s) =
-    Kraken.Effects.All
-      (onNextPost ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
-  Effects.All_onNext _ _ _ _
-
-theorem Effects_All_onNextPost_interp_nil₀ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_nil {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (s : MD) :
     Kraken.Effects.All
       (onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret)
       (.next s) =
     Kraken.Effects.All post (ret pc s) := by rfl
 
-theorem Effects_All_onNextPost_interp_nil₁ {D MD : Type} [ArchDirective D MD] [Labels]
-    (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All
-      ((onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret).consEvent e₁)
-      (.next s) =
-    Kraken.Effects.All (post.consEvent e₁) (ret pc s) := by rfl
-
-theorem Effects_All_onNextPost_interp_nil₂ {D MD : Type} [ArchDirective D MD] [Labels]
-    (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All
-      (((onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret).consEvent e₁).consEvent e₂)
-      (.next s) =
-    Kraken.Effects.All ((post.consEvent e₁).consEvent e₂) (ret pc s) := by rfl
-
-theorem Effects_All_onNextPost_interp_nil₃ {D MD : Type} [ArchDirective D MD] [Labels]
-    (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ e₃ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All
-      ((((onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret).consEvent e₁).consEvent e₂).consEvent e₃)
-      (.next s) =
-    Kraken.Effects.All (((post.consEvent e₁).consEvent e₂).consEvent e₃) (ret pc s) := by rfl
-
-theorem Effects_All_onNextPost_interp_nil₄ {D MD : Type} [ArchDirective D MD] [Labels]
-    (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ e₃ e₄ : LeakageEvent) (s : MD) :
-    Kraken.Effects.All
-      (((((onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄)
-      (.next s) =
-    Kraken.Effects.All ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (ret pc s) := by rfl
-
-theorem Effects_All_onNextPost_done₀ {MD : Type}
+theorem Effects_All_onNextPost_done {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (st : Kraken.MachineState MD) :
     Kraken.Effects.All (onNextPost post next jmp) (.done st) =
     Kraken.Effects.All post (jmp st.pc st.data) := rfl
-
-theorem Effects_All_onNextPost_done₁ {MD : Type}
-    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
-    (e₁ : LeakageEvent) (st : Kraken.MachineState MD) :
-    Kraken.Effects.All ((onNextPost post next jmp).consEvent e₁) (.done st) =
-    Kraken.Effects.All (post.consEvent e₁) (jmp st.pc st.data) := rfl
-
-theorem Effects_All_onNextPost_done₂ {MD : Type}
-    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
-    (e₁ e₂ : LeakageEvent) (st : Kraken.MachineState MD) :
-    Kraken.Effects.All (((onNextPost post next jmp).consEvent e₁).consEvent e₂) (.done st) =
-    Kraken.Effects.All ((post.consEvent e₁).consEvent e₂) (jmp st.pc st.data) := rfl
-
-theorem Effects_All_onNextPost_done₃ {MD : Type}
-    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
-    (e₁ e₂ e₃ : LeakageEvent) (st : Kraken.MachineState MD) :
-    Kraken.Effects.All ((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃) (.done st) =
-    Kraken.Effects.All (((post.consEvent e₁).consEvent e₂).consEvent e₃) (jmp st.pc st.data) := rfl
-
-theorem Effects_All_onNextPost_done₄ {MD : Type}
-    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
-    (e₁ e₂ e₃ e₄ : LeakageEvent) (st : Kraken.MachineState MD) :
-    Kraken.Effects.All (((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (.done st) =
-    Kraken.Effects.All ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (jmp st.pc st.data) := rfl
 
 theorem Effects_All_undefined {MD α : Type} [NondetSupportingType α]
     (post : TracedPost MD) (cont : α → Kraken.Effects MD) :
@@ -278,6 +158,30 @@ theorem Effects_All_require_const_time {MD : Type}
     (post : TracedPost MD) (vals : List (BitVec 64)) (cont : Unit → Kraken.Effects MD) :
     Kraken.Effects.All post (.require_const_time vals cont) =
     (cont ()).All (post.consEvent (.var_time vals)) := rfl
+
+theorem Effects_All_onNextPost_require_read_access {MD : Type}
+    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
+    (addr : BitVec 64) (w : Width) (cont : Unit → Kraken.Effects MD) :
+    Kraken.Effects.All (onNextPost post next jmp) (.require_read_access addr w cont) =
+    (cont ()).All (onNextPost (post.consEvent (.read addr w)) next jmp) := rfl
+
+theorem Effects_All_onNextPost_require_write_access {MD : Type}
+    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
+    (addr : BitVec 64) (w : Width) (cont : Unit → Kraken.Effects MD) :
+    Kraken.Effects.All (onNextPost post next jmp) (.require_write_access addr w cont) =
+    (cont ()).All (onNextPost (post.consEvent (.write addr w)) next jmp) := rfl
+
+theorem Effects_All_onNextPost_require_exec_access {MD : Type}
+    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
+    (p : Std.Rco Int64) (cont : Unit → Kraken.Effects MD) :
+    Kraken.Effects.All (onNextPost post next jmp) (.require_exec_access p cont) =
+    (cont ()).All (onNextPost (post.consEvent (.exec p)) next jmp) := rfl
+
+theorem Effects_All_onNextPost_require_const_time {MD : Type}
+    (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
+    (vals : List (BitVec 64)) (cont : Unit → Kraken.Effects MD) :
+    Kraken.Effects.All (onNextPost post next jmp) (.require_const_time vals cont) =
+    (cont ()).All (onNextPost (post.consEvent (.var_time vals)) next jmp) := rfl
 
 /-! ### Options, Configuration, and Syntax -/
 
@@ -920,112 +824,94 @@ partial def evalSymKStep : Grind.GrindTactic :=
         if eff.isAppOfArity ``Kraken.Effects.require_exec_access 3 then
           let p := eff.getArg! 1
           let cont := eff.getArg! 2
-          let eqPrf := mkAppN (mkConst ``Effects_All_require_exec_access) #[MD, post, p, cont]
+          let eqPrf :=
+            if post.isAppOfArity ``onNextPost 4 then
+              let oArgs := post.getAppArgs
+              mkAppN (mkConst ``Effects_All_onNextPost_require_exec_access) #[MD, oArgs[1]!, oArgs[2]!, oArgs[3]!, p, cont]
+            else
+              mkAppN (mkConst ``Effects_All_require_exec_access) #[MD, post, p, cont]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Kraken.Effects.require_const_time 3 then
           let vals := eff.getArg! 1
           let cont := eff.getArg! 2
-          let eqPrf := mkAppN (mkConst ``Effects_All_require_const_time) #[MD, post, vals, cont]
+          let eqPrf :=
+            if post.isAppOfArity ``onNextPost 4 then
+              let oArgs := post.getAppArgs
+              mkAppN (mkConst ``Effects_All_onNextPost_require_const_time) #[MD, oArgs[1]!, oArgs[2]!, oArgs[3]!, vals, cont]
+            else
+              mkAppN (mkConst ``Effects_All_require_const_time) #[MD, post, vals, cont]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Kraken.Effects.require_read_access 4 then
           let addr := eff.getArg! 1
           let w := eff.getArg! 2
           let cont := eff.getArg! 3
-          let eqPrf := mkAppN (mkConst ``Effects_All_require_read_access) #[MD, post, addr, w, cont]
+          let eqPrf :=
+            if post.isAppOfArity ``onNextPost 4 then
+              let oArgs := post.getAppArgs
+              mkAppN (mkConst ``Effects_All_onNextPost_require_read_access) #[MD, oArgs[1]!, oArgs[2]!, oArgs[3]!, addr, w, cont]
+            else
+              mkAppN (mkConst ``Effects_All_require_read_access) #[MD, post, addr, w, cont]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Kraken.Effects.require_write_access 4 then
           let addr := eff.getArg! 1
           let w := eff.getArg! 2
           let cont := eff.getArg! 3
-          let eqPrf := mkAppN (mkConst ``Effects_All_require_write_access) #[MD, post, addr, w, cont]
+          let eqPrf :=
+            if post.isAppOfArity ``onNextPost 4 then
+              let oArgs := post.getAppArgs
+              mkAppN (mkConst ``Effects_All_onNextPost_require_write_access) #[MD, oArgs[1]!, oArgs[2]!, oArgs[3]!, addr, w, cont]
+            else
+              mkAppN (mkConst ``Effects_All_require_write_access) #[MD, post, addr, w, cont]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Kraken.Effects.done 2 || eff.isAppOfArity ``Kraken.Effects.next 2 then
           let isDone := eff.isAppOfArity ``Kraken.Effects.done 2
           let arg := eff.getArg! 1
-          let rec peelEvents (e : Expr) (evs : Array Expr) : Option (Expr × Array Expr) :=
-            if e.isAppOfArity ``onNextPost 4 then
-              some (e, evs)
-            else if e.isAppOfArity ``TracedPost.consEvent 3 then
-              peelEvents (e.getArg! 2) (evs.push (e.getArg! 1))
-            else
-              none
-          let fallback := mkAppN (mkConst (if isDone then ``Effects_All_done else ``Effects_All_next)) #[MD, post, arg]
           let maxCount ← maxInstrCount.mapM (·.get)
-          let (decCount, eqPrf) := match peelEvents post #[] with
-            | some (onNextExpr, evs) =>
-              let oArgs := onNextExpr.getAppArgs
+          let (decCount, eqPrf) :=
+            if post.isAppOfArity ``onNextPost 4 then
+              let oArgs := post.getAppArgs
               let post₀ := oArgs[1]!
               let next := oArgs[2]!
               let jmp := oArgs[3]!
-              let revEvs := evs.reverse
-              let interpNext? : Option (Bool × Expr) :=
-                if isDone then
-                  none
-                else match next with
-                | .lam _ _ body _ =>
-                  if body.isAppOfArity `Directives.interpHold 8 && body.getArg! 5 == .bvar 0 then
-                    let bArgs := body.getAppArgs
-                    let D := bArgs[0]!
-                    let inst := bArgs[2]!
-                    let labels := bArgs[3]!
-                    let ds := bArgs[4]!
-                    let pc := bArgs[6]!
-                    let ret := bArgs[7]!
-                    if !ds.hasLooseBVars && !pc.hasLooseBVars && !ret.hasLooseBVars then
-                      if ds.isAppOfArity ``List.nil 1 then
-                        let thm? := match evs.size with
-                          | 0 => some ``Effects_All_onNextPost_interp_nil₀
-                          | 1 => some ``Effects_All_onNextPost_interp_nil₁
-                          | 2 => some ``Effects_All_onNextPost_interp_nil₂
-                          | 3 => some ``Effects_All_onNextPost_interp_nil₃
-                          | 4 => some ``Effects_All_onNextPost_interp_nil₄
-                          | _ => none
-                        thm?.map fun thm =>
-                          (false, mkAppN (mkConst thm) (#[D, MD, inst, labels, post₀, pc, ret] ++ revEvs ++ #[arg]))
-                      else if maxCount != .some 0 && ds.isAppOfArity ``List.cons 3 &&
-                              (ds.getArg! 1).isAppOfArity ``Kraken.Sized.mk 3 then
-                        let d := ds.getArg! 1
-                        let dsTail := ds.getArg! 2
-                        let thm? := match evs.size with
-                          | 0 => some ``Effects_All_onNextPost_interp_cons₀
-                          | 1 => some ``Effects_All_onNextPost_interp_cons₁
-                          | 2 => some ``Effects_All_onNextPost_interp_cons₂
-                          | 3 => some ``Effects_All_onNextPost_interp_cons₃
-                          | 4 => some ``Effects_All_onNextPost_interp_cons₄
-                          | _ => none
-                        thm?.map fun thm =>
-                          (true, mkAppN (mkConst thm) (#[D, MD, inst, labels, post₀, d.getArg! 1, d.getArg! 2, dsTail, pc, ret] ++ revEvs ++ #[arg]))
+              if isDone then
+                (false, mkAppN (mkConst ``Effects_All_onNextPost_done) #[MD, post₀, next, jmp, arg])
+              else
+                let interpNext? : Option (Bool × Expr) := match next with
+                  | .lam _ _ body _ =>
+                    if body.isAppOfArity `Directives.interpHold 8 && body.getArg! 5 == .bvar 0 then
+                      let bArgs := body.getAppArgs
+                      let D := bArgs[0]!
+                      let inst := bArgs[2]!
+                      let labels := bArgs[3]!
+                      let ds := bArgs[4]!
+                      let pc := bArgs[6]!
+                      let ret := bArgs[7]!
+                      if !ds.hasLooseBVars && !pc.hasLooseBVars && !ret.hasLooseBVars then
+                        if ds.isAppOfArity ``List.nil 1 then
+                          some (false, mkAppN (mkConst ``Effects_All_onNextPost_interp_nil)
+                            #[D, MD, inst, labels, post₀, pc, ret, arg])
+                        else if maxCount != .some 0 && ds.isAppOfArity ``List.cons 3 &&
+                                (ds.getArg! 1).isAppOfArity ``Kraken.Sized.mk 3 then
+                          let d := ds.getArg! 1
+                          let dsTail := ds.getArg! 2
+                          some (true, mkAppN (mkConst ``Effects_All_onNextPost_interp_cons)
+                            #[D, MD, inst, labels, post₀, d.getArg! 1, d.getArg! 2, dsTail, pc, ret, arg])
+                        else
+                          none
                       else
                         none
                     else
                       none
-                  else
-                    none
-                | _ => none
-              match interpNext? with
-              | some res => res
-              | none =>
-                let thm? := match isDone, evs.size with
-                  | true, 0 => some ``Effects_All_onNextPost_done₀
-                  | true, 1 => some ``Effects_All_onNextPost_done₁
-                  | true, 2 => some ``Effects_All_onNextPost_done₂
-                  | true, 3 => some ``Effects_All_onNextPost_done₃
-                  | true, 4 => some ``Effects_All_onNextPost_done₄
-                  | false, 0 => some ``Effects_All_onNextPost_next₀
-                  | false, 1 => some ``Effects_All_onNextPost_next₁
-                  | false, 2 => some ``Effects_All_onNextPost_next₂
-                  | false, 3 => some ``Effects_All_onNextPost_next₃
-                  | false, 4 => some ``Effects_All_onNextPost_next₄
-                  | _, _ => none
-                match thm? with
-                | some thm =>
-                  (false, mkAppN (mkConst thm) (#[MD, post₀, next, jmp] ++ revEvs ++ #[arg]))
-                | none => (false, fallback)
-            | none => (false, fallback)
+                  | _ => none
+                match interpNext? with
+                | some res => res
+                | none => (false, mkAppN (mkConst ``Effects_All_onNextPost_next) #[MD, post₀, next, jmp, arg])
+            else
+              (false, mkAppN (mkConst (if isDone then ``Effects_All_done else ``Effects_All_next)) #[MD, post, arg])
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (decCount, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Kraken.Effects.undefined 4 then
