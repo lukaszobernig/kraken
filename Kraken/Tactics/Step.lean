@@ -19,13 +19,7 @@ public meta section
 open Lean Meta Elab Tactic Kraken Kraken.Tactic
 open Sym Sym.DSimp
 
-/-! ### Goal Marker and Step Rewriting Lemmas -/
-
-def gimmickId (p : Prop) : Prop := p
-
-theorem gimmick {p : Prop} (h : gimmickId p) : p := h
-
-theorem gimmickInv {p : Prop} (h : p) : gimmickId p := h
+/-! ### Step Rewriting Lemmas -/
 
 run_meta do
   let info ← getConstInfo ``Directives.interp
@@ -40,250 +34,250 @@ run_meta do
     all := [`Directives.interpHold]
   })
 
-theorem gimmickId_Effects_All_interp_to_hold {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_interp_to_hold {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (ds : List (Kraken.Sized D)) (s : MD) (pc : Int64)
     (ret : Int64 → MD → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (Directives.interp ds s pc ret)) =
-    gimmickId (Kraken.Effects.All post (Directives.interpHold ds s pc ret)) := by rfl
+    Kraken.Effects.All post (Directives.interp ds s pc ret) =
+    Kraken.Effects.All post (Directives.interpHold ds s pc ret) := by rfl
 
-theorem gimmickId_Effects_All_hold_to_interp {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_hold_to_interp {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (ds : List (Kraken.Sized D)) (s : MD) (pc : Int64)
     (ret : Int64 → MD → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (Directives.interpHold ds s pc ret)) =
-    gimmickId (Kraken.Effects.All post (Directives.interp ds s pc ret)) := by rfl
+    Kraken.Effects.All post (Directives.interpHold ds s pc ret) =
+    Kraken.Effects.All post (Directives.interp ds s pc ret) := by rfl
 
-theorem gimmickId_Effects_All_interp_nil {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_interp_nil {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (s : MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret)) =
-    gimmickId (Kraken.Effects.All post (ret pc s)) := by rfl
+    Kraken.Effects.All post (Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) =
+    Kraken.Effects.All post (ret pc s) := by rfl
 
-theorem gimmickId_Effects_All_ite_true {MD : Type} (post : TracedPost MD)
+theorem Effects_All_ite_true {MD : Type} (post : TracedPost MD)
     {c : Prop} [inst : Decidable c] (hc : c) (t f : Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (@ite _ c inst t f)) =
-    gimmickId (Kraken.Effects.All post t) := by
+    Kraken.Effects.All post (@ite _ c inst t f) =
+    Kraken.Effects.All post t := by
   simp [hc]
 
-theorem gimmickId_Effects_All_ite_false {MD : Type} (post : TracedPost MD)
+theorem Effects_All_ite_false {MD : Type} (post : TracedPost MD)
     {c : Prop} [inst : Decidable c] (hnc : ¬ c) (t f : Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (@ite _ c inst t f)) =
-    gimmickId (Kraken.Effects.All post f) := by
+    Kraken.Effects.All post (@ite _ c inst t f) =
+    Kraken.Effects.All post f := by
   simp [hnc]
 
-theorem gimmickId_Effects_All_interp_cons {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_interp_cons {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D)) (s : MD) (pc : Int64)
     (ret : Int64 → MD → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret)) =
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All post (Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) =
+    Kraken.Effects.All
       (onNextPost post (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz)))) := by
-  exact congrArg gimmickId (Effects.All_onNext _ _ _ _)
+      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
+  Effects.All_onNext _ _ _ _
 
-theorem gimmickId_Effects_All_interp_cons' {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_interp_cons' {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (d : Kraken.Sized D) (ds : List (Kraken.Sized D)) (s : MD) (pc : Int64)
     (ret : Int64 → MD → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (Directives.interpHold (d :: ds) s pc ret)) =
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All post (Directives.interpHold (d :: ds) s pc ret) =
+    Kraken.Effects.All
       (onNextPost post (fun s => Directives.interpHold ds s (pc + .ofNat d.size) ret) ret)
-      (ArchDirective.interp d.directive s (.mk pc (pc + .ofNat d.size)))) := by
+      (ArchDirective.interp d.directive s (.mk pc (pc + .ofNat d.size))) := by
   cases d
-  exact congrArg gimmickId (Effects.All_onNext _ _ _ _)
+  exact Effects.All_onNext _ _ _ _
 
-theorem gimmickId_Effects_All_done {MD : Type}
+theorem Effects_All_done {MD : Type}
     (post : TracedPost MD) (a : Kraken.MachineState MD) :
-    gimmickId (Kraken.Effects.All post (.done a)) =
-    gimmickId (post (.done a) []) := rfl
+    Kraken.Effects.All post (.done a) =
+    post (.done a) [] := rfl
 
-theorem gimmickId_Effects_All_next {MD : Type}
+theorem Effects_All_next {MD : Type}
     (post : TracedPost MD) (s : MD) :
-    gimmickId (Kraken.Effects.All post (.next s)) =
-    gimmickId (post (.next s) []) := rfl
+    Kraken.Effects.All post (.next s) =
+    post (.next s) [] := rfl
 
-theorem gimmickId_onNextPost_next {MD : Type}
+theorem onNextPost_next {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (s : MD) (tr : List LeakageEvent) :
-    gimmickId (onNextPost post next jmp (.next s) tr) =
-    gimmickId (Kraken.Effects.All (post.prependEvents tr) (next s)) := rfl
+    onNextPost post next jmp (.next s) tr =
+    Kraken.Effects.All (post.prependEvents tr) (next s) := rfl
 
-theorem gimmickId_onNextPost_done {MD : Type}
+theorem onNextPost_done {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (st : Kraken.MachineState MD) (tr : List LeakageEvent) :
-    gimmickId (onNextPost post next jmp (.done st) tr) =
-    gimmickId (Kraken.Effects.All (post.prependEvents tr) (jmp st.pc st.data)) := rfl
+    onNextPost post next jmp (.done st) tr =
+    Kraken.Effects.All (post.prependEvents tr) (jmp st.pc st.data) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_next₀ {MD : Type}
+theorem Effects_All_onNextPost_next₀ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (s : MD) :
-    gimmickId (Kraken.Effects.All (onNextPost post next jmp) (.next s)) =
-    gimmickId (Kraken.Effects.All post (next s)) := rfl
+    Kraken.Effects.All (onNextPost post next jmp) (.next s) =
+    Kraken.Effects.All post (next s) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_next₁ {MD : Type}
+theorem Effects_All_onNextPost_next₁ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (e₁ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All ((onNextPost post next jmp).consEvent e₁) (.next s)) =
-    gimmickId (Kraken.Effects.All (post.consEvent e₁) (next s)) := rfl
+    Kraken.Effects.All ((onNextPost post next jmp).consEvent e₁) (.next s) =
+    Kraken.Effects.All (post.consEvent e₁) (next s) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_next₂ {MD : Type}
+theorem Effects_All_onNextPost_next₂ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (e₁ e₂ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All (((onNextPost post next jmp).consEvent e₁).consEvent e₂) (.next s)) =
-    gimmickId (Kraken.Effects.All ((post.consEvent e₁).consEvent e₂) (next s)) := rfl
+    Kraken.Effects.All (((onNextPost post next jmp).consEvent e₁).consEvent e₂) (.next s) =
+    Kraken.Effects.All ((post.consEvent e₁).consEvent e₂) (next s) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_next₃ {MD : Type}
+theorem Effects_All_onNextPost_next₃ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (e₁ e₂ e₃ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All ((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃) (.next s)) =
-    gimmickId (Kraken.Effects.All (((post.consEvent e₁).consEvent e₂).consEvent e₃) (next s)) := rfl
+    Kraken.Effects.All ((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃) (.next s) =
+    Kraken.Effects.All (((post.consEvent e₁).consEvent e₂).consEvent e₃) (next s) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_next₄ {MD : Type}
+theorem Effects_All_onNextPost_next₄ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (e₁ e₂ e₃ e₄ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All (((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (.next s)) =
-    gimmickId (Kraken.Effects.All ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (next s)) := rfl
+    Kraken.Effects.All (((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (.next s) =
+    Kraken.Effects.All ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (next s) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_interp_cons₀ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_cons₀ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
     (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       (onNextPost post (fun s => Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) ret)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All
+      (.next s) =
+    Kraken.Effects.All
       (onNextPost post (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz)))) :=
-  congrArg gimmickId (Effects.All_onNext _ _ _ _)
+      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
+  Effects.All_onNext _ _ _ _
 
-theorem gimmickId_Effects_All_onNextPost_interp_cons₁ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_cons₁ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
     (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       ((onNextPost post (fun s => Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) ret).consEvent e₁)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All
+      (.next s) =
+    Kraken.Effects.All
       (onNextPost (post.consEvent e₁) (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz)))) :=
-  congrArg gimmickId (Effects.All_onNext _ _ _ _)
+      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
+  Effects.All_onNext _ _ _ _
 
-theorem gimmickId_Effects_All_onNextPost_interp_cons₂ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_cons₂ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
     (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       (((onNextPost post (fun s => Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) ret).consEvent e₁).consEvent e₂)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All
+      (.next s) =
+    Kraken.Effects.All
       (onNextPost ((post.consEvent e₁).consEvent e₂) (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz)))) :=
-  congrArg gimmickId (Effects.All_onNext _ _ _ _)
+      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
+  Effects.All_onNext _ _ _ _
 
-theorem gimmickId_Effects_All_onNextPost_interp_cons₃ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_cons₃ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
     (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ e₃ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       ((((onNextPost post (fun s => Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) ret).consEvent e₁).consEvent e₂).consEvent e₃)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All
+      (.next s) =
+    Kraken.Effects.All
       (onNextPost (((post.consEvent e₁).consEvent e₂).consEvent e₃) (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz)))) :=
-  congrArg gimmickId (Effects.All_onNext _ _ _ _)
+      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
+  Effects.All_onNext _ _ _ _
 
-theorem gimmickId_Effects_All_onNextPost_interp_cons₄ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_cons₄ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (d : D) (sz : Nat) (ds : List (Kraken.Sized D))
     (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ e₃ e₄ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       (((((onNextPost post (fun s => Directives.interpHold ({directive := d, size := sz} :: ds) s pc ret) ret).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All
+      (.next s) =
+    Kraken.Effects.All
       (onNextPost ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (fun s => Directives.interpHold ds s (pc + .ofNat sz) ret) ret)
-      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz)))) :=
-  congrArg gimmickId (Effects.All_onNext _ _ _ _)
+      (ArchDirective.interp d s (.mk pc (pc + .ofNat sz))) :=
+  Effects.All_onNext _ _ _ _
 
-theorem gimmickId_Effects_All_onNextPost_interp_nil₀ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_nil₀ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       (onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All post (ret pc s)) := by rfl
+      (.next s) =
+    Kraken.Effects.All post (ret pc s) := by rfl
 
-theorem gimmickId_Effects_All_onNextPost_interp_nil₁ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_nil₁ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       ((onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret).consEvent e₁)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All (post.consEvent e₁) (ret pc s)) := by rfl
+      (.next s) =
+    Kraken.Effects.All (post.consEvent e₁) (ret pc s) := by rfl
 
-theorem gimmickId_Effects_All_onNextPost_interp_nil₂ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_nil₂ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       (((onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret).consEvent e₁).consEvent e₂)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All ((post.consEvent e₁).consEvent e₂) (ret pc s)) := by rfl
+      (.next s) =
+    Kraken.Effects.All ((post.consEvent e₁).consEvent e₂) (ret pc s) := by rfl
 
-theorem gimmickId_Effects_All_onNextPost_interp_nil₃ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_nil₃ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ e₃ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       ((((onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret).consEvent e₁).consEvent e₂).consEvent e₃)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All (((post.consEvent e₁).consEvent e₂).consEvent e₃) (ret pc s)) := by rfl
+      (.next s) =
+    Kraken.Effects.All (((post.consEvent e₁).consEvent e₂).consEvent e₃) (ret pc s) := by rfl
 
-theorem gimmickId_Effects_All_onNextPost_interp_nil₄ {D MD : Type} [ArchDirective D MD] [Labels]
+theorem Effects_All_onNextPost_interp_nil₄ {D MD : Type} [ArchDirective D MD] [Labels]
     (post : TracedPost MD) (pc : Int64) (ret : Int64 → MD → Kraken.Effects MD) (e₁ e₂ e₃ e₄ : LeakageEvent) (s : MD) :
-    gimmickId (Kraken.Effects.All
+    Kraken.Effects.All
       (((((onNextPost post (fun s => Directives.interpHold ([] : List (Kraken.Sized D)) s pc ret) ret).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄)
-      (.next s)) =
-    gimmickId (Kraken.Effects.All ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (ret pc s)) := by rfl
+      (.next s) =
+    Kraken.Effects.All ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (ret pc s) := by rfl
 
-theorem gimmickId_Effects_All_onNextPost_done₀ {MD : Type}
+theorem Effects_All_onNextPost_done₀ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (st : Kraken.MachineState MD) :
-    gimmickId (Kraken.Effects.All (onNextPost post next jmp) (.done st)) =
-    gimmickId (Kraken.Effects.All post (jmp st.pc st.data)) := rfl
+    Kraken.Effects.All (onNextPost post next jmp) (.done st) =
+    Kraken.Effects.All post (jmp st.pc st.data) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_done₁ {MD : Type}
+theorem Effects_All_onNextPost_done₁ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (e₁ : LeakageEvent) (st : Kraken.MachineState MD) :
-    gimmickId (Kraken.Effects.All ((onNextPost post next jmp).consEvent e₁) (.done st)) =
-    gimmickId (Kraken.Effects.All (post.consEvent e₁) (jmp st.pc st.data)) := rfl
+    Kraken.Effects.All ((onNextPost post next jmp).consEvent e₁) (.done st) =
+    Kraken.Effects.All (post.consEvent e₁) (jmp st.pc st.data) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_done₂ {MD : Type}
+theorem Effects_All_onNextPost_done₂ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (e₁ e₂ : LeakageEvent) (st : Kraken.MachineState MD) :
-    gimmickId (Kraken.Effects.All (((onNextPost post next jmp).consEvent e₁).consEvent e₂) (.done st)) =
-    gimmickId (Kraken.Effects.All ((post.consEvent e₁).consEvent e₂) (jmp st.pc st.data)) := rfl
+    Kraken.Effects.All (((onNextPost post next jmp).consEvent e₁).consEvent e₂) (.done st) =
+    Kraken.Effects.All ((post.consEvent e₁).consEvent e₂) (jmp st.pc st.data) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_done₃ {MD : Type}
+theorem Effects_All_onNextPost_done₃ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (e₁ e₂ e₃ : LeakageEvent) (st : Kraken.MachineState MD) :
-    gimmickId (Kraken.Effects.All ((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃) (.done st)) =
-    gimmickId (Kraken.Effects.All (((post.consEvent e₁).consEvent e₂).consEvent e₃) (jmp st.pc st.data)) := rfl
+    Kraken.Effects.All ((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃) (.done st) =
+    Kraken.Effects.All (((post.consEvent e₁).consEvent e₂).consEvent e₃) (jmp st.pc st.data) := rfl
 
-theorem gimmickId_Effects_All_onNextPost_done₄ {MD : Type}
+theorem Effects_All_onNextPost_done₄ {MD : Type}
     (post : TracedPost MD) (next : MD → Kraken.Effects MD) (jmp : Int64 → MD → Kraken.Effects MD)
     (e₁ e₂ e₃ e₄ : LeakageEvent) (st : Kraken.MachineState MD) :
-    gimmickId (Kraken.Effects.All (((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (.done st)) =
-    gimmickId (Kraken.Effects.All ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (jmp st.pc st.data)) := rfl
+    Kraken.Effects.All (((((onNextPost post next jmp).consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (.done st) =
+    Kraken.Effects.All ((((post.consEvent e₁).consEvent e₂).consEvent e₃).consEvent e₄) (jmp st.pc st.data) := rfl
 
-theorem gimmickId_Effects_All_undefined {MD α : Type} [NondetSupportingType α]
+theorem Effects_All_undefined {MD α : Type} [NondetSupportingType α]
     (post : TracedPost MD) (cont : α → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (@Kraken.Effects.undefined MD α _ cont)) =
-    gimmickId (∀ v : α, (cont v).All post) := rfl
+    Kraken.Effects.All post (@Kraken.Effects.undefined MD α _ cont) =
+    (∀ v : α, (cont v).All post) := rfl
 
-theorem gimmickId_Effects_All_require_read_access {MD : Type}
+theorem Effects_All_require_read_access {MD : Type}
     (post : TracedPost MD) (addr : BitVec 64) (w : Width) (cont : Unit → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (.require_read_access addr w cont)) =
-    gimmickId ((cont ()).All (post.consEvent (.read addr w))) := rfl
+    Kraken.Effects.All post (.require_read_access addr w cont) =
+    (cont ()).All (post.consEvent (.read addr w)) := rfl
 
-theorem gimmickId_Effects_All_require_write_access {MD : Type}
+theorem Effects_All_require_write_access {MD : Type}
     (post : TracedPost MD) (addr : BitVec 64) (w : Width) (cont : Unit → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (.require_write_access addr w cont)) =
-    gimmickId ((cont ()).All (post.consEvent (.write addr w))) := rfl
+    Kraken.Effects.All post (.require_write_access addr w cont) =
+    (cont ()).All (post.consEvent (.write addr w)) := rfl
 
-theorem gimmickId_Effects_All_require_exec_access {MD : Type}
+theorem Effects_All_require_exec_access {MD : Type}
     (post : TracedPost MD) (p : Std.Rco Int64) (cont : Unit → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (.require_exec_access p cont)) =
-    gimmickId ((cont ()).All (post.consEvent (.exec p))) := rfl
+    Kraken.Effects.All post (.require_exec_access p cont) =
+    (cont ()).All (post.consEvent (.exec p)) := rfl
 
-theorem gimmickId_Effects_All_require_const_time {MD : Type}
+theorem Effects_All_require_const_time {MD : Type}
     (post : TracedPost MD) (vals : List (BitVec 64)) (cont : Unit → Kraken.Effects MD) :
-    gimmickId (Kraken.Effects.All post (.require_const_time vals cont)) =
-    gimmickId ((cont ()).All (post.consEvent (.var_time vals))) := rfl
+    Kraken.Effects.All post (.require_const_time vals cont) =
+    (cont ()).All (post.consEvent (.var_time vals)) := rfl
 
 /-! ### Options, Configuration, and Syntax -/
 
@@ -379,8 +373,8 @@ def kdeltaBetaOnly (targets : List Name) : DSimproc := fun e => do
 
 def klog : DSimproc := fun e => do
   let s := (← get).numSteps
-  if e.isApp && e.getAppFn'.isConstOf ``gimmickId then
-    trace[Kraken.kstep] "step {s} visiting\n{e.getAppRevArgs[0]!}"
+  if e.isAppOfArity ``Kraken.Effects.All 3 then
+    trace[Kraken.kstep] "step {s} visiting\n{e}"
   return .rfl
 
 def kdsimpMatch : DSimproc := fun e => do
@@ -488,13 +482,6 @@ private def skipPostAndDepForallD : DSimproc := fun e => do
         let e' ← shareCommon (mkAppN e.getAppFn args')
         let e'' ← mkLetFVars fvars e'
         return .step e'' (done := true)
-  if e.isAppOfArity ``gimmickId 1 then
-    let inner := e.appArg!
-    match (← Sym.DSimp.dsimp inner) with
-    | .rfl _ => return .rfl (done := true)
-    | .step inner' _ =>
-      let e' ← shareCommon (mkApp e.appFn! inner')
-      return .step e' (done := true)
   if e.isAppOfArity ``Kraken.Effects.All 3 then
     let eff := e.appArg!
     let eff' ← match (← Sym.DSimp.dsimp eff) with
@@ -757,11 +744,9 @@ private def simpLetValue (goal : Grind.Goal) : Grind.GrindTacticM Grind.Goal := 
 def rwTarget (goal : Grind.Goal) (symm : Bool) (term : Expr) :
     Grind.GrindTacticM (Grind.Goal × List Grind.Goal) := do
   goal.withContext do
-    let target ← instantiateMVars (← goal.mvarId.getType)
+    let target := (← instantiateMVars (← goal.mvarId.getType)).consumeMData
     let rootRewrite? : Option (Expr × Expr × List MVarId) ←
-      if target.isAppOfArity ``gimmickId 1 && target.appArg!.isAppOfArity ``Kraken.Effects.All 3 then
-        let gimmickFn := target.appFn!
-        let inner := target.appArg!
+      if target.isAppOfArity ``Kraken.Effects.All 3 then
         let saved ← saveState
         try
           Term.withSynthesize do
@@ -773,18 +758,18 @@ def rwTarget (goal : Grind.Goal) (symm : Bool) (term : Expr) :
             if symm then
               proof ← mkEqSymm proof
             let eNewInner ←
-              if lhs.isAppOfArity ``Kraken.Effects.All 3 && (← isDefEq lhs inner) then
+              if lhs.isAppOfArity ``Kraken.Effects.All 3 && (← isDefEq lhs target) then
                 pure rhs
-              else if ← isDefEq lhs inner.appArg! then
-                proof ← mkCongrArg inner.appFn! proof
-                pure (mkApp inner.appFn! rhs)
+              else if ← isDefEq lhs target.appArg! then
+                proof ← mkCongrArg target.appFn! proof
+                pure (mkApp target.appFn! rhs)
               else
                 failure
             for x in xs, bi in bis do
               if bi.isInstImplicit && !(← x.mvarId!.isAssigned) then
                 x.mvarId!.assign (← synthInstance (← inferType x))
-            let eqProof ← mkCongrArg gimmickFn (← instantiateMVars proof)
-            let eNew := mkApp gimmickFn (← instantiateMVars eNewInner)
+            let eqProof ← instantiateMVars proof
+            let eNew ← instantiateMVars eNewInner
             let mvarIds := (xs.map (·.mvarId!)).toList
             pure (some (eNew, eqProof, mvarIds))
         catch _ =>
@@ -829,21 +814,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
   let _config ← elabKStepConfig cfg
   let maxSteps? : Option Nat := if stx[2].isNone then none else some stx[2][0].toNat
   let goal : Grind.Goal ← Grind.getMainGoal
-
-  let gimmickRule ← mkBackwardRuleFromDecl ``gimmick
-  let insertGimmick (goal : Grind.Goal) : Grind.GrindTacticM Grind.Goal := do
-    let .goals [mvarId] ← Grind.liftGrindM (gimmickRule.apply goal.mvarId) | failure
-    pure { goal with mvarId }
-
-  let gimmickInvRule ← mkBackwardRuleFromDecl ``gimmickInv
-  let removeGimmick (goal : Grind.Goal) : Grind.GrindTacticM Grind.Goal := do
-    let mvarId ← Grind.liftGrindM (do
-      let .goals [mvarId] ← gimmickInvRule.apply goal.mvarId | failure
-      pure mvarId
-    )
-    pure { goal with mvarId }
-
-  let goal ← insertGimmick goal
+  let goal := { goal with mvarId := ← Grind.liftSymM (Sym.preprocessMVar goal.mvarId) }
   let env ← getEnv
 
   let declsForDSimp := (kstepExtension.getState env).toList
@@ -865,19 +836,15 @@ partial def evalSymKStep : Grind.GrindTactic :=
   ) {}
 
   let introsIf (goal : Grind.Goal) : Grind.GrindTacticM Grind.Goal := do
-    let goalT ← instantiateMVars (← goal.mvarId.getType)
-    let_expr gimmickId inner := goalT | return goal
-    let inner := inner.consumeMData
+    let inner := (← instantiateMVars (← goal.mvarId.getType)).consumeMData
     unless inner.isLet || inner.isForall do return goal
-    let goal ← removeGimmick goal
     let rec introLoop (goal : Grind.Goal) (fuel : Nat) : Grind.GrindTacticM Grind.Goal := do
       if fuel = 0 then return goal
       let goal ← simpLetValue goal
       match ← Grind.liftGrindM (goal.introN 1) with
       | Grind.IntrosResult.failed => pure goal
       | .goal _ goal => introLoop goal (fuel - 1)
-    let goal ← introLoop goal 1024
-    pure (← insertGimmick goal)
+    introLoop goal 1024
 
   let tStep ← IO.mkRef (0 : Nat)
   let tSimp ← IO.mkRef (0 : Nat)
@@ -895,9 +862,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
     -- STEP 1: dsimp and step through Directives.interp via equational theorems
     let rec stepDirectivesLoop (goal : Grind.Goal) : Grind.GrindTacticM Grind.Goal := do
       let goal ← goal.withContext do
-        let target ← instantiateMVars (← goal.mvarId.getType)
-        let_expr gimmickId inner := target | return goal
-        let inner := inner.consumeMData
+        let inner := (← instantiateMVars (← goal.mvarId.getType)).consumeMData
         if inner.isForall && !inner.isArrow then
           introsIf goal
         else
@@ -929,9 +894,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             pure mvarId
         introsIf ({ goal with mvarId })
       let stepEq? ← goal.withContext do
-        let target ← instantiateMVars (← goal.mvarId.getType)
-        unless target.isAppOfArity ``gimmickId 1 do return none
-        let inner := target.appArg!
+        let inner := (← instantiateMVars (← goal.mvarId.getType)).consumeMData
         if inner.isAppOfArity ``onNextPost 6 then
           let iArgs := inner.getAppArgs
           let MD := iArgs[0]!
@@ -942,12 +905,12 @@ partial def evalSymKStep : Grind.GrindTactic :=
           let tr := iArgs[5]!
           if r.isAppOfArity ``StepResult.next 2 then
             let s := r.getArg! 1
-            let eqPrf := mkAppN (mkConst ``gimmickId_onNextPost_next) #[MD, post, next, jmp, s, tr]
+            let eqPrf := mkAppN (mkConst ``onNextPost_next) #[MD, post, next, jmp, s, tr]
             let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
             return some (false, true, rhs, eqPrf)
           else if r.isAppOfArity ``StepResult.done 2 then
             let st := r.getArg! 1
-            let eqPrf := mkAppN (mkConst ``gimmickId_onNextPost_done) #[MD, post, next, jmp, st, tr]
+            let eqPrf := mkAppN (mkConst ``onNextPost_done) #[MD, post, next, jmp, st, tr]
             let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
             return some (false, true, rhs, eqPrf)
         unless inner.isAppOfArity ``Kraken.Effects.All 3 do return none
@@ -957,27 +920,27 @@ partial def evalSymKStep : Grind.GrindTactic :=
         if eff.isAppOfArity ``Kraken.Effects.require_exec_access 3 then
           let p := eff.getArg! 1
           let cont := eff.getArg! 2
-          let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_require_exec_access) #[MD, post, p, cont]
+          let eqPrf := mkAppN (mkConst ``Effects_All_require_exec_access) #[MD, post, p, cont]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Kraken.Effects.require_const_time 3 then
           let vals := eff.getArg! 1
           let cont := eff.getArg! 2
-          let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_require_const_time) #[MD, post, vals, cont]
+          let eqPrf := mkAppN (mkConst ``Effects_All_require_const_time) #[MD, post, vals, cont]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Kraken.Effects.require_read_access 4 then
           let addr := eff.getArg! 1
           let w := eff.getArg! 2
           let cont := eff.getArg! 3
-          let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_require_read_access) #[MD, post, addr, w, cont]
+          let eqPrf := mkAppN (mkConst ``Effects_All_require_read_access) #[MD, post, addr, w, cont]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Kraken.Effects.require_write_access 4 then
           let addr := eff.getArg! 1
           let w := eff.getArg! 2
           let cont := eff.getArg! 3
-          let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_require_write_access) #[MD, post, addr, w, cont]
+          let eqPrf := mkAppN (mkConst ``Effects_All_require_write_access) #[MD, post, addr, w, cont]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Kraken.Effects.done 2 || eff.isAppOfArity ``Kraken.Effects.next 2 then
@@ -990,7 +953,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
               peelEvents (e.getArg! 2) (evs.push (e.getArg! 1))
             else
               none
-          let fallback := mkAppN (mkConst (if isDone then ``gimmickId_Effects_All_done else ``gimmickId_Effects_All_next)) #[MD, post, arg]
+          let fallback := mkAppN (mkConst (if isDone then ``Effects_All_done else ``Effects_All_next)) #[MD, post, arg]
           let maxCount ← maxInstrCount.mapM (·.get)
           let (decCount, eqPrf) := match peelEvents post #[] with
             | some (onNextExpr, evs) =>
@@ -1015,11 +978,11 @@ partial def evalSymKStep : Grind.GrindTactic :=
                     if !ds.hasLooseBVars && !pc.hasLooseBVars && !ret.hasLooseBVars then
                       if ds.isAppOfArity ``List.nil 1 then
                         let thm? := match evs.size with
-                          | 0 => some ``gimmickId_Effects_All_onNextPost_interp_nil₀
-                          | 1 => some ``gimmickId_Effects_All_onNextPost_interp_nil₁
-                          | 2 => some ``gimmickId_Effects_All_onNextPost_interp_nil₂
-                          | 3 => some ``gimmickId_Effects_All_onNextPost_interp_nil₃
-                          | 4 => some ``gimmickId_Effects_All_onNextPost_interp_nil₄
+                          | 0 => some ``Effects_All_onNextPost_interp_nil₀
+                          | 1 => some ``Effects_All_onNextPost_interp_nil₁
+                          | 2 => some ``Effects_All_onNextPost_interp_nil₂
+                          | 3 => some ``Effects_All_onNextPost_interp_nil₃
+                          | 4 => some ``Effects_All_onNextPost_interp_nil₄
                           | _ => none
                         thm?.map fun thm =>
                           (false, mkAppN (mkConst thm) (#[D, MD, inst, labels, post₀, pc, ret] ++ revEvs ++ #[arg]))
@@ -1028,11 +991,11 @@ partial def evalSymKStep : Grind.GrindTactic :=
                         let d := ds.getArg! 1
                         let dsTail := ds.getArg! 2
                         let thm? := match evs.size with
-                          | 0 => some ``gimmickId_Effects_All_onNextPost_interp_cons₀
-                          | 1 => some ``gimmickId_Effects_All_onNextPost_interp_cons₁
-                          | 2 => some ``gimmickId_Effects_All_onNextPost_interp_cons₂
-                          | 3 => some ``gimmickId_Effects_All_onNextPost_interp_cons₃
-                          | 4 => some ``gimmickId_Effects_All_onNextPost_interp_cons₄
+                          | 0 => some ``Effects_All_onNextPost_interp_cons₀
+                          | 1 => some ``Effects_All_onNextPost_interp_cons₁
+                          | 2 => some ``Effects_All_onNextPost_interp_cons₂
+                          | 3 => some ``Effects_All_onNextPost_interp_cons₃
+                          | 4 => some ``Effects_All_onNextPost_interp_cons₄
                           | _ => none
                         thm?.map fun thm =>
                           (true, mkAppN (mkConst thm) (#[D, MD, inst, labels, post₀, d.getArg! 1, d.getArg! 2, dsTail, pc, ret] ++ revEvs ++ #[arg]))
@@ -1047,16 +1010,16 @@ partial def evalSymKStep : Grind.GrindTactic :=
               | some res => res
               | none =>
                 let thm? := match isDone, evs.size with
-                  | true, 0 => some ``gimmickId_Effects_All_onNextPost_done₀
-                  | true, 1 => some ``gimmickId_Effects_All_onNextPost_done₁
-                  | true, 2 => some ``gimmickId_Effects_All_onNextPost_done₂
-                  | true, 3 => some ``gimmickId_Effects_All_onNextPost_done₃
-                  | true, 4 => some ``gimmickId_Effects_All_onNextPost_done₄
-                  | false, 0 => some ``gimmickId_Effects_All_onNextPost_next₀
-                  | false, 1 => some ``gimmickId_Effects_All_onNextPost_next₁
-                  | false, 2 => some ``gimmickId_Effects_All_onNextPost_next₂
-                  | false, 3 => some ``gimmickId_Effects_All_onNextPost_next₃
-                  | false, 4 => some ``gimmickId_Effects_All_onNextPost_next₄
+                  | true, 0 => some ``Effects_All_onNextPost_done₀
+                  | true, 1 => some ``Effects_All_onNextPost_done₁
+                  | true, 2 => some ``Effects_All_onNextPost_done₂
+                  | true, 3 => some ``Effects_All_onNextPost_done₃
+                  | true, 4 => some ``Effects_All_onNextPost_done₄
+                  | false, 0 => some ``Effects_All_onNextPost_next₀
+                  | false, 1 => some ``Effects_All_onNextPost_next₁
+                  | false, 2 => some ``Effects_All_onNextPost_next₂
+                  | false, 3 => some ``Effects_All_onNextPost_next₃
+                  | false, 4 => some ``Effects_All_onNextPost_next₄
                   | _, _ => none
                 match thm? with
                 | some thm =>
@@ -1069,14 +1032,14 @@ partial def evalSymKStep : Grind.GrindTactic :=
           let α := eff.getArg! 1
           let inst := eff.getArg! 2
           let cont := eff.getArg! 3
-          let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_undefined) #[MD, α, inst, post, cont]
+          let eqPrf := mkAppN (mkConst ``Effects_All_undefined) #[MD, α, inst, post, cont]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
         else if eff.isAppOfArity ``Directives.interp 8 then
           if (← maxInstrCount.mapM (·.get)) = .some 0 then
             return none
           let iArgs := eff.getAppArgs
-          let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_interp_to_hold)
+          let eqPrf := mkAppN (mkConst ``Effects_All_interp_to_hold)
             #[iArgs[0]!, iArgs[1]!, iArgs[2]!, iArgs[3]!, post, iArgs[4]!, iArgs[5]!, iArgs[6]!, iArgs[7]!]
           let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
           return some (false, true, rhs, eqPrf)
@@ -1091,12 +1054,12 @@ partial def evalSymKStep : Grind.GrindTactic :=
           let pc := iArgs[6]!
           let ret := iArgs[7]!
           if ds.isAppOfArity ``List.nil 1 then
-            let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_interp_nil)
+            let eqPrf := mkAppN (mkConst ``Effects_All_interp_nil)
               #[D, MD, inst, labels, post, s, pc, ret]
             let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
             return some (false, true, rhs, eqPrf)
           else if (← maxInstrCount.mapM (·.get)) = .some 0 then
-            let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_hold_to_interp)
+            let eqPrf := mkAppN (mkConst ``Effects_All_hold_to_interp)
               #[D, MD, inst, labels, post, ds, s, pc, ret]
             let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
             return some (false, false, rhs, eqPrf)
@@ -1105,10 +1068,10 @@ partial def evalSymKStep : Grind.GrindTactic :=
             let dsTail := ds.getArg! 2
             let eqPrf :=
               if d.isAppOfArity ``Kraken.Sized.mk 3 then
-                mkAppN (mkConst ``gimmickId_Effects_All_interp_cons)
+                mkAppN (mkConst ``Effects_All_interp_cons)
                   #[D, MD, inst, labels, post, d.getArg! 1, d.getArg! 2, dsTail, s, pc, ret]
               else
-                mkAppN (mkConst ``gimmickId_Effects_All_interp_cons')
+                mkAppN (mkConst ``Effects_All_interp_cons')
                   #[D, MD, inst, labels, post, d, dsTail, s, pc, ret]
             let rhs ← Grind.liftSymM (Sym.preprocessExpr (← inferType eqPrf).appArg!)
             return some (true, true, rhs, eqPrf)
@@ -1143,9 +1106,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
 
     -- STEP 3: spec lemmas
     let effectsAll ← do
-      let goalT ← goal.mvarId.getType
-      let_expr gimmickId goalT' := goalT | throwError "kstep: missing gimmickId marker"
-      let goalT' ← instantiateMVars goalT'
+      let goalT' ← instantiateMVars (← goal.mvarId.getType)
       let rec getEffectsAll (e : Expr) : Option Expr :=
         match e with
         | .letE _ _ _ body _ => getEffectsAll body
@@ -1598,16 +1559,15 @@ partial def evalSymKStep : Grind.GrindTactic :=
         let notC := mkNot c
         let MD := effectsAll.getArg! 0
         let post := effectsAll.getArg! 1
-        let gimmickFn := mkConst ``gimmickId
         let allFn := effectsAll.getAppFn
         let takeTrue (hc : Expr) : Grind.GrindTacticM (Bool × Grind.Goal) := do
-          let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_ite_true) #[MD, post, c, inst, hc, t, f]
-          let rhs ← Grind.liftSymM (Sym.preprocessExpr (mkApp gimmickFn (mkAppN allFn #[MD, post, t])))
+          let eqPrf := mkAppN (mkConst ``Effects_All_ite_true) #[MD, post, c, inst, hc, t, f]
+          let rhs ← Grind.liftSymM (Sym.preprocessExpr (mkAppN allFn #[MD, post, t]))
           let mvarId ← goal.mvarId.replaceTargetEq rhs eqPrf
           pure (true, { goal with mvarId })
         let takeFalse (hnc : Expr) : Grind.GrindTacticM (Bool × Grind.Goal) := do
-          let eqPrf := mkAppN (mkConst ``gimmickId_Effects_All_ite_false) #[MD, post, c, inst, hnc, t, f]
-          let rhs ← Grind.liftSymM (Sym.preprocessExpr (mkApp gimmickFn (mkAppN allFn #[MD, post, f])))
+          let eqPrf := mkAppN (mkConst ``Effects_All_ite_false) #[MD, post, c, inst, hnc, t, f]
+          let rhs ← Grind.liftSymM (Sym.preprocessExpr (mkAppN allFn #[MD, post, f]))
           let mvarId ← goal.mvarId.replaceTargetEq rhs eqPrf
           pure (true, { goal with mvarId })
         if let some hc ← goal.mvarId.withContext (assumptionModBool c) then
@@ -1693,7 +1653,6 @@ partial def evalSymKStep : Grind.GrindTactic :=
       pure (goal, [])
 
   let (goal, subGoals) ← go goal
-  let goal ← removeGimmick goal
 
   trace[Kraken.kstep] "END KSTEP: {subGoals.length} sub-goals left"
   trace[Kraken.kstep.phase] "kstep time (ms): preprocess {(← tPre.get) / 1000000}, step {(← tStep.get) / 1000000}, ksimp {(← tSimp.get) / 1000000}, spec {(← tSpec.get) / 1000000}, ite {(← tIte.get) / 1000000}"
