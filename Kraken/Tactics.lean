@@ -8,6 +8,7 @@ Core tactics and theorems for stepping through Kraken assembly proofs.
 
 public import Kraken.Attribute
 import Kraken.Layout
+import Kraken.OmniSemantics
 
 public meta section
 
@@ -80,17 +81,27 @@ elab_rules : tactic
           `(rcasesPat| $id:ident)
       let statePat ← `(rcasesPat| ⟨$[$statePats],*⟩)
 
-      let straightlineStepId := mkIdent `straightlineStep
-      let execStraightlineId := mkIdent `Executable.straightline
+      let rec peelTargetLets : Expr → Expr
+        | .letE _ _ _ b _ => peelTargetLets b
+        | .mdata _ b => peelTargetLets b
+        | e => e
+      let target := peelTargetLets (← instantiateMVars (← getMainTarget))
+      if target.getAppFn.isConstOf `Eventually then
+        evalTactic (← `(tactic|
+          (obtain $statePat:rcasesPat := $s
+           try rw [← Kraken.Executable.addrOf_zero])))
+      else
+        let straightlineStepId := mkIdent `straightlineStep
+        let execStraightlineId := mkIdent `Executable.straightline
 
-      evalTactic (← `(tactic|
-        (let ss := $s
-         change ($straightlineStepId:ident _ ⟨ss, _⟩ _)
-         obtain $statePat:rcasesPat := $s
-         delta $p
-         dsimp only [$straightlineStepId:ident, $execStraightlineId:ident]
-         rw [Executable.directivesFromStart]
-         simp [List.mapIdx, List.mapIdx.go])))
+        evalTactic (← `(tactic|
+          (let ss := $s
+           change ($straightlineStepId:ident _ ⟨ss, _⟩ _)
+           obtain $statePat:rcasesPat := $s
+           delta $p
+           dsimp only [$straightlineStepId:ident, $execStraightlineId:ident]
+           rw [Executable.directivesFromStart]
+           simp [List.mapIdx, List.mapIdx.go])))
 
 --------------------------------------------------------------------------------
 
@@ -148,7 +159,7 @@ def kdeltaBetaOnly (targets: List Name) (maxInstrCount : Option (IO.Ref Nat)) : 
   -- semantics. Concretely: `f (let x = ... in arg)` => `let x = ... in f arg`.
   peelArgsLets args 0 #[] #[] fun (args : Array Expr) (fvars : Array Expr) => do
 
-    if f.isConstOf `Effects.All && args[1]!.isApp && args[1]!.getAppFn'.isConstOf `Directives.interp then
+    if f.isConstOf `Effects.All && args.size == 3 && args[2]!.isApp && args[2]!.getAppFn'.isConstOf `Directives.interp then
       -- We optionally track how many times we've hit Directives.interp -- this tracks how
       -- many instructions we've stepped through.
       if (← maxInstrCount.mapM (·.get)) = .some 0 then
@@ -159,8 +170,8 @@ def kdeltaBetaOnly (targets: List Name) (maxInstrCount : Option (IO.Ref Nat)) : 
       -- means that we are ready to step through. We manually force reduction of
       -- Directives.interp (since it is *not* is our list of targets), then let
       -- everything simplify until we're called again.
-      let some arg1 ← Meta.unfoldDefinition? args[1]! true | throwError "can't unfold Directives.interp"
-      let e := mkAppN f (args.set! 1 arg1)
+      let some arg2 ← Meta.unfoldDefinition? args[2]! true | throwError "can't unfold Directives.interp"
+      let e := mkAppN f (args.set! 2 arg2)
       let e' ← shareCommon e
       let e'' ← mkLetFVars fvars e'
       return .step e''
@@ -253,6 +264,7 @@ def kbeta: DSimproc := fun e => do
 def kdsimpProj : DSimproc := fun e => do
   let f := e.getAppFn
   let .const declName _ := f | return .rfl
+  if declName == ``Kraken.Labels.label? then return .rfl
   let some _projInfo ← getProjectionFnInfo? declName | return .rfl
   let reduceProjCont? (e? : Option Expr) : DSimpM Result := do
     match e? with
@@ -364,11 +376,198 @@ partial def evalSymKStep : Grind.GrindTactic :=
       | .goal _ goal => pure goal
     pure (← insertGimmick goal)
 
+  let rec findLabelIdx? (p lblExpr : Expr) (i : Nat) : MetaM (Option Nat) := do
+    let p ← whnfD p
+    match_expr p with
+    | List.cons _ hd tl =>
+      let hd ← whnfD hd
+      match_expr hd with
+      | Kraken.Directive.label _ _ l' =>
+        if ← isDefEq l' lblExpr then return some i else findLabelIdx? tl lblExpr (i + 1)
+      | _ => findLabelIdx? tl lblExpr (i + 1)
+    | _ => return none
+
+  let rec getProgElem? (p : Expr) (i : Nat) : MetaM (Option Expr) := do
+    let p ← whnfD p
+    match_expr p with
+    | List.cons _ hd tl =>
+      if i == 0 then return some hd else getProgElem? tl (i - 1)
+    | _ => return none
+
+  let matchLayoutApply? (exe : Expr) : MetaM (Option (Expr × Expr × Expr × Expr)) := do
+    let exe' ← withTransparency .instances (whnfCore exe)
+    match_expr exe' with
+    | Kraken.Layout.apply instrTy constTy l prog => return some (instrTy, constTy, l, prog)
+    | _ => return none
+
+  let proveExeLabel? (L lblExpr : Expr) : MetaM (Option (Expr × Expr)) := do
+    let L' ← withTransparency .instances (whnfCore L)
+    let exe? : Option Expr :=
+      if L'.getAppFn.isConstOf ``Kraken.Executable.labels && L'.getAppNumArgs > 0 then some L'.appArg!
+      else none
+    let some exe := exe? | return none
+    let some (instrTy, constTy, l, prog) ← matchLayoutApply? exe | return none
+    let some k ← findLabelIdx? prog lblExpr 0 | return none
+    let s ← saveState
+    try
+      let kExpr := ToExpr.toExpr k
+      let hkType ← mkEq
+        (← mkAppM ``List.findIdx? #[← mkAppOptM ``Kraken.Directive.isLabel #[some instrTy, some constTy, some lblExpr], prog])
+        (← mkAppM ``Option.some #[kExpr])
+      let hkProof ← mkEqRefl (← mkAppM ``Option.some #[kExpr])
+      let hkTyped ← mkExpectedTypeHint hkProof hkType
+      let heq ← mkAppOptM ``Kraken.Layout.label?_eq_some_addrOf
+        #[some instrTy, some constTy, some l, some prog, some lblExpr, some kExpr, some hkTyped]
+      let addrExpr ← mkAppM ``Kraken.Executable.addrOf #[exe, kExpr]
+      return some (addrExpr, heq)
+    catch _ =>
+      s.restore
+      return none
+
+  let proveLabelLookup? (L lblExpr : Expr) : MetaM (Option (Expr × Expr)) := do
+    if let some res ← proveExeLabel? L lblExpr then
+      return some res
+    let targetLhs := mkApp2 (mkConst ``Kraken.Labels.label?) L lblExpr
+    let lctx ← getLCtx
+    for ldecl in lctx do
+      if ldecl.isImplementationDetail then continue
+      let ty ← instantiateMVars ldecl.type
+      match_expr ty with
+      | Eq _ lhs rhs =>
+        if rhs.isAppOfArity ``Option.some 2 then
+          if ← withReducibleAndInstances (isDefEq lhs targetLhs) then
+            return some (rhs.getArg! 1, ldecl.toExpr)
+      | HasSubset.Subset _ _ lSub lSup =>
+        if ← isDefEq lSup L then
+          if let some (addrExpr, hSub) ← proveExeLabel? lSub lblExpr then
+            return some (addrExpr, mkAppN ldecl.toExpr #[lblExpr, addrExpr, hSub])
+      | _ => pure ()
+    return none
+
+  let matchEffectsLookupLabel? (e : Expr) : Option (Expr × Expr) :=
+    if e.isApp && e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 3 then
+      let L := e.getArg! 0
+      let eff := e.getArg! 2
+      if eff.isAppOfArity `Effects.lookup_label 2 then
+        some (L, eff.getArg! 0)
+      else
+        none
+    else
+      none
+
+  let resolveLabel? (goal : Grind.Goal) : Grind.GrindTacticM (Option Grind.Goal) := do
+    let goalT ← goal.withContext do instantiateMVars (← goal.mvarId.getType)
+    let_expr gimmickId goalT' := goalT | return none
+    let some allApp := goalT'.find? fun e =>
+      match matchEffectsLookupLabel? e with
+      | some (L, lbl) => !L.hasLooseBVars && !lbl.hasLooseBVars
+      | none => false
+    | return none
+    let some (L, lblExpr) := matchEffectsLookupLabel? allApp | return none
+    let some (addrExpr, heq) ← goal.withContext (proveLabelLookup? L lblExpr) | return none
+    let saved ← saveState
+    try
+      let goalNoGim ← removeGimmick goal
+      let heqRule ← goalNoGim.withContext do
+        let lhs := mkApp2 (mkConst ``Kraken.Labels.label?) L lblExpr
+        let rhs ← mkAppM ``Option.some #[addrExpr]
+        let heqTyped ← mkExpectedTypeHint heq (← mkEq lhs rhs)
+        mkAppOptM `Effects.All_lookup_label_of_eq #[some L, some lblExpr, some addrExpr, some heqTyped]
+      let (goalNew, sideGoals) ← rwTarget goalNoGim false heqRule
+      unless sideGoals.isEmpty do failure
+      return some (← insertGimmick goalNew)
+    catch _ =>
+      saved.restore
+      return none
+
+  let stepAt? (goal : Grind.Goal) : Grind.GrindTacticM (Option Grind.Goal) := do
+    let goalT ← goal.withContext do instantiateMVars (← goal.mvarId.getType)
+    let_expr gimmickId goalT' := goalT | return none
+    let_expr Eventually _ trans post state := goalT' | return none
+    unless trans.getAppFn.constName?.map (·.getString! == "step1") == some true && trans.getAppNumArgs == 2 do
+      return none
+    let exe := trans.getArg! 0
+    let labels := trans.getArg! 1
+    let some (_, _, l, p) ← goal.withContext (matchLayoutApply? exe) | return none
+    unless state.isApp && state.getAppNumArgs == 2 &&
+      (state.getAppFn.constName?.map (·.getString! == "mk") |>.getD false) do
+      return none
+    let s := state.getArg! 0
+    let pc := state.getArg! 1
+    -- Normalize `layout.start` to `exe.addrOf 0` if needed.
+    if pc.isAppOfArity ``Kraken.Layout.start 3 then
+      if ← goal.withContext (isDefEq (pc.getArg! 2) l) then
+        let saved0 ← saveState
+        try
+          let goalNoGim ← removeGimmick goal
+          let hZeroTyped ← goalNoGim.withContext do
+            let hZero ← mkAppM ``Kraken.Executable.addrOf_zero #[exe]
+            let addr0 ← mkAppM ``Kraken.Executable.addrOf #[exe, ToExpr.toExpr (0 : Nat)]
+            mkExpectedTypeHint hZero (← mkEq addr0 pc)
+          let (goalNew, sideGoals) ← rwTarget goalNoGim true hZeroTyped
+          unless sideGoals.isEmpty do failure
+          return some (← insertGimmick goalNew)
+        catch _ =>
+          saved0.restore
+    unless pc.getAppFn.isConstOf ``Kraken.Executable.addrOf && pc.getAppNumArgs >= 2 do
+      return none
+    let pcExe := pc.getArg! (pc.getAppNumArgs - 2)
+    let kExpr := pc.getArg! (pc.getAppNumArgs - 1)
+    unless ← goal.withContext (isDefEq pcExe exe) do
+      return none
+    let some k := kExpr.nat? <|> kExpr.rawNatLit? | return none
+    let some d ← goal.withContext (getProgElem? p k) | return none
+    let isInstr ← goal.withContext do
+      let d' ← whnfD d
+      return d'.getAppFn.isConstOf ``Kraken.Directive.instr
+    if isInstr then
+      if (← maxInstrCount.mapM (·.get)) == some 0 then
+        return none
+    let saved ← saveState
+    try
+      let goalNoGim ← removeGimmick goal
+      let goalNew ← goalNoGim.withContext do
+        let kNatExpr := ToExpr.toExpr k
+        let stepConst ← mkConstWithFreshMVarLevels `step_at
+        let (mvars, _, _) ← forallMetaBoundedTelescope (← inferType stepConst) 10
+        unless ← isDefEq mvars[0]! l do failure
+        unless ← isDefEq mvars[1]! p do failure
+        unless ← isDefEq mvars[3]! labels do failure
+        unless ← isDefEq mvars[4]! kNatExpr do failure
+        unless ← isDefEq mvars[5]! d do failure
+        unless ← isDefEq mvars[7]! post do failure
+        unless ← isDefEq mvars[8]! s do failure
+        let hfitMVar := mvars[2]!
+        let hdMVar := mvars[6]!
+        let hMVar := mvars[9]!
+        let stepProof := mkAppN stepConst mvars
+        hdMVar.mvarId!.refl
+        unless ← hfitMVar.mvarId!.assumptionCore do
+          let hfitT ← instantiateMVars (← hfitMVar.mvarId!.getType)
+          let hfitT' ← Grind.liftSymM <| Sym.preprocessExpr hfitT
+          let mvarFit ← hfitMVar.mvarId!.replaceTargetDefEq hfitT'
+          let subG : Grind.Goal := { goalNoGim with mvarId := mvarFit }
+          let subG ← Grind.liftGrindM subG.internalizeAll
+          match ← Grind.liftGrindM subG.grind with
+          | .closed => pure ()
+          | .failed _ => failure
+        let hType ← instantiateMVars (← hMVar.mvarId!.getType)
+        let hType' ← Grind.liftSymM <| Sym.preprocessExpr hType
+        let mvarNew ← hMVar.mvarId!.replaceTargetDefEq hType'
+        goalNoGim.mvarId.assign stepProof
+        return { goalNoGim with mvarId := mvarNew }
+      if isInstr then
+        maxInstrCount.forM (·.modify (· - 1))
+      return some (← insertGimmick goalNew)
+    catch _ =>
+      saved.restore
+      return none
+
   -- MAIN LOOP
   let rec go (goal: Grind.Goal): Grind.GrindTacticM (Grind.Goal × List Grind.Goal) := do
     -- STEP 1: dsimp
     let goal ← do
-      let mvarId ← goal.mvarId.replaceTargetDefEq (← Grind.liftGrindM $
+      let mvarId ← goal.mvarId.replaceTargetDefEq (← goal.mvarId.withContext <| Grind.liftGrindM $
         Sym.dsimp
           (config := { maxSteps := 1000000 })
           (methods := {
@@ -377,8 +576,11 @@ partial def evalSymKStep : Grind.GrindTactic :=
       introsIf ({ goal with mvarId })
 
     if config.debug then
-      let t ← goal.mvarId.getType
+      let _ ← goal.mvarId.getType
       logInfo m!"MAIN LOOP, after step 1: {goal.mvarId}"
+
+    if let some goal' ← resolveLabel? goal then
+      return ← go goal'
 
     -- TEMPORARY: trying to simplify binders in the goal
     /- let goal ← Meta.letToHave goal -/
@@ -406,13 +608,15 @@ partial def evalSymKStep : Grind.GrindTactic :=
         | .letE _ _ _ body _ => getEffectsState body
         | .mdata _ e => getEffectsState e
         | _ =>
-          if e.isApp && e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 2 then
-            some e.getAppArgs[1]!
+          if e.isApp && e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 3 then
+            some e.getAppArgs[2]!
           else
             none
-      -- No more Effects.All in the goal -- return to the user (we might be done,
-      -- or realistically, we might need to debug).
-      let some state := getEffectsState goalT' | return (goal, [])
+      -- No more Effects.All in the goal -- try stepping `Eventually (step1 ...)` if applicable.
+      let some state := getEffectsState goalT' | do
+        if let some goal' ← stepAt? goal then
+          return ← go goal'
+        return (goal, [])
       pure state
 
     let (keepGoingSpec, goal) ←

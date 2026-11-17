@@ -59,7 +59,7 @@ variable [Host]
 public theorem Host.eventually_of_interp {k : Nat} {d : Directive} {p : Program}
     (hdp : (d :: p).IsInfixAt Host.prog k) {post : @Post MachineState} {s : MachineData}
     (h : (d.interp s ⟨Host.addrOf k, Host.addrOf (k + 1)⟩
-      (fun s' => .done ⟨s', Host.addrOf (k + 1)⟩) (fun a s' => .done ⟨s', a⟩)).All post) :
+      (fun s' => .done ⟨s', Host.addrOf (k + 1)⟩) (fun a s' => .done ⟨s', a⟩)).All Host.exe.labels post) :
     Eventually (step1 Host.exe) post ⟨s, Host.addrOf k⟩ := by
   have hd : Host.exe.program[k]? = some {directive := d, size := Host.layout.size d k : Kraken.Sized Directive} := by
     rw [Host.exe_getElem?, hdp.cons.1]
@@ -68,14 +68,14 @@ public theorem Host.eventually_of_interp {k : Nat} {d : Directive} {p : Program}
   match hsize: Host.layout.size d k with
   | 0 =>
     apply Eventually.done
-    simpa [hsize, inert_of_size_zero hsize, Effects.All] using h
+    simpa [hsize, inert_of_size_zero Host.layout hsize, Effects.All] using h
   | _+1 =>
     refine Eventually.step _ post ?_ fun _ hb => Eventually.done _ hb
     obtain ⟨pre, hat, hpre⟩ := Host.directivesAtAddress_addrOf hd <| by grind only
     have hmem : ∀ c ∈ pre, c ∈ Host.exe.program := fun c hc =>
       Kraken.Executable.mem_of_mem_directivesAtAddress (hat ▸ List.mem_append_left _ hc)
     unfold step1 Executable.step
-    change (Directives.interp (Host.exe.directivesAtAddress (Host.addrOf k)) s (Host.addrOf k) _).All post
+    change (Directives.interp (Host.exe.directivesAtAddress (Host.addrOf k)) s (Host.addrOf k) _).All Host.exe.labels post
     rw [hat]
     clear hat
     induction pre with
@@ -85,7 +85,7 @@ public theorem Host.eventually_of_interp {k : Nat} {d : Directive} {p : Program}
       obtain ⟨d', _, rfl⟩ := Option.map_eq_some_iff.mp (Host.exe_getElem? m ▸ hm)
       have hz0 : Host.layout.size d' m = 0 := hpre _ List.mem_cons_self
       simp only [hz0, List.cons_append, Directives.interp, Int64.reduceOfNat, Int64.add_zero,
-        inert_of_size_zero hz0]
+        inert_of_size_zero Host.layout hz0]
       exact ih (fun c' hc' => hpre c' (List.mem_cons_of_mem _ hc'))
         (fun c' hc' => hmem c' (List.mem_cons_of_mem _ hc'))
 
