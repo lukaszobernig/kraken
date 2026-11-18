@@ -416,6 +416,47 @@ theorem Layout.labels_sub_append_left (layout : Layout Instr Const) (q p : Progr
     ((layout.after q) p).labels ⊆ (layout (q ++ p)).labels := by
   simpa using layout.labels_sub_infix q p [] hdisj
 
+/-- `bedrock2`-style `spec_of`: associates a function label `fn` with a specification
+over the ambient executable `Executable Instr Const → Prop`. -/
+class SpecOf (Instr Const : Type) (fn : Label) where
+  spec : Executable Instr Const → Prop
+
+instance {fn : Label} : CoeFun (SpecOf Instr Const fn) (fun _ => Executable Instr Const → Prop) :=
+  ⟨fun s => s.spec⟩
+
+/-- Named-function specification wrapper: `fn` resolves to some `entry` in `e.labels`
+satisfying `contract entry`. -/
+def FnSpec (e : Executable Instr Const) (fn : Label) (contract : Int64 → Prop) : Prop :=
+  ∃ entry, e.labels.label? fn = some entry ∧ contract entry
+
+theorem FnSpec.mono {e : Executable Instr Const} {fn : Label} {P Q : Int64 → Prop}
+    (hPQ : ∀ a, P a → Q a) (h : FnSpec e fn P) : FnSpec e fn Q := by
+  obtain ⟨entry, hlbl, hp⟩ := h
+  exact ⟨entry, hlbl, hPQ entry hp⟩
+
+/-- Lift a family of measure-indexed `FnSpec`s (e.g. from recursive/mutually-recursive induction)
+into a single `FnSpec` whose `entry` is resolved once outside `∀ n`. -/
+theorem FnSpec.forall_nat {e : Executable Instr Const} {fn : Label} {P : Nat → Int64 → Prop}
+    (h : ∀ n, FnSpec e fn (P n)) :
+    FnSpec e fn (fun entry => ∀ n, P n entry) := by
+  obtain ⟨entry, hlbl, _⟩ := h 0
+  refine ⟨entry, hlbl, fun n => ?_⟩
+  obtain ⟨entry', hlbl', hp⟩ := h n
+  cases hlbl.symm.trans hlbl'
+  exact hp
+
+/-- Instantiate a `FnSpec` on a concrete program `l p` at the known label index `k` of `fn`. -/
+theorem FnSpec.at_label [l : Layout Instr Const]
+    {p : Program Instr Const} {fn : Label} {k : Nat}
+    (hk : p.findIdx? (·.isLabel fn) = some k)
+    {contract : Int64 → Prop}
+    (h : FnSpec (l p) fn contract) :
+    contract ((l p).addrOf k) := by
+  obtain ⟨entry, hentry, hc⟩ := h
+  have hk' := l.label?_eq_some_addrOf p fn hk
+  cases hentry.symm.trans hk'
+  exact hc
+
 end Kraken
 
-export Kraken (Labels)
+export Kraken (Labels FnSpec)

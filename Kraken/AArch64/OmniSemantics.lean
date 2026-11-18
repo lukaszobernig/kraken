@@ -223,3 +223,114 @@ theorem Layout.eventually_seq
     fun st' hst' => layout.eventually_append_left (Kraken.Labels.subset_refl L) hfit (h₂ st' hst')
 
 end Concat
+
+/-! ## Function Specifications & Modular Snippet Embedding (`SpecOf`, `WPCall`, `Embedded`) -/
+
+abbrev SpecOf (fn : Label) := Kraken.SpecOf Instr ConstExpr fn
+
+/-- Execute from a resolved entry address `entry` in ambient executable `e`
+(also directly usable for indirect calls such as `blr x8`). -/
+abbrev WPCallAt (e : Executable) (entry : Int64) (s : MachineData) (post : @Post MachineState) : Prop :=
+  Eventually (step1 e) post ⟨s, entry⟩
+
+/-- Assembly analogue of `bedrock2.WeakestPrecondition.call`:
+`fn` resolves in `e.labels` and executing from that address in `e` satisfies `post`. -/
+def WPCall (e : Executable) (fn : Label) (s : MachineData) (post : @Post MachineState) : Prop :=
+  FnSpec e fn fun entry => WPCallAt e entry s post
+
+/-- Step a single directive of an embedded snippet `layout p` directly inside `Eventually (step1 e)`. -/
+theorem step_at_sub [layout : Layout] {p : Program} {e : Executable}
+    (hfit : Kraken.Directives.size (layout p).program < 2 ^ 64)
+    (hsub : SubStep (step1 (layout p) e.labels) (step1 e))
+    {k : Nat} {d : Directive} (hd : p[k]? = some d)
+    {post : @Post MachineState} {s : MachineData}
+    (h : (d.interp s ⟨(layout p).addrOf k, (layout p).addrOf (k + 1)⟩
+      (fun s' => .done ⟨s', (layout p).addrOf (k + 1)⟩)
+      (fun a s' => .done ⟨s', a⟩)).All e.labels
+        (fun mid => Eventually (step1 e) post mid)) :
+    Eventually (step1 e) post ⟨s, (layout p).addrOf k⟩ :=
+  Eventually.bind (hsub.eventually (eventually_of_interp hfit hd h)) fun _ => id
+
+/-- `Embedded p e` asserts that snippet `p` is laid out inside ambient executable `e`
+with non-shadowed defined labels and step simulation under any label extension `L`. -/
+inductive Embedded (p : Program) (e : Executable) : Prop where
+  | intro (layout : Layout)
+      (fit : Kraken.Directives.size (layout p).program < 2 ^ 64)
+      (labels_sub : (layout p).labels ⊆ e.labels)
+      (subStep : ∀ L : Labels, e.labels ⊆ L → SubStep (step1 (layout p) L) (step1 e L))
+
+theorem Embedded.self (layout : Layout) (p : Program)
+    (hfit : Kraken.Directives.size (layout p).program < 2 ^ 64) :
+    Embedded p (layout p) :=
+  ⟨layout, hfit, Kraken.Labels.subset_refl _, fun L _ => SubStep.refl (step1 (layout p) L)⟩
+
+theorem Embedded.of_infix (layout : Layout) (q₁ p q₂ : Program)
+    (hdisj : ∀ l ∈ q₁.definedLabels, l ∉ p.definedLabels)
+    (hfit : Kraken.Directives.size (layout (q₁ ++ p ++ q₂)).program < 2 ^ 64) :
+    Embedded p (layout (q₁ ++ p ++ q₂)) :=
+  ⟨layout.after q₁,
+    (layout.after q₁).size_left_lt (layout.size_after_lt (p := q₁) (q := p ++ q₂)
+      (by simpa only [List.append_assoc] using hfit)),
+    layout.labels_sub_infix q₁ p q₂ hdisj,
+    fun L _ => layout.subStep_infix (Kraken.Labels.subset_refl L) hfit⟩
+
+theorem Embedded.append_right (layout : Layout) {p : Program} (p₁ p₂ : Program)
+    (hfit : Kraken.Directives.size (layout (p₁ ++ p₂)).program < 2 ^ 64)
+    (hemb : Embedded p (layout p₁)) :
+    Embedded p (layout (p₁ ++ p₂)) := by
+  rcases hemb with ⟨l', hfit_p, hlbl_p, hsub_p⟩
+  have hsub12 := layout.labels_sub_append_right p₁ p₂
+  exact ⟨l', hfit_p, Kraken.Labels.subset_trans hlbl_p hsub12, fun L hL =>
+    (hsub_p L (Kraken.Labels.subset_trans hsub12 hL)).trans
+      (layout.subStep_append_right (Kraken.Labels.subset_refl L) hfit)⟩
+
+theorem Embedded.append_left (layout : Layout) {p : Program} (p₁ p₂ : Program)
+    (hdisj : ∀ l ∈ p₁.definedLabels, l ∉ p₂.definedLabels)
+    (hfit : Kraken.Directives.size (layout (p₁ ++ p₂)).program < 2 ^ 64)
+    (hemb : Embedded p ((layout.after p₁) p₂)) :
+    Embedded p (layout (p₁ ++ p₂)) := by
+  rcases hemb with ⟨l', hfit_p, hlbl_p, hsub_p⟩
+  have hsub12 := layout.labels_sub_append_left p₁ p₂ hdisj
+  exact ⟨l', hfit_p, Kraken.Labels.subset_trans hlbl_p hsub12, fun L hL =>
+    (hsub_p L (Kraken.Labels.subset_trans hsub12 hL)).trans
+      (layout.subStep_append_left (Kraken.Labels.subset_refl L) hfit)⟩
+
+theorem Embedded.of_append_right (layout : Layout) (p₁ p₂ : Program)
+    (hfit : Kraken.Directives.size (layout (p₁ ++ p₂)).program < 2 ^ 64) :
+    Embedded p₁ (layout (p₁ ++ p₂)) :=
+  Embedded.append_right layout p₁ p₂ hfit (Embedded.self layout p₁ (layout.size_left_lt hfit))
+
+theorem Embedded.of_append_left (layout : Layout) (p₁ p₂ : Program)
+    (hdisj : ∀ l ∈ p₁.definedLabels, l ∉ p₂.definedLabels)
+    (hfit : Kraken.Directives.size (layout (p₁ ++ p₂)).program < 2 ^ 64) :
+    Embedded p₂ (layout (p₁ ++ p₂)) :=
+  Embedded.append_left layout p₁ p₂ hdisj hfit
+    (Embedded.self (layout.after p₁) p₂ (layout.size_after_lt hfit))
+
+/-- Unpack `Embedded p e` to prove `FnSpec e fn contract` where `fn` is at index `k` of `p`. -/
+theorem Embedded.fnSpec_of_label {p : Program} {e : Executable}
+    (hemb : Embedded p e) {fn : Label} {k : Nat}
+    (hk : p.findIdx? (·.isLabel fn) = some k)
+    {contract : Int64 → Prop}
+    (h : ∀ [layout : Layout],
+      Kraken.Directives.size (layout p).program < 2 ^ 64 →
+      (layout p).labels ⊆ e.labels →
+      SubStep (step1 (layout p) e.labels) (step1 e) →
+      contract ((layout p).addrOf k)) :
+    FnSpec e fn contract := by
+  rcases hemb with ⟨layout, hfit, hlocal, hsub⟩
+  exact ⟨(layout p).addrOf k,
+    hlocal fn _ (Kraken.Layout.label?_eq_some_addrOf p fn hk),
+    @h layout hfit hlocal (hsub e.labels (Kraken.Labels.subset_refl _))⟩
+
+theorem Embedded.wpCall_of_label {p : Program} {e : Executable}
+    (hemb : Embedded p e) {fn : Label} {k : Nat}
+    (hk : p.findIdx? (·.isLabel fn) = some k)
+    {s : MachineData} {post : @Post MachineState}
+    (h : ∀ [layout : Layout],
+      Kraken.Directives.size (layout p).program < 2 ^ 64 →
+      (layout p).labels ⊆ e.labels →
+      SubStep (step1 (layout p) e.labels) (step1 e) →
+      Eventually (step1 e) post ⟨s, (layout p).addrOf k⟩) :
+    WPCall e fn s post :=
+  hemb.fnSpec_of_label hk h

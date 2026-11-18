@@ -85,7 +85,7 @@ elab_rules : tactic
         | .letE _ _ _ b _ => peelTargetLets b
         | .mdata _ b => peelTargetLets b
         | e => e
-      let target := peelTargetLets (← instantiateMVars (← getMainTarget))
+      let target ← withReducible <| whnf <| peelTargetLets (← instantiateMVars (← getMainTarget))
       if target.getAppFn.isConstOf `Eventually then
         evalTactic (← `(tactic|
           (obtain $statePat:rcasesPat := $s
@@ -483,38 +483,38 @@ partial def evalSymKStep : Grind.GrindTactic :=
   let stepAt? (goal : Grind.Goal) : Grind.GrindTacticM (Option Grind.Goal) := do
     let goalT ← goal.withContext do instantiateMVars (← goal.mvarId.getType)
     let_expr gimmickId goalT' := goalT | return none
-    let_expr Eventually _ trans post state := goalT' | return none
+    let goalT'' ← goal.withContext <| withReducible <| whnf goalT'
+    let_expr Eventually _ trans post state := goalT'' | return none
     unless trans.getAppFn.constName?.map (·.getString! == "step1") == some true && trans.getAppNumArgs == 2 do
       return none
     let exe := trans.getArg! 0
     let labels := trans.getArg! 1
-    let some (_, _, l, p) ← goal.withContext (matchLayoutApply? exe) | return none
     unless state.isApp && state.getAppNumArgs == 2 &&
       (state.getAppFn.constName?.map (·.getString! == "mk") |>.getD false) do
       return none
     let s := state.getArg! 0
     let pc := state.getArg! 1
-    -- Normalize `layout.start` to `exe.addrOf 0` if needed.
+    -- Normalize `layout.start` to `exe.addrOf 0` if `exe = layout p`.
     if pc.isAppOfArity ``Kraken.Layout.start 3 then
-      if ← goal.withContext (isDefEq (pc.getArg! 2) l) then
-        let saved0 ← saveState
-        try
-          let goalNoGim ← removeGimmick goal
-          let hZeroTyped ← goalNoGim.withContext do
-            let hZero ← mkAppM ``Kraken.Executable.addrOf_zero #[exe]
-            let addr0 ← mkAppM ``Kraken.Executable.addrOf #[exe, ToExpr.toExpr (0 : Nat)]
-            mkExpectedTypeHint hZero (← mkEq addr0 pc)
-          let (goalNew, sideGoals) ← rwTarget goalNoGim true hZeroTyped
-          unless sideGoals.isEmpty do failure
-          return some (← insertGimmick goalNew)
-        catch _ =>
-          saved0.restore
+      if let some (_, _, lExe, _) ← goal.withContext (matchLayoutApply? exe) then
+        if ← goal.withContext (isDefEq (pc.getArg! 2) lExe) then
+          let saved0 ← saveState
+          try
+            let goalNoGim ← removeGimmick goal
+            let hZeroTyped ← goalNoGim.withContext do
+              let hZero ← mkAppM ``Kraken.Executable.addrOf_zero #[exe]
+              let addr0 ← mkAppM ``Kraken.Executable.addrOf #[exe, ToExpr.toExpr (0 : Nat)]
+              mkExpectedTypeHint hZero (← mkEq addr0 pc)
+            let (goalNew, sideGoals) ← rwTarget goalNoGim true hZeroTyped
+            unless sideGoals.isEmpty do failure
+            return some (← insertGimmick goalNew)
+          catch _ =>
+            saved0.restore
     unless pc.getAppFn.isConstOf ``Kraken.Executable.addrOf && pc.getAppNumArgs >= 2 do
       return none
     let pcExe := pc.getArg! (pc.getAppNumArgs - 2)
     let kExpr := pc.getArg! (pc.getAppNumArgs - 1)
-    unless ← goal.withContext (isDefEq pcExe exe) do
-      return none
+    let some (_, _, l, p) ← goal.withContext (matchLayoutApply? pcExe) | return none
     let some k := kExpr.nat? <|> kExpr.rawNatLit? | return none
     let some d ← goal.withContext (getProgElem? p k) | return none
     let isInstr ← goal.withContext do
@@ -527,30 +527,47 @@ partial def evalSymKStep : Grind.GrindTactic :=
     try
       let goalNoGim ← removeGimmick goal
       let goalNew ← goalNoGim.withContext do
+        let dischargeFit (hfitMVar : Expr) : Grind.GrindTacticM Unit := do
+          unless ← hfitMVar.mvarId!.assumptionCore do
+            let hfitT ← instantiateMVars (← hfitMVar.mvarId!.getType)
+            let hfitT' ← Grind.liftSymM <| Sym.preprocessExpr hfitT
+            let mvarFit ← hfitMVar.mvarId!.replaceTargetDefEq hfitT'
+            let subG : Grind.Goal := { goalNoGim with mvarId := mvarFit }
+            let subG ← Grind.liftGrindM subG.internalizeAll
+            match ← Grind.liftGrindM subG.grind with
+            | .closed => pure ()
+            | .failed _ => failure
         let kNatExpr := ToExpr.toExpr k
-        let stepConst ← mkConstWithFreshMVarLevels `step_at
-        let (mvars, _, _) ← forallMetaBoundedTelescope (← inferType stepConst) 10
-        unless ← isDefEq mvars[0]! l do failure
-        unless ← isDefEq mvars[1]! p do failure
-        unless ← isDefEq mvars[3]! labels do failure
-        unless ← isDefEq mvars[4]! kNatExpr do failure
-        unless ← isDefEq mvars[5]! d do failure
-        unless ← isDefEq mvars[7]! post do failure
-        unless ← isDefEq mvars[8]! s do failure
-        let hfitMVar := mvars[2]!
-        let hdMVar := mvars[6]!
-        let hMVar := mvars[9]!
-        let stepProof := mkAppN stepConst mvars
-        hdMVar.mvarId!.refl
-        unless ← hfitMVar.mvarId!.assumptionCore do
-          let hfitT ← instantiateMVars (← hfitMVar.mvarId!.getType)
-          let hfitT' ← Grind.liftSymM <| Sym.preprocessExpr hfitT
-          let mvarFit ← hfitMVar.mvarId!.replaceTargetDefEq hfitT'
-          let subG : Grind.Goal := { goalNoGim with mvarId := mvarFit }
-          let subG ← Grind.liftGrindM subG.internalizeAll
-          match ← Grind.liftGrindM subG.grind with
-          | .closed => pure ()
-          | .failed _ => failure
+        let (stepProof, hMVar) ←
+          if ← isDefEq pcExe exe then
+            let stepConst ← mkConstWithFreshMVarLevels `step_at
+            let (mvars, _, _) ← forallMetaBoundedTelescope (← inferType stepConst) 10
+            unless ← isDefEq mvars[0]! l do failure
+            unless ← isDefEq mvars[1]! p do failure
+            unless ← isDefEq mvars[3]! labels do failure
+            unless ← isDefEq mvars[4]! kNatExpr do failure
+            unless ← isDefEq mvars[5]! d do failure
+            unless ← isDefEq mvars[7]! post do failure
+            unless ← isDefEq mvars[8]! s do failure
+            mvars[6]!.mvarId!.refl
+            dischargeFit mvars[2]!
+            pure (mkAppN stepConst mvars, mvars[9]!)
+          else
+            let exeLabels ← mkAppM ``Kraken.Executable.labels #[exe]
+            unless ← isDefEq labels exeLabels do failure
+            let stepConst ← mkConstWithFreshMVarLevels `step_at_sub
+            let (mvars, _, _) ← forallMetaBoundedTelescope (← inferType stepConst) 11
+            unless ← isDefEq mvars[0]! l do failure
+            unless ← isDefEq mvars[1]! p do failure
+            unless ← isDefEq mvars[2]! exe do failure
+            unless ← isDefEq mvars[5]! kNatExpr do failure
+            unless ← isDefEq mvars[6]! d do failure
+            unless ← isDefEq mvars[8]! post do failure
+            unless ← isDefEq mvars[9]! s do failure
+            mvars[7]!.mvarId!.refl
+            unless ← mvars[4]!.mvarId!.assumptionCore do failure
+            dischargeFit mvars[3]!
+            pure (mkAppN stepConst mvars, mvars[10]!)
         let hType ← instantiateMVars (← hMVar.mvarId!.getType)
         let hType' ← Grind.liftSymM <| Sym.preprocessExpr hType
         let mvarNew ← hMVar.mvarId!.replaceTargetDefEq hType'
