@@ -161,8 +161,9 @@ def fuzzConfig : FuzzConfig MachineData StatusFlags StateSummary where
   parseSteps asmCode := do
     let .ok prog ← (Kraken.X64.Parser.parse asmCode).toBaseIO | failure
     let exe := prog.fakeLayout
-    return exe.withAddresses.map fun d : Kraken.Addressable Directive =>
-      { d with directive := fun s p h => evalEffects h false (d.directive.interp s p (fun s => .done ⟨s, p.upper⟩) (fun _ _ => .unimplemented "jump")) }
+    return exe.withAddresses.map fun (c, addr) =>
+      { directive := fun s p h => evalEffects h false (Item.interp c.item s p (fun s => .done ⟨s, p.upper⟩) (fun _ _ => .unimplemented "jump")),
+        size := c.size, addr := addr }
   summarize := summarize
   genInstr := Kraken.X64.ATT.instr <$> gen
   runAssembler path := IO.Process.output { cmd := "as", args := #["-march=+noapx_f+noavx512f", "-o", "/dev/null", path.toString] }

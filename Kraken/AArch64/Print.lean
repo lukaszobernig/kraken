@@ -214,6 +214,7 @@ def directive : _root_.Directive → String
   | .label l => s!"{l}:"
   | .byteArray bs => ".byte " ++ ", ".intercalate (bs.toList.map toString)
   | .word n e => s!"{dataWordDirective n} {constRaw e}"
+  | .align k _ => s!".p2align {k}"
 
 end Kraken.AArch64.Print
 

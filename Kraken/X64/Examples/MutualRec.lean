@@ -1,7 +1,8 @@
 module
 
 /-
-Modular Concatenation, Forward Labels, Mutual Recursion, and `bedrock2`-Style `SpecOf` on X64.
+Modular Concatenation, Forward Labels, Split-Label Layout, Dynamic `.p2align`,
+Mutual Recursion, and `bedrock2`-Style `SpecOf` on X64.
 
 Demonstrates:
 1. Sequential composition (`Layout.eventually_seq`) and closed subprogram
@@ -10,12 +11,10 @@ Demonstrates:
    `SpecOf "odd"`, `SpecOf "main"`) built on `CallX64At` / `RetSlot` / `StackBelow`,
    written purely over `e : Executable` **before** any implementation snippet is defined.
 3. In-place modular verification (`Embedded`, `step_at_sub`) directly inside `Eventually (step1 e)`
-   without intermediate pre-call state predicates:
-   - `even_ok` / `odd_ok`: non-tail mutual recursion (`call` / `addq $1, %rcx` / `ret`)
-     verified independently with intra-snippet forward jumps and external `call`s.
-   - `caller_ok`: non-recursive caller (`main: call even; addq $10, %rax; ret`) verified
-     solely against `(h_even : spec_of_even e)`.
+   with label-free body indexing (`Program.splitLabels`) and positive-size `Executable.items`.
 4. Linking (`even_odd_ok`, `whole_prog_ok`, `whole_prog_correct`) with zero instruction re-stepping.
+5. Dynamic `.p2align 4` fall-through stepping with zero user-visible `0` vs `> 0` case splitting,
+   plus an unconditional 16-byte alignment guarantee for the target label even after concatenation.
 -/
 
 import Kraken.Eval
@@ -67,7 +66,7 @@ def double_rax : Program := ⸨prog|
 ⸩
 
 theorem inc_rax_spec [layout : Layout] (labels : Labels)
-    (hfit : Kraken.Directives.size (layout inc_rax).program < 2 ^ 64) (s : MachineData) :
+    (hfit : layout.totalSize inc_rax < 2 ^ 64) (s : MachineData) :
     Eventually (step1 (layout inc_rax) labels)
       (fun s' => s'.1.regs.rax = s.regs.rax + 1 ∧
         s'.pc = @Kraken.Layout.start _ _ (layout.after inc_rax))
@@ -80,7 +79,7 @@ theorem inc_rax_spec [layout : Layout] (labels : Labels)
   bv_decide
 
 theorem double_rax_spec [layout : Layout] (labels : Labels)
-    (hfit : Kraken.Directives.size (layout double_rax).program < 2 ^ 64) (s : MachineData) :
+    (hfit : layout.totalSize double_rax < 2 ^ 64) (s : MachineData) :
     Eventually (step1 (layout double_rax) labels)
       (fun s' => s'.1.regs.rax = s.regs.rax + s.regs.rax ∧
         s'.pc = @Kraken.Layout.start _ _ (layout.after double_rax))
@@ -93,7 +92,7 @@ theorem double_rax_spec [layout : Layout] (labels : Labels)
 
 /-- Composing `inc_rax` and `double_rax` via `Layout.eventually_seq` without re-stepping. -/
 theorem inc_then_double_spec [layout : Layout] (labels : Labels)
-    (hfit : Kraken.Directives.size (layout (inc_rax ++ double_rax)).program < 2 ^ 64)
+    (hfit : layout.totalSize (inc_rax ++ double_rax) < 2 ^ 64)
     (s : MachineData) :
     Eventually (step1 (layout (inc_rax ++ double_rax)) labels)
       (fun s' => s'.1.regs.rax = (s.regs.rax + 1) + (s.regs.rax + 1))
@@ -107,7 +106,7 @@ theorem inc_then_double_spec [layout : Layout] (labels : Labels)
 
 /-- Closed subprogram `Eventually.append`: suffix code does not disturb `inc_rax`. -/
 theorem inc_rax_append_any [layout : Layout] (suffix : Program)
-    (hfit : Kraken.Directives.size (layout (inc_rax ++ suffix)).program < 2 ^ 64)
+    (hfit : layout.totalSize (inc_rax ++ suffix) < 2 ^ 64)
     (s : MachineData) :
     Eventually (step1 (layout (inc_rax ++ suffix)))
       (fun s' => s'.1.regs.rax = s.regs.rax + 1 ∧
@@ -118,7 +117,7 @@ theorem inc_rax_append_any [layout : Layout] (suffix : Program)
 
 /-- Closed subprogram `Eventually.prepend`: prefix code with disjoint labels does not disturb `double_rax`. -/
 theorem any_prepend_double_rax [layout : Layout] (pref : Program)
-    (hfit : Kraken.Directives.size (layout (pref ++ double_rax)).program < 2 ^ 64)
+    (hfit : layout.totalSize (pref ++ double_rax) < 2 ^ 64)
     (s : MachineData) :
     Eventually (step1 (layout (pref ++ double_rax)))
       (fun s' => s'.1.regs.rax = s.regs.rax + s.regs.rax ∧
@@ -181,9 +180,6 @@ instance spec_of_main : SpecOf "main" where
 /-! ## 3. Independent In-Place Verification of `even_prog`, `odd_prog`, and `caller_prog` -/
 
 private theorem sub_add_8 (sp : UInt64) : (sp - 8) + 8 = sp := by bv_decide
-private theorem bv_sub_8_eq (sp : UInt64) : (sp - 8).toBitVec = sp.toBitVec - 8#64 := by bv_decide
-private theorem uint64_ofNat_succ (m : Nat) : UInt64.ofNat m + 1 = UInt64.ofNat (m + 1) := by
-  simp [UInt64.ofNat_add]
 private theorem odd_pred_eq_even_succ (m : Nat) :
     decide (m % 2 = 1) = decide ((m + 1) % 2 = 0) := by
   simp only [decide_eq_decide]; omega
@@ -201,8 +197,7 @@ private theorem uint64_sub_one_toNat {u : UInt64} {m : Nat} (h : u.toNat = m + 1
 /-- `even(n)` in X64:
 - Intra-snippet forward jump `jz even_zero`
 - Cross-snippet forward call `call odd`
-- Non-tail post-call continuation `addq $1, %rcx; ret` at `(layout even_prog).addrOf 5`,
-  accumulating recursion depth in `%rcx` while `%rax` returns `1` iff `n` is even. -/
+- Non-tail post-call continuation `addq $1, %rcx; ret` at body index `4` (`layout.addrOf even_prog 4`). -/
 def even_prog : Program := ⸨prog|
 even:
   subq $0, %rdi
@@ -251,13 +246,13 @@ theorem even_ok (e : Executable) (hemb : Embedded even_prog e)
     have h_store := Mem.storeInt_sep (rsp.toBitVec - 8#64) 8 bs
       (StackBelow rest (rsp.toBitVec - 8#64)
         (Eq ((Int.toBytes 8 retAddr.toBitVec.toInt).At rsp.toBitVec) ⋆ R))
-      mem ⟨hmem, hbs⟩ ((layout even_prog).addrOf 5).toBitVec.toInt
+      mem ⟨hmem, hbs⟩ (layout.addrOf even_prog 4).toBitVec.toInt
     sym => kstep; tactic =>
     have hrdi_ne := bv_ne_zero_of_succ hrdi
     simp (config := { zetaDelta := true }) [hrdi_ne]
     sym => kstep; tactic =>
     refine Eventually.bind
-      (h_odd_call _ ?_ rest hrest_len hrest_bytes ((layout even_prog).addrOf 5)
+      (h_odd_call _ ?_ rest hrest_len hrest_bytes (layout.addrOf even_prog 4)
         (RetSlot retAddr rsp ⋆ R) ?_) ?_
     · have hsub_rdi := uint64_sub_one_toNat hrdi
       simp (config := { zetaDelta := true }) [show (OfNat.ofNat 1 : UInt64) = 1 from rfl] at hsub_rdi ⊢
@@ -270,15 +265,15 @@ theorem even_ok (e : Executable) (hemb : Embedded even_prog e)
       have hrsp_eq : s_ret.regs.rsp = rsp := by
         have h8 : UInt64.ofBitVec (rsp.toBitVec - 8#64) = rsp - 8 := by bv_decide
         rw [hrsp_ret, h8, sub_add_8]
-      let ra5 := Int.toBytes 8 ((layout even_prog).addrOf 5).toBitVec.toInt
-      have hmem_final : s_ret.dmem =⋆ StackBelow (ra5 :: frames_out) rsp.toBitVec
+      let ra4 := Int.toBytes 8 (layout.addrOf even_prog 4).toBitVec.toInt
+      have hmem_final : s_ret.dmem =⋆ StackBelow (ra4 :: frames_out) rsp.toBitVec
           (RetSlot retAddr rsp ⋆ R) := by
         dsimp only [StackBelow, RetSlot] at hmem_ret ⊢
         rw [StackBelow_push_inner]
         exact hmem_ret
       have hmem_for_ret : s_ret.dmem =⋆
           Eq ((Int.toBytes 8 retAddr.toBitVec.toInt).At s_ret.regs.rsp.toBitVec) ⋆
-            StackBelow (ra5 :: frames_out) rsp.toBitVec R := by
+            StackBelow (ra4 :: frames_out) rsp.toBitVec R := by
         dsimp only [RetSlot] at hmem_final
         rw [hrsp_eq, StackBelow_push_inner]
         exact cast (congrFun (by ac_rfl) _) hmem_final
@@ -287,7 +282,7 @@ theorem even_ok (e : Executable) (hemb : Embedded even_prog e)
       cases ‹Reg64s›
       sym => kstep; tactic =>
       apply Eventually.done
-      refine ⟨RetSlot.addr_roundtrip retAddr, ?_, ?_, ?_, ra5 :: frames_out, by simp [hlen_out], ?_, hmem_final⟩
+      refine ⟨RetSlot.addr_roundtrip retAddr, ?_, ?_, ?_, ra4 :: frames_out, by simp [hlen_out], ?_, hmem_final⟩
       · exact congrArg (· + 8) hrsp_eq
       · simpa [odd_pred_eq_even_succ n'] using hrax_ret
       · dsimp only at hrcx_ret ⊢
@@ -347,13 +342,13 @@ theorem odd_ok (e : Executable) (hemb : Embedded odd_prog e)
     have h_store := Mem.storeInt_sep (rsp.toBitVec - 8#64) 8 bs
       (StackBelow rest (rsp.toBitVec - 8#64)
         (Eq ((Int.toBytes 8 retAddr.toBitVec.toInt).At rsp.toBitVec) ⋆ R))
-      mem ⟨hmem, hbs⟩ ((layout odd_prog).addrOf 5).toBitVec.toInt
+      mem ⟨hmem, hbs⟩ (layout.addrOf odd_prog 4).toBitVec.toInt
     sym => kstep; tactic =>
     have hrdi_ne := bv_ne_zero_of_succ hrdi
     simp (config := { zetaDelta := true }) [hrdi_ne]
     sym => kstep; tactic =>
     refine Eventually.bind
-      (h_even_call _ ?_ rest hrest_len hrest_bytes ((layout odd_prog).addrOf 5)
+      (h_even_call _ ?_ rest hrest_len hrest_bytes (layout.addrOf odd_prog 4)
         (RetSlot retAddr rsp ⋆ R) ?_) ?_
     · have hsub_rdi := uint64_sub_one_toNat hrdi
       simp (config := { zetaDelta := true }) [show (OfNat.ofNat 1 : UInt64) = 1 from rfl] at hsub_rdi ⊢
@@ -366,15 +361,15 @@ theorem odd_ok (e : Executable) (hemb : Embedded odd_prog e)
       have hrsp_eq : s_ret.regs.rsp = rsp := by
         have h8 : UInt64.ofBitVec (rsp.toBitVec - 8#64) = rsp - 8 := by bv_decide
         rw [hrsp_ret, h8, sub_add_8]
-      let ra5 := Int.toBytes 8 ((layout odd_prog).addrOf 5).toBitVec.toInt
-      have hmem_final : s_ret.dmem =⋆ StackBelow (ra5 :: frames_out) rsp.toBitVec
+      let ra4 := Int.toBytes 8 (layout.addrOf odd_prog 4).toBitVec.toInt
+      have hmem_final : s_ret.dmem =⋆ StackBelow (ra4 :: frames_out) rsp.toBitVec
           (RetSlot retAddr rsp ⋆ R) := by
         dsimp only [StackBelow, RetSlot] at hmem_ret ⊢
         rw [StackBelow_push_inner]
         exact hmem_ret
       have hmem_for_ret : s_ret.dmem =⋆
           Eq ((Int.toBytes 8 retAddr.toBitVec.toInt).At s_ret.regs.rsp.toBitVec) ⋆
-            StackBelow (ra5 :: frames_out) rsp.toBitVec R := by
+            StackBelow (ra4 :: frames_out) rsp.toBitVec R := by
         dsimp only [RetSlot] at hmem_final
         rw [hrsp_eq, StackBelow_push_inner]
         exact cast (congrFun (by ac_rfl) _) hmem_final
@@ -383,7 +378,7 @@ theorem odd_ok (e : Executable) (hemb : Embedded odd_prog e)
       cases ‹Reg64s›
       sym => kstep; tactic =>
       apply Eventually.done
-      refine ⟨RetSlot.addr_roundtrip retAddr, ?_, ?_, ?_, ra5 :: frames_out, by simp [hlen_out], ?_, hmem_final⟩
+      refine ⟨RetSlot.addr_roundtrip retAddr, ?_, ?_, ?_, ra4 :: frames_out, by simp [hlen_out], ?_, hmem_final⟩
       · exact congrArg (· + 8) hrsp_eq
       · simpa [even_pred_eq_odd_succ n'] using hrax_ret
       · dsimp only at hrcx_ret ⊢
@@ -395,7 +390,7 @@ theorem odd_ok (e : Executable) (hemb : Embedded odd_prog e)
         · exact Int.toBytes_length 8 _
         · exact hbytes_out b hb'
 
-/-- Non-recursive caller snippet: calls `even` forward, adds 10 to `%rax`, and returns. -/
+/-- Non-recursive caller snippet: calls `even` forward, resumes at body index `1`, adds 10, returns. -/
 def caller_prog : Program := ⸨prog|
 main:
   call even
@@ -421,10 +416,10 @@ theorem caller_ok (e : Executable) (hemb : Embedded caller_prog e)
   have h_store := Mem.storeInt_sep (rsp.toBitVec - 8#64) 8 bs
     (StackBelow rest (rsp.toBitVec - 8#64)
       (Eq ((Int.toBytes 8 retAddr.toBitVec.toInt).At rsp.toBitVec) ⋆ R))
-    mem ⟨hmem, hbs⟩ ((layout caller_prog).addrOf 2).toBitVec.toInt
+    mem ⟨hmem, hbs⟩ (layout.addrOf caller_prog 1).toBitVec.toInt
   sym => kstep; tactic =>
   refine Eventually.bind
-    (h_even_call rdi.toNat _ rfl rest hrest_len hrest_bytes ((layout caller_prog).addrOf 2)
+    (h_even_call rdi.toNat _ rfl rest hrest_len hrest_bytes (layout.addrOf caller_prog 1)
       (RetSlot retAddr rsp ⋆ R) ?_) ?_
   · dsimp (config := { zetaDelta := true }) only [RetSlot]
     rw [← StackBelow_push_inner]
@@ -434,15 +429,15 @@ theorem caller_ok (e : Executable) (hemb : Embedded caller_prog e)
     have hrsp_eq : s_ret.regs.rsp = rsp := by
       have h8 : UInt64.ofBitVec (rsp.toBitVec - 8#64) = rsp - 8 := by bv_decide
       rw [hrsp_ret, h8, sub_add_8]
-    let ra2 := Int.toBytes 8 ((layout caller_prog).addrOf 2).toBitVec.toInt
-    have hmem_final : s_ret.dmem =⋆ StackBelow (ra2 :: frames_out) rsp.toBitVec
+    let ra1 := Int.toBytes 8 (layout.addrOf caller_prog 1).toBitVec.toInt
+    have hmem_final : s_ret.dmem =⋆ StackBelow (ra1 :: frames_out) rsp.toBitVec
         (RetSlot retAddr rsp ⋆ R) := by
       dsimp only [StackBelow, RetSlot] at hmem_ret ⊢
       rw [StackBelow_push_inner]
       exact hmem_ret
     have hmem_for_ret : s_ret.dmem =⋆
         Eq ((Int.toBytes 8 retAddr.toBitVec.toInt).At s_ret.regs.rsp.toBitVec) ⋆
-          StackBelow (ra2 :: frames_out) rsp.toBitVec R := by
+          StackBelow (ra1 :: frames_out) rsp.toBitVec R := by
       dsimp only [RetSlot] at hmem_final
       rw [hrsp_eq, StackBelow_push_inner]
       exact cast (congrFun (by ac_rfl) _) hmem_final
@@ -451,7 +446,7 @@ theorem caller_ok (e : Executable) (hemb : Embedded caller_prog e)
     cases ‹Reg64s›
     sym => kstep; tactic =>
     apply Eventually.done
-    refine ⟨RetSlot.addr_roundtrip retAddr, ?_, ?_, hrcx_ret, ra2 :: frames_out, by simp [hlen_out], ?_, hmem_final⟩
+    refine ⟨RetSlot.addr_roundtrip retAddr, ?_, ?_, hrcx_ret, ra1 :: frames_out, by simp [hlen_out], ?_, hmem_final⟩
     · exact congrArg (· + 8) hrsp_eq
     · simp (config := { zetaDelta := true }) at hrax_ret ⊢
       rw [← hrax_ret]
@@ -479,7 +474,7 @@ def even_odd_prog : Program := even_prog ++ odd_prog
 
 /-- Closed `spec_of_even` & `spec_of_odd` on `even_odd_prog`. -/
 theorem even_odd_prog_ok [layout : Layout]
-    (hfit : Kraken.Directives.size (layout even_odd_prog).program < 2 ^ 64) :
+    (hfit : layout.totalSize even_odd_prog < 2 ^ 64) :
     spec_of_even (layout even_odd_prog) ∧ spec_of_odd (layout even_odd_prog) :=
   even_odd_ok (layout even_odd_prog)
     (Embedded.of_append_right layout even_prog odd_prog hfit)
@@ -489,7 +484,7 @@ def whole_prog : Program := caller_prog ++ even_odd_prog
 
 /-- 3-module closed `spec_of_main` on `whole_prog := caller_prog ++ (even_prog ++ odd_prog)`. -/
 theorem whole_prog_ok [layout : Layout]
-    (hfit : Kraken.Directives.size (layout whole_prog).program < 2 ^ 64) :
+    (hfit : layout.totalSize whole_prog < 2 ^ 64) :
     spec_of_main (layout whole_prog) := by
   have hfit_eo := layout.size_after_lt hfit
   have hemb_caller : Embedded caller_prog (layout whole_prog) :=
@@ -505,14 +500,57 @@ theorem whole_prog_ok [layout : Layout]
 
 /-- Execution from `layout.start` obtained immediately via `FnSpec.at_label`. -/
 theorem whole_prog_correct [layout : Layout]
-    (hfit : Kraken.Directives.size (layout whole_prog).program < 2 ^ 64)
+    (hfit : layout.totalSize whole_prog < 2 ^ 64)
     (s : MachineData) :
     StackCallContract (s.regs.rdi.toNat + 1)
       ((if decide (s.regs.rdi.toNat % 2 = 0) then 1 else 0) + 10)
       (UInt64.ofNat s.regs.rdi.toNat) (layout whole_prog) layout.start s := by
-  have h0 : (layout whole_prog).addrOf 0 = layout.start := (layout whole_prog).addrOf_zero
+  have h0 : layout.addrOf whole_prog 0 = layout.start := layout.addrOf_zero whole_prog
   rw [← h0]
   exact (whole_prog_ok hfit).at_label (k := 0) rfl s
+
+/-! ## 5. Dynamic `.p2align 4` Fall-Through & Alignment Guarantee -/
+
+def aligned_prog : Program := ⸨prog|
+aligned_entry:
+  addq $1, %rax
+  .p2align 4
+aligned_target:
+  addq %rax, %rax
+  ret
+⸩
+
+instance spec_of_aligned : SpecOf "aligned_entry" where
+  spec e := FnSpec e "aligned_entry" fun entry =>
+    ∀ s : MachineData,
+      CallX64At e entry s
+        (fun frame dmem => dmem =⋆ frame)
+        (fun s' frame =>
+          s'.regs.rax = (s.regs.rax + 1) + (s.regs.rax + 1) ∧
+          s'.dmem =⋆ frame)
+
+/-- `kstep` steps straight through dynamic `.p2align 4` with zero `0` vs `> 0` case splitting! -/
+theorem aligned_ok (e : Executable) (hemb : Embedded aligned_prog e) :
+    spec_of_aligned e := by
+  refine hemb.fnSpec_of_label (k := 0) rfl ?_
+  intro layout hfit hlocal hsub s retAddr R hmem
+  dsimp only [RetSlot] at hmem
+  have h_ret_len : (Int.toBytes 8 retAddr.toBitVec.toInt).length = 8 := RetSlot.bytes_length retAddr
+  kprologue aligned_prog with s
+  sym => kstep; tactic =>
+  apply Eventually.done
+  refine ⟨RetSlot.addr_roundtrip retAddr, rfl, ?_, hmem⟩
+  simp (config := { zetaDelta := true }) only [Nat.shiftRight_zero, BitVec.ofNat_toNat, BitVec.setWidth_eq]
+  bv_decide
+
+/-- `"aligned_target"` is unconditionally 16-byte aligned in any executable embedding `aligned_prog`
+(including after prepending an arbitrary prefix snippet with arbitrary instruction sizes). -/
+theorem aligned_target_aligned (e : Executable) (hemb : Embedded aligned_prog e) :
+    ∃ addr, e.labels.label? "aligned_target" = some addr ∧ addr.toUInt64.toNat % 16 = 0 := by
+  rcases hemb with ⟨layout, _, hlocal, _⟩
+  refine ⟨layout.addrOf aligned_prog 2,
+    hlocal "aligned_target" _ (Kraken.Layout.label?_eq_some_addrOf aligned_prog "aligned_target" rfl),
+    layout.addrOf_align aligned_prog (k := 1) (log2Align := 4) (ex := true) rfl (by omega)⟩
 
 -- Concrete `#eval` sanity check for `whole_prog` (`main(0..5)` returning `(rax = is_even + 10, rcx = depth)`).
 /-- info: [Except.ok (11, 0), Except.ok (10, 1), Except.ok (11, 2), Except.ok (10, 3), Except.ok (11, 4), Except.ok (10, 5)] -/
@@ -527,5 +565,17 @@ theorem whole_prog_correct [layout : Layout]
     let data : MachineData := { dmem := dmem0, regs := { rdi := n, rsp := 0x1000 } }
     (Executable.eval exe { data, pc := entry } (fun st => st.pc = 0x1337)).bind
       (fun st => .ok (st.1.regs.rax, st.1.regs.rcx))
+
+-- Concrete `#eval` sanity check for `inc_rax ++ aligned_prog`: returns `(5 + 1) * 2 = 12` and 16-byte aligned target.
+/-- info: (Except.ok 12, true) -/
+#guard_msgs in
+#eval
+  let exe := (inc_rax ++ aligned_prog).fakeLayout
+  let entry := exe.labels.label! "aligned_entry"
+  let target := exe.labels.label! "aligned_target"
+  let data : MachineData := { dmem := Mem.storeInt {} 0x1000 8 0x1337, regs := { rax := 5, rsp := 0x1000 } }
+  let res := (Executable.eval exe { data, pc := entry } (fun st => st.pc = 0x1337)).bind
+    (fun st => .ok st.1.regs.rax)
+  (res, target.toUInt64.toNat % 16 == 0)
 
 end MutualRecX64

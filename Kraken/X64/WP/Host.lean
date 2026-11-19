@@ -6,43 +6,35 @@ public import Kraken.Data.List.Infix
 public class Host where
   prog : Program
   layout : Layout
-  /-- Two directives at the same address have the same offset in the executable. -/
-  addr_determines_offset : ∀ j k, (layout.apply prog).addrOf j = (layout.apply prog).addrOf k →
-    (layout.apply prog).sizeBefore j = (layout.apply prog).sizeBefore k
+  /-- The laid-out host program fits in the 64-bit address space. -/
+  fits : layout.totalSize prog < 2 ^ 64
 
 public instance [Host] : Layout := Host.layout
 
+@[expose] public def Host.body [Host] : List CodeDirective := Host.prog.splitLabels.body
+
 @[expose] public def Host.exe [Host] : Executable := Host.layout.apply Host.prog
 
-@[expose] public def Host.addrOf [Host] (k : Nat) : Int64 := Host.exe.addrOf k
+@[expose] public def Host.addrOf [Host] (k : Nat) : Int64 := Host.layout.addrOf Host.prog k
 
-public theorem Host.sizeBefore_eq_of_addrOf_eq [Host] {j k : Nat} (h : Host.addrOf j = Host.addrOf k) :
-    Host.exe.sizeBefore j = Host.exe.sizeBefore k :=
-  Host.addr_determines_offset j k h
+@[expose] public def Host.startAddr [Host] {p : Program}
+    (h : p.splitLabels.body.IsInfix Host.body) : Int64 :=
+  Host.addrOf (p.splitLabels.body.infixIdx Host.body h)
 
-@[expose] public def Host.startAddr [Host] {p : Program} (h : p.IsInfix Host.prog) : Int64 :=
-  Host.addrOf (p.infixIdx Host.prog h)
-
-@[expose] public def Host.endAddr [Host] {p : Program} (h : p.IsInfix Host.prog) : Int64 :=
-  Host.addrOf (p.infixIdx Host.prog h + p.length)
+@[expose] public def Host.endAddr [Host] {p : Program}
+    (h : p.splitLabels.body.IsInfix Host.body) : Int64 :=
+  Host.addrOf (p.splitLabels.body.infixIdx Host.body h + p.splitLabels.body.length)
 
 export Host (startAddr endAddr)
 
-public theorem Layout.apply_getElem? [layout : Layout] (p : Program) (i : Nat) :
-    (layout p).program[i]? = (p[i]?).map (fun d => {directive := d, size := layout.size d i}) :=
-  Kraken.Layout.apply_getElem? layout p i
+public theorem Host.addrOf_succ [Host] {k : Nat} {cd : CodeDirective}
+    (hcd : Host.body[k]? = some cd) :
+    Host.addrOf (k + 1) = Host.addrOf k + .ofNat (Host.layout.codeDirSize (Host.addrOf k) k cd) :=
+  Host.layout.addrOf_succ Host.prog hcd
 
-public theorem Host.exe_getElem? [Host] (i : Nat) :
-    Host.exe.program[i]? = Host.prog[i]?.map (fun d => {directive := d, size := Host.layout.size d i}) :=
-  Layout.apply_getElem? _ _
-
-public theorem Host.addrOf_succ [Host] {k : Nat} {d : Directive} (hd : Host.prog[k]? = some d) :
-    Host.addrOf (k + 1) = Host.addrOf k + .ofNat (Host.layout.size d k) :=
-  Kraken.Executable.addrOf_succ _ (c := {directive := d, size := Host.layout.size d k})
-    (by rw [Host.exe_getElem?, hd]; rfl)
-
-public theorem Host.directivesAtAddress_addrOf [Host] {k : Nat} {c : Kraken.Sized Directive}
-    (hc : Host.exe.program[k]? = some c) (hz : 0 < c.size) :
-    ∃ pre : List (Kraken.Sized Directive), Host.exe.directivesAtAddress (Host.addrOf k) = pre ++ [c] ∧
-      ∀ c ∈ pre, c.size = 0 :=
-  Kraken.Executable.directivesAtAddress_addrOf Host.exe Host.addr_determines_offset hc hz
+public theorem Host.itemAt?_addrOf [Host] {k : Nat} {cd : CodeDirective}
+    (hcd : Host.body[k]? = some cd)
+    (hpos : 0 < Host.layout.codeDirSize (Host.addrOf k) k cd) :
+    Host.exe.itemAt? (Host.addrOf k) =
+      some ⟨cd.toItem, Host.layout.codeDirSize (Host.addrOf k) k cd, hpos⟩ :=
+  Host.layout.itemAt?_addrOf Host.prog Host.fits hcd hpos

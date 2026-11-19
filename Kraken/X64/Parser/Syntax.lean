@@ -477,6 +477,8 @@ syntax "❰" term "❱" ";"? : x64_directive
 syntax withPosition(".short" ppSpace lineEq x64_const) ";"? : x64_directive
 syntax withPosition(".long"  ppSpace lineEq x64_const) ";"? : x64_directive
 syntax withPosition(".quad"  ppSpace lineEq x64_const) ";"? : x64_directive
+/-- Dynamic alignment: `.p2align <k>` aligns to a `2 ^ k`-byte boundary (executable NOP padding). -/
+syntax withPosition(".p2align" ppSpace lineEq num) ";"? : x64_directive
 
 /-- Embedding of directives -/
 syntax "⸨dir| " x64_directive " ⸩" : term

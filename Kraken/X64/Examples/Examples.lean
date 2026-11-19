@@ -306,7 +306,7 @@ theorem p7_correct [layout : Layout] (s₀ : MachineData) (R : DataMem → Prop)
     rw [ofBytes_toBytes, Int.take, show 8 * 4 = 32 from rfl, Int64.toInt,
       ← BitVec.signExtend_eq_setWidth_of_le _ (by decide)]
     simp [BitVec.ofInt, BitVec.signExtend]
-  have h_size : ((layout p7).labels).label! "size" = (layout p7).addrOf 6 :=
+  have h_size : ((layout p7).labels).label! "size" = layout.addrOf p7 4 :=
     Kraken.Layout.label!_eq_addrOf p7 "size" rfl
   apply step_cps
   kprologue p7 with s₀

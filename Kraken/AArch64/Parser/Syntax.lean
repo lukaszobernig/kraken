@@ -461,6 +461,8 @@ syntax &"nop" : aarch64_instr
 declare_syntax_cat aarch64_directive (behavior := both)
 /-- Label declaration (`main:`, `❰lbl❱:`). -/
 syntax atomic(aarch64_label ":") : aarch64_directive
+/-- Dynamic alignment: `.p2align <k>` aligns to a `2 ^ k`-byte boundary (executable NOP padding). -/
+syntax withPosition(".p2align" ppSpace lineEq num) : aarch64_directive
 /-- Instruction, alone on its line. -/
 syntax withPosition(aarch64_instr notFollowedBy(lineEq (aarch64_ident <|> "," <|> aarch64_imm))) : aarch64_directive
 /-- Antiquotation of a directive (`Directive`). -/

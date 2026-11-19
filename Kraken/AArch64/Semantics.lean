@@ -948,49 +948,50 @@ set_option maxHeartbeats 1000000
   require_exec_access p (fun _unit =>
     Operation.interp (w := i.operation_size) i.operation p s next jmp)
 
-@[kstep] def Directive.interp
-  (d : Directive) (s : MachineData) (p : Std.Rco Int64)
+@[kstep] def Item.interp
+  (it : Item) (s : MachineData) (p : Std.Rco Int64)
   (next : MachineData → Effects) (jmp : Int64 → MachineData → Effects) : Effects :=
-  match d with
-  | .label _ => next s
+  match it with
+  | .instr i => i.interp s p next jmp
+  | .byteArray _ => .unimplemented s!"Unimplemented: execution reached data block at {p.1}"
+  | .word _ _ => .unimplemented s!"Unimplemented: execution reached data word at {p.1}"
+  | .alignPad true => require_exec_access p (fun _unit => next s)
+  | .alignPad false => .unimplemented s!"Unimplemented: execution reached data alignment padding at {p.1}"
+
+@[kstep] def CodeDirective.interp
+  (cd : CodeDirective) (s : MachineData) (p : Std.Rco Int64)
+  (next : MachineData → Effects) (jmp : Int64 → MachineData → Effects) : Effects :=
+  match cd with
   | .instr i => i.interp s p next jmp
   | .byteArray bs =>
     if bs.isEmpty then next s
     else .unimplemented s!"Unimplemented: execution reached data block at {p.1}"
   | .word 0 _ => next s
   | .word _ _ => .unimplemented s!"Unimplemented: execution reached data word at {p.1}"
+  | .align _ true => next s
+  | .align _ false => .unimplemented s!"Unimplemented: execution reached data alignment padding at {p.1}"
 
-def Directives.interp
-  (ds : List (Kraken.Sized Directive)) (s : MachineData) (pc : Int64)
+def Items.interp
+  (ds : List SizedItem) (s : MachineData) (pc : Int64)
   (ret : Int64 → MachineData → Effects) : Effects :=
   match ds with
   | [] => ret pc s
-  | {directive, size := sz} :: ds =>
-    directive.interp s (.mk pc (pc+.ofNat sz)) (jmp:=ret) (next := (fun s =>
-    interp ds s (pc+.ofNat sz) ret))
+  | {item, size := sz, ..} :: ds =>
+    Item.interp item s (.mk pc (pc + .ofNat sz)) (jmp := ret) (next := fun s =>
+      Items.interp ds s (pc + .ofNat sz) ret)
 
 abbrev Layout := Kraken.Layout Instr ConstExpr
 
-theorem inert_of_size_zero (layout : Layout) {i : Nat} {d : Directive}
-    (hz : @Kraken.Layout.size _ _ layout d i = 0) (s : MachineData) (p : Std.Rco Int64)
-    (next : MachineData → Effects) (jmp : Int64 → MachineData → Effects) :
-    d.interp s p next jmp = next s := by
-  cases d with
-  | instr _ => exact absurd hz (Nat.ne_of_gt (layout.instrSize_pos i))
-  | label _ => rfl
-  | byteArray bs => simp [Directive.interp, ByteArray.isEmpty, show bs.size = 0 from hz]
-  | word bytes _ => simp [Directive.interp, show bytes = 0 from hz]
-
-abbrev Executable.labels (e : Executable) : Labels := Kraken.Executable.labels e
-
-def Executable.directivesFromLabel (e : Executable) (l : Label) : List (Kraken.Sized Directive) :=
-  e.program.dropWhile (·.directive != .label l)
-
 def Executable.step (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
-  Directives.interp (e.directivesAtAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
+  match e.itemAt? s.pc with
+  | none => .unimplemented s!"No executable item at address {repr s.pc}"
+  | some c =>
+    Item.interp c.item s.data (.mk s.pc (s.pc + .ofNat c.size))
+      (next := fun s' => ret ⟨s', s.pc + .ofNat c.size⟩)
+      (jmp := fun a s' => ret ⟨s', a⟩)
 
 def Executable.straightline (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
-  Directives.interp (e.directivesFromAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
+  Items.interp (e.itemsFromAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
 
 -- -- Concrete evaluators for expedient testing
 
@@ -1016,10 +1017,11 @@ where
 def Instr.fakeSize (_ : Instr) : Nat := 4
 
 def Program.fakeLayout (prog : Program) : Executable :=
-  let h := hash prog;
+  let h := hash prog
+  let body := prog.splitLabels.body
   let layout : Layout := {
     start := h.toInt64<<<16
-    instrSize i := match prog[i]? with
+    instrSize i := match body[i]? with
       | some (.instr instr) => instr.fakeSize
       | _ => 4
     instrSize_pos i := by grind [Instr.fakeSize]
@@ -1039,7 +1041,7 @@ abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
     .instr ⟨.W64, .LDR .X2 (.addr { base := .SP, off := 0 })⟩]
   let start := exe.labels.label! "main"
   let data : MachineData := { dmem := Mem.storeInt {} 0x100 8 42, regs := {SP := 0x100} }
-  (Executable.eval exe {data, pc := start} (fun st => (exe.directivesFromAddress st.pc).isEmpty)).bind (fun s => .ok s.1.regs.X2)
+  (Executable.eval exe {data, pc := start} (fun st => (exe.itemsFromAddress st.pc).isEmpty)).bind (fun s => .ok s.1.regs.X2)
 
 /-- info: Except.ok (42, 264) -/
 #guard_msgs in
@@ -1049,7 +1051,7 @@ abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
     .instr ⟨.W64, .LDR .X1 (.addr { base := .SP, off := .imm { imm := 8, index := some .Pre } })⟩ ]
   let start := exe.labels.label! "main"
   let data : MachineData := { dmem := Mem.storeInt {} 0x108 8 42, regs := { SP := 0x100 } }
-  (Executable.eval exe {data, pc := start} (fun st => (exe.directivesFromAddress st.pc).isEmpty)).bind (fun s => .ok (s.1.regs.X1, s.1.regs.SP))
+  (Executable.eval exe {data, pc := start} (fun st => (exe.itemsFromAddress st.pc).isEmpty)).bind (fun s => .ok (s.1.regs.X1, s.1.regs.SP))
 
 /-- info: Except.ok (42, 264) -/
 #guard_msgs in
@@ -1059,7 +1061,7 @@ abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
     .instr ⟨.W64, .STR .X1 { base := .SP, off := .imm { imm := 8, index := some .Post } }⟩ ]
   let start := exe.labels.label! "main"
   let data : MachineData := { dmem := Mem.storeInt {} 0x100 8 0, regs := { SP := 0x100, X1 := 42 } }
-  (Executable.eval exe {data, pc := start} (fun st => (exe.directivesFromAddress st.pc).isEmpty)).bind (fun s =>
+  (Executable.eval exe {data, pc := start} (fun st => (exe.itemsFromAddress st.pc).isEmpty)).bind (fun s =>
     match Mem.loadInt s.1.dmem 0x100 8 with
     | some v => .ok (v, s.1.regs.SP)
     | none => .error "Memory store failed"

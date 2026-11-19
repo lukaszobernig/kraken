@@ -1,21 +1,20 @@
 module
 
 /-
-Modular Concatenation, Forward Labels, Infix Embedding, and `bedrock2`-Style `SpecOf` on AArch64.
+Modular Concatenation, Forward Labels, Split-Label Layout, Dynamic `.p2align`,
+and `bedrock2`-Style `SpecOf` on AArch64.
 
 Demonstrates:
-1. Sequential composition (`Layout.eventually_seq`) and closed subprogram
-   embedding (`Eventually.append`, `Eventually.prepend`) on AArch64 `step1`.
+1. Sequential composition (`Layout.eventually_seq`) on AArch64 `step1`.
 2. `bedrock2`-style function specifications as standalone definitions (`SpecOf "even"`,
    `SpecOf "odd"`, `SpecOf "main"`), written over `e : Executable` **before** any
-   function implementation (`even_prog`, `odd_prog`, `caller_prog`) is defined.
+   implementation snippet is defined.
 3. In-place modular verification (`Embedded`, `step_at_sub`) directly in `Eventually (step1 e)`
-   without intermediate pre-call state predicates:
-   - `even_ok` (intra-snippet forward `cbz x0, even_zero` + cross-snippet forward `b odd`)
-   - `odd_ok` (intra-snippet forward `cbz x0, odd_zero` + cross-snippet backward `b even`)
-   - `caller_ok` (non-tail forward `bl even`, resuming at return address for `add x0, x0, #10; ret x29`)
+   with label-free body indexing (`Program.splitLabels`) and positive-size `Executable.items`.
 4. 3-way linking (`whole_prog := caller_prog ++ even_prog ++ odd_prog`) via `Embedded.of_infix`
    and `FnSpec.forall_nat` with zero instruction re-stepping.
+5. Dynamic `.p2align 4` fall-through stepping with zero user-visible `0` vs `> 0` case splitting,
+   plus a proof that the aligned label is unconditionally 16-byte aligned even after prefix concatenation.
 -/
 
 import Kraken.AArch64.OmniSemantics
@@ -67,7 +66,7 @@ def double_x0 : Program := ⸨prog|
 ⸩
 
 theorem inc_x0_spec [layout : Layout] (labels : Labels)
-    (hfit : Kraken.Directives.size (layout inc_x0).program < 2 ^ 64) (s : MachineData) :
+    (hfit : layout.totalSize inc_x0 < 2 ^ 64) (s : MachineData) :
     Eventually (step1 (layout inc_x0) labels)
       (fun s' => s'.1.regs.X0 = s.regs.X0 + 1 ∧
         s'.pc = @Kraken.Layout.start _ _ (layout.after inc_x0))
@@ -81,7 +80,7 @@ theorem inc_x0_spec [layout : Layout] (labels : Labels)
   bv_decide
 
 theorem double_x0_spec [layout : Layout] (labels : Labels)
-    (hfit : Kraken.Directives.size (layout double_x0).program < 2 ^ 64) (s : MachineData) :
+    (hfit : layout.totalSize double_x0 < 2 ^ 64) (s : MachineData) :
     Eventually (step1 (layout double_x0) labels)
       (fun s' => s'.1.regs.X0 = s.regs.X0 + s.regs.X0 ∧
         s'.pc = @Kraken.Layout.start _ _ (layout.after double_x0))
@@ -95,7 +94,7 @@ theorem double_x0_spec [layout : Layout] (labels : Labels)
   bv_decide
 
 theorem inc_then_double_x0_spec [layout : Layout] (labels : Labels)
-    (hfit : Kraken.Directives.size (layout (inc_x0 ++ double_x0)).program < 2 ^ 64)
+    (hfit : layout.totalSize (inc_x0 ++ double_x0) < 2 ^ 64)
     (s : MachineData) :
     Eventually (step1 (layout (inc_x0 ++ double_x0)) labels)
       (fun s' => s'.1.regs.X0 = (s.regs.X0 + 1) + (s.regs.X0 + 1))
@@ -242,7 +241,7 @@ theorem odd_ok (e : Executable) (hemb : Embedded odd_prog e)
       simp (config := { zetaDelta := true }) at hsub_x0 ⊢
       exact hsub_x0
 
-/-- Non-tail caller snippet: calls `bl even` forward, resumes at `addrOf 2`, adds 10, returns via `x29`. -/
+/-- Non-tail caller snippet: calls `bl even` forward, resumes at body index `1`, adds 10, returns via `x29`. -/
 def caller_prog : Program := ⸨prog|
 main:
   bl even
@@ -293,7 +292,7 @@ def whole_prog : Program := caller_prog ++ even_prog ++ odd_prog
 
 /-- Closed specification of `whole_prog` expressed directly as `spec_of_main (layout whole_prog)`. -/
 theorem whole_prog_ok [layout : Layout]
-    (hfit : Kraken.Directives.size (layout whole_prog).program < 2 ^ 64) :
+    (hfit : layout.totalSize whole_prog < 2 ^ 64) :
     spec_of_main (layout whole_prog) := by
   have hemb_caller : Embedded caller_prog (layout whole_prog) :=
     Embedded.append_right layout (caller_prog ++ even_prog) odd_prog hfit
@@ -307,15 +306,54 @@ theorem whole_prog_ok [layout : Layout]
 
 /-- Execution from `layout.start` obtained immediately via `FnSpec.at_label`. -/
 theorem whole_prog_correct [layout : Layout]
-    (hfit : Kraken.Directives.size (layout whole_prog).program < 2 ^ 64)
+    (hfit : layout.totalSize whole_prog < 2 ^ 64)
     (s : MachineData) :
     Eventually (step1 (layout whole_prog))
       (fun st => st.pc = Int64.ofBitVec s.regs.X29.toBitVec ∧
         st.1.regs.X0 = (if decide (s.regs.X0.toNat % 2 = 0) then 1 else 0) + 10)
       ⟨s, layout.start⟩ := by
-  have h0 : (layout whole_prog).addrOf 0 = layout.start := (layout whole_prog).addrOf_zero
+  have h0 : layout.addrOf whole_prog 0 = layout.start := layout.addrOf_zero whole_prog
   rw [← h0]
   exact (whole_prog_ok hfit).at_label (k := 0) rfl s
+
+/-! ## 5. Dynamic `.p2align 4` Fall-Through & Alignment Guarantee -/
+
+def aligned_prog : Program := ⸨prog|
+aligned_entry:
+  add x0, x0, #1
+  .p2align 4
+aligned_target:
+  add x0, x0, x0
+  ret
+⸩
+
+instance spec_of_aligned : SpecOf "aligned_entry" where
+  spec e := FnSpec e "aligned_entry" fun entry =>
+    ∀ s : MachineData,
+      CallBLAt e entry s fun s' =>
+        s'.regs.X0 = (s.regs.X0 + 1) + (s.regs.X0 + 1)
+
+/-- `kstep` steps straight through dynamic `.p2align 4` with zero `0` vs `> 0` case splitting! -/
+theorem aligned_ok (e : Executable) (hemb : Embedded aligned_prog e) :
+    spec_of_aligned e := by
+  refine hemb.fnSpec_of_label (k := 0) rfl fun hfit hlocal hsub => fun s => ?_
+  kprologue aligned_prog with s
+  sym => kstep; tactic =>
+  apply Eventually.done
+  refine ⟨by simp (config := { zetaDelta := true }), ?_⟩
+  simp (config := { zetaDelta := true }) only [
+    show BitVec.ofInt 64 (Int64.toInt 1) = 1#64 from rfl,
+    show (Int64.toInt 0).toNat = 0 from rfl]
+  bv_decide
+
+/-- `"aligned_target"` is unconditionally 16-byte aligned in any executable embedding `aligned_prog`
+(including after prepending an arbitrary prefix snippet with disjoint labels). -/
+theorem aligned_target_aligned (e : Executable) (hemb : Embedded aligned_prog e) :
+    ∃ addr, e.labels.label? "aligned_target" = some addr ∧ addr.toUInt64.toNat % 16 = 0 := by
+  rcases hemb with ⟨layout, _, hlocal, _⟩
+  refine ⟨layout.addrOf aligned_prog 2,
+    hlocal "aligned_target" _ (Kraken.Layout.label?_eq_some_addrOf aligned_prog "aligned_target" rfl),
+    layout.addrOf_align aligned_prog (k := 1) (log2Align := 4) (ex := true) rfl (by omega)⟩
 
 -- Concrete `#eval` sanity check for `whole_prog` (`11` for even, `10` for odd).
 /-- info: [Except.ok 11, Except.ok 10, Except.ok 11, Except.ok 10, Except.ok 11, Except.ok 10] -/
@@ -327,5 +365,17 @@ theorem whole_prog_correct [layout : Layout]
     let data : MachineData := { regs := { X0 := n, X29 := 0x1337 } }
     (Executable.eval exe { data, pc := entry } (fun st => st.pc = 0x1337)).bind
       (fun st => .ok st.1.regs.X0)
+
+-- Concrete `#eval` sanity check for `inc_x0 ++ aligned_prog`: returns `(5 + 1) * 2 = 12` and 16-byte aligned target.
+/-- info: (Except.ok 12, true) -/
+#guard_msgs in
+#eval
+  let exe := (inc_x0 ++ aligned_prog).fakeLayout
+  let entry := exe.labels.label! "aligned_entry"
+  let target := exe.labels.label! "aligned_target"
+  let data : MachineData := { regs := { X0 := 5, X30 := 0x1337 } }
+  let res := (Executable.eval exe { data, pc := entry } (fun st => st.pc = 0x1337)).bind
+    (fun st => .ok st.1.regs.X0)
+  (res, target.toUInt64.toNat % 16 == 0)
 
 end MutualRecAArch64

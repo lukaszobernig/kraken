@@ -1671,6 +1671,9 @@ def elabDirective (stx : TSyntax `aarch64_directive) : TermElabM Expr := withRef
   match stx with
   | `(aarch64_directive| $lbl:aarch64_label :) =>
     return mkApp3 (mkConst ``Kraken.Directive.label) (mkConst ``Instr) (mkConst ``ConstExpr) (← elabLabel lbl)
+  | `(aarch64_directive| .p2align $k:num) =>
+    return mkApp4 (mkConst ``Kraken.Directive.align) (mkConst ``Instr) (mkConst ``ConstExpr)
+      (toExpr k.getNat) (toExpr true)
   | `(aarch64_directive| $ins:aarch64_instr) =>
     let ins ← ins.raw.replaceM resolveRegOrConstChoice
     return mkApp3 (mkConst ``Kraken.Directive.instr) (mkConst ``Instr) (mkConst ``ConstExpr) (← (elabInstr ⟨ins⟩).run')

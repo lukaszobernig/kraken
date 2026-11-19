@@ -900,6 +900,11 @@ private def delabDirectiveCore : DelabM (TSyntax `aarch64_directive) := do
   | Kraken.Directive.instr _ _ _ =>
     let ins ← withAppArg delabInstr
     annotateStx (← `(aarch64_directive| $ins:aarch64_instr))
+  | Kraken.Directive.align _ _ kExpr exExpr =>
+    let some k := evalNat? kExpr | failure
+    unless exExpr.isConstOf ``Bool.true do failure
+    let kStx := Syntax.mkNumLit (toString k)
+    annotateStx (← `(aarch64_directive| .p2align $kStx:num))
   | _ => failure
 
 /-- Delaborate a `Directive` into an `aarch64_directive`, falling back to `❰t❱` for open or non-canonical terms. -/
@@ -923,7 +928,7 @@ private partial def delabDirectiveListSpine :
   | _ =>
     return (#[], some (← delab))
 
-@[app_delab Kraken.Directive.instr, app_delab Kraken.Directive.label, app_delab Kraken.Directive.byteArray, app_delab Kraken.Directive.word]
+@[app_delab Kraken.Directive.instr, app_delab Kraken.Directive.label, app_delab Kraken.Directive.byteArray, app_delab Kraken.Directive.word, app_delab Kraken.Directive.align]
 def delabDirective' : Delab := do
   if ← getPPOption getPPExplicit then failure
   let stx ← delabDirectiveCore

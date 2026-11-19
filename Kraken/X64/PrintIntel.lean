@@ -235,3 +235,4 @@ instance : ToString Directive where
   | .label l => s!"{l}:"
   | .byteArray bs => ".byte "++", ".intercalate (bs.toList.map (fun b => s!"{b}"))
   | .word n e => s!"{dataWordDirective n} {e}"
+  | .align k _ => s!".p2align {k}"

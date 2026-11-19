@@ -46,26 +46,23 @@ theorem Eventually.bind {State : Type} {trans : State → Post → Prop} {p q : 
     Eventually trans q s :=
   eventually_trans trans p q s h₁ h₂
 
-/-- Step simulation allowing stutter (`post s`) or a matching step in `R₂`. -/
+/-- Step simulation between transition relations (`R₁` implies `R₂`). -/
 def SubStep {State : Type} (R₁ R₂ : State → @Post State → Prop) : Prop :=
-  ∀ s post, R₁ s post → post s ∨ R₂ s post
+  ∀ s post, R₁ s post → R₂ s post
 
 theorem SubStep.refl {State : Type} (R : State → @Post State → Prop) : SubStep R R :=
-  fun _ _ h => .inr h
+  fun _ _ h => h
 
 theorem SubStep.trans {State : Type} {R₁ R₂ R₃ : State → @Post State → Prop}
     (h₁ : SubStep R₁ R₂) (h₂ : SubStep R₂ R₃) : SubStep R₁ R₃ :=
-  fun s post h => (h₁ s post h).elim .inl (h₂ s post)
+  fun s post h => h₂ s post (h₁ s post h)
 
 theorem SubStep.eventually {State : Type} {R₁ R₂ : State → @Post State → Prop}
     (h : SubStep R₁ R₂) {post : @Post State} {s : State}
     (he : Eventually R₁ post s) : Eventually R₂ post s := by
   induction he with
   | done s hp => exact .done s hp
-  | step s mid hstep _ ih =>
-    rcases h s mid hstep with hs | hstep'
-    · exact ih s hs
-    · exact .step s mid hstep' ih
+  | step s mid hstep _ ih => exact .step s mid (h s mid hstep) ih
 
 -- A loop down to 0
 theorem reg_dec_loop {State : Type} (trans : State → Post → Prop) (post : Post) (initial : State) (invariant : Nat → Post) (n : Nat) :

@@ -877,6 +877,9 @@ def elabDirective (stx : TSyntax `x64_directive) : TermElabM Expr := withRef stx
   | `(x64_directive| .short $c:x64_const $[;]?) => word 2 c
   | `(x64_directive| .long $c:x64_const $[;]?) => word 4 c
   | `(x64_directive| .quad $c:x64_const $[;]?) => word 8 c
+  | `(x64_directive| .p2align $k:num $[;]?) =>
+    return mkApp4 (mkConst ``Kraken.Directive.align) (mkConst ``Instr) (mkConst ``ConstExpr)
+      (toExpr k.getNat) (toExpr true)
   | `(x64_directive| ❰ $t ❱ $[;]?) =>
     elabAntiquot t (mkConst ``_root_.Directive)
   | _ => throwError "invalid assembly directive"

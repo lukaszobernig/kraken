@@ -88,8 +88,7 @@ elab_rules : tactic
       let target ← withReducible <| whnf <| peelTargetLets (← instantiateMVars (← getMainTarget))
       if target.getAppFn.isConstOf `Eventually then
         evalTactic (← `(tactic|
-          (obtain $statePat:rcasesPat := $s
-           try rw [← Kraken.Executable.addrOf_zero])))
+          obtain $statePat:rcasesPat := $s))
       else
         let straightlineStepId := mkIdent `straightlineStep
         let execStraightlineId := mkIdent `Executable.straightline
@@ -100,8 +99,9 @@ elab_rules : tactic
            obtain $statePat:rcasesPat := $s
            delta $p
            dsimp only [$straightlineStepId:ident, $execStraightlineId:ident]
-           rw [Executable.directivesFromStart]
-           simp [List.mapIdx, List.mapIdx.go])))
+           rw [Kraken.Layout.itemsFromStart]
+           dsimp only [Kraken.Program.splitLabels, Kraken.Layout.layoutBody,
+             Kraken.Layout.layoutBodyGo])))
 
 --------------------------------------------------------------------------------
 
@@ -159,18 +159,18 @@ def kdeltaBetaOnly (targets: List Name) (maxInstrCount : Option (IO.Ref Nat)) : 
   -- semantics. Concretely: `f (let x = ... in arg)` => `let x = ... in f arg`.
   peelArgsLets args 0 #[] #[] fun (args : Array Expr) (fvars : Array Expr) => do
 
-    if f.isConstOf `Effects.All && args.size == 3 && args[2]!.isApp && args[2]!.getAppFn'.isConstOf `Directives.interp then
-      -- We optionally track how many times we've hit Directives.interp -- this tracks how
+    if f.isConstOf `Effects.All && args.size == 3 && args[2]!.isApp && args[2]!.getAppFn'.isConstOf `Items.interp then
+      -- We optionally track how many times we've hit Items.interp -- this tracks how
       -- many instructions we've stepped through.
       if (← maxInstrCount.mapM (·.get)) = .some 0 then
         return .rfl
       maxInstrCount.forM (fun r => r.modify (· - 1))
 
-      -- Finding a node of the form `Effects.All ... (Directives.interp ...)`
+      -- Finding a node of the form `Effects.All ... (Items.interp ...)`
       -- means that we are ready to step through. We manually force reduction of
-      -- Directives.interp (since it is *not* is our list of targets), then let
+      -- Items.interp (since it is *not* in our list of targets), then let
       -- everything simplify until we're called again.
-      let some arg2 ← Meta.unfoldDefinition? args[2]! true | throwError "can't unfold Directives.interp"
+      let some arg2 ← Meta.unfoldDefinition? args[2]! true | throwError "can't unfold Items.interp"
       let e := mkAppN f (args.set! 2 arg2)
       let e' ← shareCommon e
       let e'' ← mkLetFVars fvars e'
@@ -383,15 +383,34 @@ partial def evalSymKStep : Grind.GrindTactic :=
       let hd ← whnfD hd
       match_expr hd with
       | Kraken.Directive.label _ _ l' =>
-        if ← isDefEq l' lblExpr then return some i else findLabelIdx? tl lblExpr (i + 1)
+        if ← isDefEq l' lblExpr then return some i else findLabelIdx? tl lblExpr i
       | _ => findLabelIdx? tl lblExpr (i + 1)
     | _ => return none
 
-  let rec getProgElem? (p : Expr) (i : Nat) : MetaM (Option Expr) := do
+  let rec getBodyElem? (p : Expr) (i : Nat) : MetaM (Option Expr) := do
     let p ← whnfD p
     match_expr p with
     | List.cons _ hd tl =>
-      if i == 0 then return some hd else getProgElem? tl (i - 1)
+      let hd ← whnfD hd
+      match_expr hd with
+      | Kraken.Directive.label _ _ _ => getBodyElem? tl i
+      | Kraken.Directive.instr instrTy constTy ins =>
+        if i == 0 then
+          return some (mkApp3 (mkConst ``Kraken.CodeDirective.instr) instrTy constTy ins)
+        else getBodyElem? tl (i - 1)
+      | Kraken.Directive.byteArray instrTy constTy bs =>
+        if i == 0 then
+          return some (mkApp3 (mkConst ``Kraken.CodeDirective.byteArray) instrTy constTy bs)
+        else getBodyElem? tl (i - 1)
+      | Kraken.Directive.word instrTy constTy n c =>
+        if i == 0 then
+          return some (mkApp4 (mkConst ``Kraken.CodeDirective.word) instrTy constTy n c)
+        else getBodyElem? tl (i - 1)
+      | Kraken.Directive.align instrTy constTy k ex =>
+        if i == 0 then
+          return some (mkApp4 (mkConst ``Kraken.CodeDirective.align) instrTy constTy k ex)
+        else getBodyElem? tl (i - 1)
+      | _ => return none
     | _ => return none
 
   let matchLayoutApply? (exe : Expr) : MetaM (Option (Expr × Expr × Expr × Expr)) := do
@@ -400,25 +419,32 @@ partial def evalSymKStep : Grind.GrindTactic :=
     | Kraken.Layout.apply instrTy constTy l prog => return some (instrTy, constTy, l, prog)
     | _ => return none
 
-  let proveExeLabel? (L lblExpr : Expr) : MetaM (Option (Expr × Expr)) := do
+  let matchExeLabels? (L : Expr) : MetaM (Option Expr) := do
     let L' ← withTransparency .instances (whnfCore L)
-    let exe? : Option Expr :=
-      if L'.getAppFn.isConstOf ``Kraken.Executable.labels && L'.getAppNumArgs > 0 then some L'.appArg!
-      else none
-    let some exe := exe? | return none
+    if L'.getAppFn.isConstOf ``Kraken.Executable.labels && L'.getAppNumArgs > 0 then
+      return some L'.appArg!
+    else if let .proj ``Kraken.Executable 2 exe := L' then
+      return some exe
+    else
+      return none
+
+  let proveExeLabel? (L lblExpr : Expr) : MetaM (Option (Expr × Expr)) := do
+    let some exe ← matchExeLabels? L | return none
     let some (instrTy, constTy, l, prog) ← matchLayoutApply? exe | return none
     let some k ← findLabelIdx? prog lblExpr 0 | return none
     let s ← saveState
     try
       let kExpr := ToExpr.toExpr k
-      let hkType ← mkEq
-        (← mkAppM ``List.findIdx? #[← mkAppOptM ``Kraken.Directive.isLabel #[some instrTy, some constTy, some lblExpr], prog])
-        (← mkAppM ``Option.some #[kExpr])
-      let hkProof ← mkEqRefl (← mkAppM ``Option.some #[kExpr])
+      let sp ← mkAppOptM ``Kraken.Program.splitLabels #[some instrTy, some constTy, some prog]
+      let spLabels ← mkAppM ``Kraken.SplitProgram.labels #[sp]
+      let hkLhs ← mkAppM ``List.lookup #[lblExpr, spLabels]
+      let hkRhs ← mkAppM ``Option.some #[kExpr]
+      let hkType ← mkEq hkLhs hkRhs
+      let hkProof ← mkEqRefl hkRhs
       let hkTyped ← mkExpectedTypeHint hkProof hkType
       let heq ← mkAppOptM ``Kraken.Layout.label?_eq_some_addrOf
         #[some instrTy, some constTy, some l, some prog, some lblExpr, some kExpr, some hkTyped]
-      let addrExpr ← mkAppM ``Kraken.Executable.addrOf #[exe, kExpr]
+      let addrExpr ← mkAppOptM ``Kraken.Layout.addrOf #[some instrTy, some constTy, some l, some prog, some kExpr]
       return some (addrExpr, heq)
     catch _ =>
       s.restore
@@ -494,32 +520,35 @@ partial def evalSymKStep : Grind.GrindTactic :=
       return none
     let s := state.getArg! 0
     let pc := state.getArg! 1
-    -- Normalize `layout.start` to `exe.addrOf 0` if `exe = layout p`.
+    -- Normalize `layout.start` to `layout.addrOf p 0` if `exe = layout p`.
     if pc.isAppOfArity ``Kraken.Layout.start 3 then
-      if let some (_, _, lExe, _) ← goal.withContext (matchLayoutApply? exe) then
+      if let some (instrTy, constTy, lExe, pExe) ← goal.withContext (matchLayoutApply? exe) then
         if ← goal.withContext (isDefEq (pc.getArg! 2) lExe) then
           let saved0 ← saveState
           try
             let goalNoGim ← removeGimmick goal
             let hZeroTyped ← goalNoGim.withContext do
-              let hZero ← mkAppM ``Kraken.Executable.addrOf_zero #[exe]
-              let addr0 ← mkAppM ``Kraken.Executable.addrOf #[exe, ToExpr.toExpr (0 : Nat)]
+              let hZero ← mkAppOptM ``Kraken.Layout.addrOf_zero #[some instrTy, some constTy, some lExe, some pExe]
+              let addr0 ← mkAppOptM ``Kraken.Layout.addrOf
+                #[some instrTy, some constTy, some lExe, some pExe, some (ToExpr.toExpr (0 : Nat))]
               mkExpectedTypeHint hZero (← mkEq addr0 pc)
             let (goalNew, sideGoals) ← rwTarget goalNoGim true hZeroTyped
             unless sideGoals.isEmpty do failure
             return some (← insertGimmick goalNew)
           catch _ =>
             saved0.restore
-    unless pc.getAppFn.isConstOf ``Kraken.Executable.addrOf && pc.getAppNumArgs >= 2 do
+    unless pc.isAppOfArity ``Kraken.Layout.addrOf 5 do
       return none
-    let pcExe := pc.getArg! (pc.getAppNumArgs - 2)
-    let kExpr := pc.getArg! (pc.getAppNumArgs - 1)
-    let some (_, _, l, p) ← goal.withContext (matchLayoutApply? pcExe) | return none
+    let instrTy := pc.getArg! 0
+    let constTy := pc.getArg! 1
+    let l := pc.getArg! 2
+    let p := pc.getArg! 3
+    let kExpr := pc.getArg! 4
     let some k := kExpr.nat? <|> kExpr.rawNatLit? | return none
-    let some d ← goal.withContext (getProgElem? p k) | return none
+    let some cd ← goal.withContext (getBodyElem? p k) | return none
     let isInstr ← goal.withContext do
-      let d' ← whnfD d
-      return d'.getAppFn.isConstOf ``Kraken.Directive.instr
+      let cd' ← whnfD cd
+      return cd'.getAppFn.isConstOf ``Kraken.CodeDirective.instr
     if isInstr then
       if (← maxInstrCount.mapM (·.get)) == some 0 then
         return none
@@ -538,6 +567,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             | .closed => pure ()
             | .failed _ => failure
         let kNatExpr := ToExpr.toExpr k
+        let pcExe := mkApp4 (mkConst ``Kraken.Layout.apply) instrTy constTy l p
         let (stepProof, hMVar) ←
           if ← isDefEq pcExe exe then
             let stepConst ← mkConstWithFreshMVarLevels `step_at
@@ -546,7 +576,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             unless ← isDefEq mvars[1]! p do failure
             unless ← isDefEq mvars[3]! labels do failure
             unless ← isDefEq mvars[4]! kNatExpr do failure
-            unless ← isDefEq mvars[5]! d do failure
+            unless ← isDefEq mvars[5]! cd do failure
             unless ← isDefEq mvars[7]! post do failure
             unless ← isDefEq mvars[8]! s do failure
             mvars[6]!.mvarId!.refl
@@ -561,7 +591,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             unless ← isDefEq mvars[1]! p do failure
             unless ← isDefEq mvars[2]! exe do failure
             unless ← isDefEq mvars[5]! kNatExpr do failure
-            unless ← isDefEq mvars[6]! d do failure
+            unless ← isDefEq mvars[6]! cd do failure
             unless ← isDefEq mvars[8]! post do failure
             unless ← isDefEq mvars[9]! s do failure
             mvars[7]!.mvarId!.refl
