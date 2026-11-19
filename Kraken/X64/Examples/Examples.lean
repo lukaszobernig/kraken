@@ -297,7 +297,7 @@ theorem p7_correct [layout : Layout] (s₀ : MachineData) (R : DataMem → Prop)
         s'.1.regs.rax = UInt64.ofBitVec (((L.label! "end" - L.label! "start").toBitVec.setWidth 32).setWidth 64))
       ⟨s₀, layout.start⟩ := by
   have h_addr (X Y : Int64) :
-      (BitVec.ofInt 64 X.toInt + BitVec.ofInt 64 (Y - X).toInt).setWidth 64
+      (BitVec.ofInt 64 X.toInt + BitVec.ofInt 64 0 + BitVec.ofInt 64 (Y - X).toInt).setWidth 64
         = Y.toBitVec := by
     simp only [BitVec.setWidth_eq, Int64.toInt, BitVec.ofInt_toInt, Int64.toBitVec_sub]
     grind

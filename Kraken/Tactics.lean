@@ -158,7 +158,7 @@ def kdeltaBetaOnly (targets: List Name) (maxInstrCount : Option (IO.Ref Nat)) : 
   -- semantics. Concretely: `f (let x = ... in arg)` => `let x = ... in f arg`.
   peelArgsLets args 0 #[] #[] fun (args : Array Expr) (fvars : Array Expr) => do
 
-    if f.isConstOf `Effects.All && args.size == 3 && args[2]!.isApp && args[2]!.getAppFn'.isConstOf `Directives.interp then
+    if f.isConstOf `Effects.All && args.size == 2 && args[1]!.isApp && args[1]!.getAppFn'.isConstOf `Directives.interp then
       -- We optionally track how many times we've hit Directives.interp -- this tracks how
       -- many instructions we've stepped through.
       if (← maxInstrCount.mapM (·.get)) = .some 0 then
@@ -169,8 +169,8 @@ def kdeltaBetaOnly (targets: List Name) (maxInstrCount : Option (IO.Ref Nat)) : 
       -- means that we are ready to step through. We manually force reduction of
       -- Directives.interp (since it is *not* in our list of targets), then let
       -- everything simplify until we're called again.
-      let some arg2 ← Meta.unfoldDefinition? args[2]! true | throwError "can't unfold Directives.interp"
-      let e := mkAppN f (args.set! 2 arg2)
+      let some arg1 ← Meta.unfoldDefinition? args[1]! true | throwError "can't unfold Directives.interp"
+      let e := mkAppN f (args.set! 1 arg1)
       let e' ← shareCommon e
       let e'' ← mkLetFVars fvars e'
       return .step e''
@@ -263,7 +263,7 @@ def kbeta: DSimproc := fun e => do
 def kdsimpProj : DSimproc := fun e => do
   let f := e.getAppFn
   let .const declName _ := f | return .rfl
-  if declName == ``Kraken.Labels.label? then return .rfl
+  if declName == ``Kraken.Labels.label? || declName == ``Kraken.LabelEnv.label then return .rfl
   let some _projInfo ← getProjectionFnInfo? declName | return .rfl
   let reduceProjCont? (e? : Option Expr) : DSimpM Result := do
     match e? with
@@ -452,35 +452,70 @@ partial def evalSymKStep : Grind.GrindTactic :=
       | _ => pure ()
     return none
 
-  let matchEffectsLookupLabel? (e : Expr) : Option (Expr × Expr) :=
-    if e.isApp && e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 3 then
-      let L := e.getArg! 0
-      let eff := e.getArg! 2
-      if eff.isAppOfArity `Effects.lookup_label 2 then
-        some (L, eff.getArg! 0)
+  let proveLabelEnv? (env lblExpr : Expr) : MetaM (Option Expr) := do
+    if env.isAppOfArity ``Kraken.Labels.toEnv 1 then
+      let L := env.getArg! 0
+      if let some (addrExpr, heq) ← proveLabelLookup? L lblExpr then
+        let lhs := mkApp2 (mkConst ``Kraken.Labels.label?) L lblExpr
+        let rhs ← mkAppM ``Option.some #[addrExpr]
+        let heqTyped ← mkExpectedTypeHint heq (← mkEq lhs rhs)
+        return some (← mkAppOptM ``Kraken.Labels.toEnv_label_of_eq
+          #[some L, some lblExpr, some addrExpr, some heqTyped])
+    let lctx ← getLCtx
+    for ldecl in lctx do
+      if ldecl.isImplementationDetail then continue
+      let ty ← instantiateMVars ldecl.type
+      match_expr ty with
+      | Kraken.Labels.Consistent L env' =>
+        if ← isDefEq env' env then
+          if let some (addrExpr, heq) ← proveLabelLookup? L lblExpr then
+            let lhs := mkApp2 (mkConst ``Kraken.Labels.label?) L lblExpr
+            let rhs ← mkAppM ``Option.some #[addrExpr]
+            let heqTyped ← mkExpectedTypeHint heq (← mkEq lhs rhs)
+            return some (mkAppN ldecl.toExpr #[lblExpr, addrExpr, heqTyped])
+      | _ => pure ()
+    return none
+
+  let matchLabelEnvApp? (e : Expr) : Option (Expr × Expr) :=
+    if e.isAppOfArity ``Kraken.LabelEnv.label 2 then
+      some (e.getArg! 0, e.getArg! 1)
+    else if e.isApp then
+      if let .proj ``Kraken.LabelEnv 0 env := e.appFn! then
+        some (env, e.appArg!)
       else
         none
     else
       none
 
+  let rec findResolvableLabel? (e : Expr) : MetaM (Option Expr) := do
+    if let some (env, lbl) := matchLabelEnvApp? e then
+      if !env.hasLooseBVars && !lbl.hasLooseBVars then
+        if let some rule ← proveLabelEnv? env lbl then
+          return some rule
+    match e with
+    | .app f a =>
+      if let some r ← findResolvableLabel? f then return some r
+      findResolvableLabel? a
+    | .lam _ t b _ =>
+      if let some r ← findResolvableLabel? t then return some r
+      findResolvableLabel? b
+    | .forallE _ t b _ =>
+      if let some r ← findResolvableLabel? t then return some r
+      findResolvableLabel? b
+    | .letE _ t v b _ =>
+      if let some r ← findResolvableLabel? t then return some r
+      if let some r ← findResolvableLabel? v then return some r
+      findResolvableLabel? b
+    | .mdata _ b | .proj _ _ b => findResolvableLabel? b
+    | _ => return none
+
   let resolveLabel? (goal : Grind.Goal) : Grind.GrindTacticM (Option Grind.Goal) := do
     let goalT ← goal.withContext do instantiateMVars (← goal.mvarId.getType)
     let_expr gimmickId goalT' := goalT | return none
-    let some allApp := goalT'.find? fun e =>
-      match matchEffectsLookupLabel? e with
-      | some (L, lbl) => !L.hasLooseBVars && !lbl.hasLooseBVars
-      | none => false
-    | return none
-    let some (L, lblExpr) := matchEffectsLookupLabel? allApp | return none
-    let some (addrExpr, heq) ← goal.withContext (proveLabelLookup? L lblExpr) | return none
+    let some heqRule ← goal.withContext (findResolvableLabel? goalT') | return none
     let saved ← saveState
     try
       let goalNoGim ← removeGimmick goal
-      let heqRule ← goalNoGim.withContext do
-        let lhs := mkApp2 (mkConst ``Kraken.Labels.label?) L lblExpr
-        let rhs ← mkAppM ``Option.some #[addrExpr]
-        let heqTyped ← mkExpectedTypeHint heq (← mkEq lhs rhs)
-        mkAppOptM `Effects.All_lookup_label_of_eq #[some L, some lblExpr, some addrExpr, some heqTyped]
       let (goalNew, sideGoals) ← rwTarget goalNoGim false heqRule
       unless sideGoals.isEmpty do failure
       return some (← insertGimmick goalNew)
@@ -584,7 +619,10 @@ partial def evalSymKStep : Grind.GrindTactic :=
         let hType' ← Grind.liftSymM <| Sym.preprocessExpr hType
         let mvarNew ← hMVar.mvarId!.replaceTargetDefEq hType'
         goalNoGim.mvarId.assign stepProof
-        return { goalNoGim with mvarId := mvarNew }
+        let gNew : Grind.Goal := { goalNoGim with mvarId := mvarNew }
+        match ← Grind.liftGrindM (gNew.intros #[]) with
+        | .failed => return gNew
+        | .goal _ gNew' => return gNew'
       if isInstr then
         maxInstrCount.forM (·.modify (· - 1))
       return some (← insertGimmick goalNew)
@@ -637,8 +675,8 @@ partial def evalSymKStep : Grind.GrindTactic :=
         | .letE _ _ _ body _ => getEffectsState body
         | .mdata _ e => getEffectsState e
         | _ =>
-          if e.isApp && e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 3 then
-            some e.getAppArgs[2]!
+          if e.isApp && e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 2 then
+            some e.getAppArgs[1]!
           else
             none
       -- No more Effects.All in the goal -- try stepping `Eventually (step1 ...)` if applicable.

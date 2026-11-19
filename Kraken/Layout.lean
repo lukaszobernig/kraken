@@ -47,6 +47,31 @@ def Labels.label! (L : Labels) (l : Label) : Int64 :=
   | some a => a
   | none => panic! s!"unresolved label: {l}"
 
+/-- Total label-resolution environment passed to pure instruction semantics. -/
+class LabelEnv where
+  label : Label → Int64
+
+/-- `env` agrees with every label defined in `L`. -/
+def Labels.Consistent (L : Labels) (env : LabelEnv) : Prop :=
+  ∀ l a, L.label? l = some a → env.label l = a
+
+theorem Labels.Consistent.mono {L₁ L₂ : Labels} {env : LabelEnv}
+    (hL : L₁ ⊆ L₂) (h : L₂.Consistent env) : L₁.Consistent env :=
+  fun l a hl => h l a (hL l a hl)
+
+/-- Concrete completion of a partial `Labels` table (for `#eval` and fuzzers). -/
+@[instance_reducible]
+def Labels.toEnv (L : Labels) : LabelEnv where
+  label l := (L.label? l).getD (-1)
+
+theorem Labels.toEnv_label_of_eq {L : Labels} {l : Label} {a : Int64}
+    (h : L.label? l = some a) : @LabelEnv.label L.toEnv l = a := by
+  change (L.label? l).getD (-1) = a
+  rw [h]; rfl
+
+theorem Labels.Consistent.toEnv (L : Labels) : L.Consistent L.toEnv :=
+  fun _ _ h => Labels.toEnv_label_of_eq h
+
 /-! ## Dynamic Alignment Padding -/
 
 /-- Number of padding bytes in `[0, 2 ^ log2Align)` needed to align `addr` to a `2 ^ log2Align`-byte
@@ -799,4 +824,5 @@ theorem FnSpec.at_label [l : Layout Instr Const]
 
 end Kraken
 
-export Kraken (Labels FnSpec alignPad)
+export Kraken (Labels LabelEnv FnSpec alignPad)
+export Kraken.LabelEnv (label)

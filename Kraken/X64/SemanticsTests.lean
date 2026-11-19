@@ -56,6 +56,7 @@ private def wrapping : MachineData :=
 /-! `cld`/`std` write only the direction flag. -/
 
 private def runOp (op : Operation .W64) (s : MachineData) : Option MachineData :=
+  let : LabelEnv := ⟨fun _ => 0⟩
   let : AddressSize := ⟨.W64⟩
   match op.interp ⟨0, 1⟩ s (fun s => .done ⟨s, 1⟩) (fun _ _ => .unimplemented "jump") with
   | .done st => some st.data
@@ -70,15 +71,3 @@ private def busy : MachineData :=
 #guard runOp .cld busy == some busy
 #guard (runOp .std busy >>= runOp .std) == some { busy with df := true }
 #guard (runOp .std busy >>= runOp .cld) == some busy
-
-#guard match ConstExpr.interp (.add (.label "missing") (.int64 4)) ⟨0, 5⟩ (fun _ => .done ⟨s, 0⟩) with
-  | .lookup_label l _ => l == "missing"
-  | _ => false
-
--- Untaken conditional jump still requests label resolution upfront.
-#guard match (letI : AddressSize := ⟨.W64⟩
-    Operation.interp (w := .W64) (.jcc .z "missing_target") ⟨0, 2⟩
-      { s with status := { s.status with zf := false } }
-      (fun st => .done ⟨st, 2⟩) (fun a st => .done ⟨st, a⟩)) with
-  | .lookup_label l _ => l == "missing_target"
-  | _ => false

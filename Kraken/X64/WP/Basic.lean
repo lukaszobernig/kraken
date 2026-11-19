@@ -50,8 +50,9 @@ variable [Host]
 
 public theorem Host.eventually_of_interp {k : Nat} {d : Directive} {rest : Program}
     (hdp : (d :: rest).IsInfixAt Host.body k) {post : @Post MachineState} {s : MachineData}
-    (h : (d.interp s ⟨Host.addrOf k, Host.addrOf (k + 1)⟩
-      (fun s' => .done ⟨s', Host.addrOf (k + 1)⟩) (fun a s' => .done ⟨s', a⟩)).All Host.exe.labels post) :
+    (h : ∀ env : LabelEnv, Host.exe.labels.Consistent env →
+      (@Directive.interp env d s ⟨Host.addrOf k, Host.addrOf (k + 1)⟩
+        (fun s' => .done ⟨s', Host.addrOf (k + 1)⟩) (fun a s' => .done ⟨s', a⟩)).All post) :
     Eventually (step1 Host.exe) post ⟨s, Host.addrOf k⟩ :=
   _root_.eventually_of_interp Host.fits hdp.cons.1 h
 

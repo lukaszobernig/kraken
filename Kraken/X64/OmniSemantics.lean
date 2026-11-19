@@ -10,56 +10,26 @@ public import Kraken.OmniSemantics
 
 @[expose] public section
 
-@[kstep] def Effects.All (L : Labels) (post : MachineState → Prop) : Effects → Prop
+@[kstep] def Effects.All (post : MachineState → Prop) : Effects → Prop
   | .done a => post a
-  | .lookup_label l cont =>
-    match L.label? l with
-    | some a => (cont a).All L post
-    | none => False
   | .unimplemented _ => False
   | .gp_unaligned _ _ => False
   | .nonmem_load .. => False
   | .nonmem_store .. => False
-  | @Effects.undefined α _ cont => ∀ v : α, (cont v).All L post
-  | .require_read_access _ cont => (cont ()).All L post
-  | .require_write_access _ cont => (cont ()).All L post
-  | .require_exec_access _ cont => (cont ()).All L post
+  | @Effects.undefined α _ cont => ∀ v : α, (cont v).All post
+  | .require_read_access _ cont => (cont ()).All post
+  | .require_write_access _ cont => (cont ()).All post
+  | .require_exec_access _ cont => (cont ()).All post
 
-/-- Monotonicity of `Effects.All` in both `Labels` (`L₁ ⊆ L₂`) and the postcondition (`P → Q`),
-proved once by induction on `Effects` without inspecting individual instructions. -/
-theorem Effects.All_mono {L₁ L₂ : Labels} (hL : L₁ ⊆ L₂) {P Q : @Post MachineState}
-    (hPQ : ∀ s, P s → Q s) (eff : Effects) :
-    eff.All L₁ P → eff.All L₂ Q := by
-  induction eff with
-  | done a => exact hPQ a
-  | lookup_label l cont ih =>
-    intro h0
-    cases h : L₁.label? l with
-    | none => simp [Effects.All, h] at h0
-    | some a =>
-      simp only [Effects.All, h] at h0
-      simp only [Effects.All, hL l a h]
-      exact ih a h0
-  | undefined cont ih => exact fun h v => ih v (h v)
-  | require_read_access _ cont ih => exact ih ()
-  | require_write_access _ cont ih => exact ih ()
-  | require_exec_access _ cont ih => exact ih ()
-  | _ => exact False.elim
-
-theorem Effects.All_lookup_label_of_eq {L : Labels} {l : Label} {a : Int64}
-    (h : L.label? l = some a) (post : MachineState → Prop) (cont : Int64 → Effects) :
-    (Effects.lookup_label l cont).All L post = (cont a).All L post := by
-  simp [Effects.All, h]
-
-@[ksimp] theorem Effects.All_require_read_access (L : Labels) (addr : BitVec 64) (bytes : UInt64)
+@[ksimp] theorem Effects.All_require_read_access (addr : BitVec 64) (bytes : UInt64)
     (ok : Unit → Effects) (post : MachineState → Prop) :
-    (require_access require_read_access addr bytes ok).All L post = (ok ()).All L post := by
+    (require_access require_read_access addr bytes ok).All post = (ok ()).All post := by
   dsimp only [require_access]
   split <;> rfl
 
-@[ksimp] theorem Effects.All_require_write_access (L : Labels) (addr : BitVec 64) (bytes : UInt64)
+@[ksimp] theorem Effects.All_require_write_access (addr : BitVec 64) (bytes : UInt64)
     (ok : Unit → Effects) (post : MachineState → Prop) :
-    (require_access require_write_access addr bytes ok).All L post = (ok ()).All L post := by
+    (require_access require_write_access addr bytes ok).All post = (ok ()).All post := by
   dsimp only [require_access]
   split <;> rfl
 
@@ -68,10 +38,10 @@ theorem Effects.All_lookup_label_of_eq {L : Labels} {l : Label} {a : Int64}
 
 def step1 (e : Executable) (labels : Labels := e.labels) (s : MachineState)
     (post : @Post MachineState) : Prop :=
-  (Executable.step e s .done).All labels post
+  ∀ env : LabelEnv, labels.Consistent env → (Executable.step e s .done env).All post
 
 def straightlineStep (e : Executable) (s : MachineState) (post : @Post MachineState) : Prop :=
-  (Executable.straightline e s .done).All e.labels post
+  (Executable.straightline e s .done).All post
 
 /-- Single `Directive` stepping into `Eventually (step1 (layout p) labels)`.
 For dynamic `.align log2Align true`, the `alignPad = 0` (0 steps) vs `alignPad > 0` (1 NOP step)
@@ -81,9 +51,10 @@ theorem eventually_of_interp [layout : Layout] {p : Program}
     {labels : Labels} {k : Nat} {d : Directive}
     (hd : p.stripLabels[k]? = some d)
     {post : @Post MachineState} {s : MachineData}
-    (h : (d.interp s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
-      (fun s' => .done ⟨s', layout.addrOf p (k + 1)⟩)
-      (fun a s' => .done ⟨s', a⟩)).All labels post) :
+    (h : ∀ env : LabelEnv, labels.Consistent env →
+      (@Directive.interp env d s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
+        (fun s' => .done ⟨s', layout.addrOf p (k + 1)⟩)
+        (fun a s' => .done ⟨s', a⟩)).All post) :
     Eventually (step1 (layout p) labels) post ⟨s, layout.addrOf p k⟩ := by
   have hsucc : layout.addrOf p (k + 1) =
       layout.addrOf p k + .ofNat (layout.dirSize (layout.addrOf p k) k d) :=
@@ -91,36 +62,39 @@ theorem eventually_of_interp [layout : Layout] {p : Program}
   match hsize : layout.dirSize (layout.addrOf p k) k d with
   | 0 =>
     apply Eventually.done
+    have h0 := h labels.toEnv (Kraken.Labels.Consistent.toEnv labels)
     cases d with
     | instr _ => exact absurd hsize (Nat.ne_of_gt (layout.instrSize_pos k))
-    | label _ => simpa [hsucc, hsize, Directive.interp, Effects.All] using h
+    | label _ => simpa [hsucc, hsize, Directive.interp, Effects.All] using h0
     | byteArray bs =>
-      have h0 : bs.size = 0 := hsize
-      simpa [hsucc, hsize, Directive.interp, ByteArray.isEmpty, h0, Effects.All] using h
+      have hbs : bs.size = 0 := hsize
+      simpa [hsucc, hsize, Directive.interp, ByteArray.isEmpty, hbs, Effects.All] using h0
     | word n c =>
-      have h0 : n = 0 := hsize
-      subst h0
-      simpa [hsucc, hsize, Directive.interp, Effects.All] using h
+      have hn : n = 0 := hsize
+      subst hn
+      simpa [hsucc, hsize, Directive.interp, Effects.All] using h0
     | align m ex =>
       cases ex
-      · simp [Directive.interp, Effects.All] at h
-      · simpa [hsucc, hsize, Directive.interp, Effects.All] using h
+      · simp [Directive.interp, Effects.All] at h0
+      · simpa [hsucc, hsize, Directive.interp, Effects.All] using h0
   | sz' + 1 =>
     refine .step _ post ?_ fun _ => .done _
+    intro env henv
     have hpos : 0 < layout.dirSize (layout.addrOf p k) k d := by omega
-    dsimp only [step1, Executable.step]
+    dsimp only [Executable.step]
     rw [layout.directiveAt?_addrOf p hfit hd hpos]
-    simpa [hsucc] using h
+    simpa [hsucc] using h env henv
 
 theorem step_at [layout : Layout] {p : Program}
     (hfit : layout.totalSize p < 2 ^ 64)
     {labels : Labels} {k : Nat} {d : Directive}
     (hd : p.stripLabels[k]? = some d)
     {post : @Post MachineState} {s : MachineData}
-    (h : (d.interp s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
-      (fun s' => .done ⟨s', layout.addrOf p (k + 1)⟩)
-      (fun a s' => .done ⟨s', a⟩)).All labels
-        (fun mid => Eventually (step1 (layout p) labels) post mid)) :
+    (h : ∀ env : LabelEnv, labels.Consistent env →
+      (@Directive.interp env d s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
+        (fun s' => .done ⟨s', layout.addrOf p (k + 1)⟩)
+        (fun a s' => .done ⟨s', a⟩)).All
+          (fun mid => Eventually (step1 (layout p) labels) post mid)) :
     Eventually (step1 (layout p) labels) post ⟨s, layout.addrOf p k⟩ :=
   eventually_trans _ _ _ _ (eventually_of_interp hfit hd h) fun _ => id
 
@@ -132,7 +106,7 @@ theorem step_align [layout : Layout] {p : Program}
     {post : @Post MachineState} {s : MachineData}
     (h : Eventually (step1 (layout p) labels) post ⟨s, layout.addrOf p (k + 1)⟩) :
     Eventually (step1 (layout p) labels) post ⟨s, layout.addrOf p k⟩ :=
-  step_at hfit hd (by simpa [Directive.interp, Effects.All] using h)
+  step_at hfit hd (fun _ _ => by simpa [Directive.interp, Effects.All] using h)
 
 section Concat
 variable (layout : Layout) {L L₁ L₂ : Labels} {q₁ p q₂ q : Program}
@@ -142,14 +116,14 @@ variable (layout : Layout) {L L₁ L₂ : Labels} {q₁ p q₂ q : Program}
 theorem Layout.subStep_infix (hL : L₁ ⊆ L₂)
     (hfit : layout.totalSize (q₁ ++ p ++ q₂) < 2 ^ 64) :
     SubStep (step1 ((layout.after q₁) p) L₁) (step1 (layout (q₁ ++ p ++ q₂)) L₂) := by
-  rintro ⟨md, pc⟩ post h
-  dsimp only [step1, Executable.step] at h ⊢
+  rintro ⟨md, pc⟩ post h env henv
+  have h1 := h env (henv.mono hL)
+  dsimp only [Executable.step] at h1 ⊢
   cases hat : ((layout.after q₁) p).directiveAt? pc with
-  | none => simp [hat, Effects.All] at h
+  | none => simp [hat, Effects.All] at h1
   | some c =>
-    rw [hat] at h
-    rw [layout.directiveAt?_infix q₁ p q₂ hfit hat]
-    exact Effects.All_mono hL (fun _ hp => hp) _ h
+    rw [hat] at h1
+    rwa [layout.directiveAt?_infix q₁ p q₂ hfit hat]
 
 theorem Layout.subStep_append_right (hL : L₁ ⊆ L₂)
     (hfit : layout.totalSize (p ++ q) < 2 ^ 64) :
@@ -230,10 +204,11 @@ theorem step_at_sub [layout : Layout] {p : Program} {e : Executable}
     {k : Nat} {d : Directive}
     (hd : p.stripLabels[k]? = some d)
     {post : @Post MachineState} {s : MachineData}
-    (h : (d.interp s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
-      (fun s' => .done ⟨s', layout.addrOf p (k + 1)⟩)
-      (fun a s' => .done ⟨s', a⟩)).All e.labels
-        (fun mid => Eventually (step1 e) post mid)) :
+    (h : ∀ env : LabelEnv, e.labels.Consistent env →
+      (@Directive.interp env d s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
+        (fun s' => .done ⟨s', layout.addrOf p (k + 1)⟩)
+        (fun a s' => .done ⟨s', a⟩)).All
+          (fun mid => Eventually (step1 e) post mid)) :
     Eventually (step1 e) post ⟨s, layout.addrOf p k⟩ :=
   Eventually.bind (hsub.eventually (eventually_of_interp hfit hd h)) fun _ => id
 
@@ -246,7 +221,7 @@ theorem step_align_sub [layout : Layout] {p : Program} {e : Executable}
     {post : @Post MachineState} {s : MachineData}
     (h : Eventually (step1 e) post ⟨s, layout.addrOf p (k + 1)⟩) :
     Eventually (step1 e) post ⟨s, layout.addrOf p k⟩ :=
-  step_at_sub hfit hsub hd (by simpa [Directive.interp, Effects.All] using h)
+  step_at_sub hfit hsub hd (fun _ _ => by simpa [Directive.interp, Effects.All] using h)
 
 /-- `Embedded p e` asserts that snippet `p` is laid out inside ambient executable `e`
 with non-shadowed defined labels and step simulation under any label extension `L`. -/
