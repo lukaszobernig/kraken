@@ -58,79 +58,66 @@ def step1 (e : Executable) (labels : Labels := e.labels) (s : MachineState)
 def straightlineStep (e : Executable) (s : MachineState) (post : @Post MachineState) : Prop :=
   (Executable.straightline e s .done).All e.labels post
 
-/-- Single `CodeDirective` stepping into `Eventually (step1 (layout p) labels)`.
+/-- Single `Directive` stepping into `Eventually (step1 (layout p) labels)`.
 For dynamic `.align log2Align true`, the `alignPad = 0` (0 steps) vs `alignPad > 0` (1 NOP step)
 case split is absorbed here once and never exposed to user proofs or `kstep`. -/
 theorem eventually_of_interp [layout : Layout] {p : Program}
     (hfit : layout.totalSize p < 2 ^ 64)
-    {labels : Labels} {k : Nat} {cd : CodeDirective}
-    (hcd : p.splitLabels.body[k]? = some cd)
+    {labels : Labels} {k : Nat} {d : Directive}
+    (hd : p.stripLabels[k]? = some d)
     {post : @Post MachineState} {s : MachineData}
-    (h : (CodeDirective.interp cd s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
+    (h : (d.interp s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
       (fun s' => .done ⟨s', layout.addrOf p (k + 1)⟩)
       (fun a s' => .done ⟨s', a⟩)).All labels post) :
     Eventually (step1 (layout p) labels) post ⟨s, layout.addrOf p k⟩ := by
   have hsucc : layout.addrOf p (k + 1) =
-      layout.addrOf p k + .ofNat (layout.codeDirSize (layout.addrOf p k) k cd) :=
-    layout.addrOf_succ p hcd
-  match hsize : layout.codeDirSize (layout.addrOf p k) k cd with
+      layout.addrOf p k + .ofNat (layout.dirSize (layout.addrOf p k) k d) :=
+    layout.addrOf_succ p hd
+  match hsize : layout.dirSize (layout.addrOf p k) k d with
   | 0 =>
     apply Eventually.done
-    cases cd with
+    cases d with
     | instr _ => exact absurd hsize (Nat.ne_of_gt (layout.instrSize_pos k))
+    | label _ => simpa [hsucc, hsize, Directive.interp, Effects.All] using h
     | byteArray bs =>
       have h0 : bs.size = 0 := hsize
-      simpa [hsucc, hsize, CodeDirective.interp, ByteArray.isEmpty, h0, Effects.All] using h
+      simpa [hsucc, hsize, Directive.interp, ByteArray.isEmpty, h0, Effects.All] using h
     | word n c =>
       have h0 : n = 0 := hsize
       subst h0
-      simpa [hsucc, hsize, CodeDirective.interp, Effects.All] using h
+      simpa [hsucc, hsize, Directive.interp, Effects.All] using h
     | align m ex =>
       cases ex
-      · simp [CodeDirective.interp, Effects.All] at h
-      · simpa [hsucc, hsize, CodeDirective.interp, Effects.All] using h
+      · simp [Directive.interp, Effects.All] at h
+      · simpa [hsucc, hsize, Directive.interp, Effects.All] using h
   | sz' + 1 =>
     refine .step _ post ?_ fun _ => .done _
-    have hpos : 0 < layout.codeDirSize (layout.addrOf p k) k cd := by omega
-    have hat := layout.itemAt?_addrOf p hfit hcd hpos
+    have hpos : 0 < layout.dirSize (layout.addrOf p k) k d := by omega
     dsimp only [step1, Executable.step]
-    rw [hat]
-    cases cd with
-    | instr i =>
-      simpa [Item.interp, CodeDirective.interp, Kraken.CodeDirective.toItem, hsucc] using h
-    | byteArray bs =>
-      have hne : bs.isEmpty = false := by grind [ByteArray.isEmpty, Kraken.Layout.codeDirSize]
-      simp [CodeDirective.interp, hne, Effects.All] at h
-    | word n c =>
-      cases n with
-      | zero => dsimp [Kraken.Layout.codeDirSize] at hpos; omega
-      | succ _ => simp [CodeDirective.interp, Effects.All] at h
-    | align m ex =>
-      cases ex
-      · simp [CodeDirective.interp, Effects.All] at h
-      · simpa [Item.interp, CodeDirective.interp, Kraken.CodeDirective.toItem, Effects.All, hsucc] using h
+    rw [layout.directiveAt?_addrOf p hfit hd hpos]
+    simpa [hsucc] using h
 
 theorem step_at [layout : Layout] {p : Program}
     (hfit : layout.totalSize p < 2 ^ 64)
-    {labels : Labels} {k : Nat} {cd : CodeDirective}
-    (hcd : p.splitLabels.body[k]? = some cd)
+    {labels : Labels} {k : Nat} {d : Directive}
+    (hd : p.stripLabels[k]? = some d)
     {post : @Post MachineState} {s : MachineData}
-    (h : (CodeDirective.interp cd s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
+    (h : (d.interp s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
       (fun s' => .done ⟨s', layout.addrOf p (k + 1)⟩)
       (fun a s' => .done ⟨s', a⟩)).All labels
         (fun mid => Eventually (step1 (layout p) labels) post mid)) :
     Eventually (step1 (layout p) labels) post ⟨s, layout.addrOf p k⟩ :=
-  eventually_trans _ _ _ _ (eventually_of_interp hfit hcd h) fun _ => id
+  eventually_trans _ _ _ _ (eventually_of_interp hfit hd h) fun _ => id
 
 /-- Step past an executable `.align log2Align` directive with zero user-visible case splitting. -/
 theorem step_align [layout : Layout] {p : Program}
     (hfit : layout.totalSize p < 2 ^ 64)
     {labels : Labels} {k log2Align : Nat}
-    (hcd : p.splitLabels.body[k]? = some (.align log2Align true))
+    (hd : p.stripLabels[k]? = some (.align log2Align true))
     {post : @Post MachineState} {s : MachineData}
     (h : Eventually (step1 (layout p) labels) post ⟨s, layout.addrOf p (k + 1)⟩) :
     Eventually (step1 (layout p) labels) post ⟨s, layout.addrOf p k⟩ :=
-  step_at hfit hcd (by simpa [CodeDirective.interp, Effects.All] using h)
+  step_at hfit hd (by simpa [Directive.interp, Effects.All] using h)
 
 section Concat
 variable (layout : Layout) {L L₁ L₂ : Labels} {q₁ p q₂ q : Program}
@@ -142,11 +129,11 @@ theorem Layout.subStep_infix (hL : L₁ ⊆ L₂)
     SubStep (step1 ((layout.after q₁) p) L₁) (step1 (layout (q₁ ++ p ++ q₂)) L₂) := by
   rintro ⟨md, pc⟩ post h
   dsimp only [step1, Executable.step] at h ⊢
-  cases hat : ((layout.after q₁) p).itemAt? pc with
+  cases hat : ((layout.after q₁) p).directiveAt? pc with
   | none => simp [hat, Effects.All] at h
   | some c =>
     rw [hat] at h
-    rw [layout.itemAt?_infix q₁ p q₂ hfit hat]
+    rw [layout.directiveAt?_infix q₁ p q₂ hfit hat]
     exact Effects.All_mono hL (fun _ hp => hp) _ h
 
 theorem Layout.subStep_append_right (hL : L₁ ⊆ L₂)
@@ -221,30 +208,30 @@ abbrev WPCallAt (e : Executable) (entry : Int64) (s : MachineData) (post : @Post
 def WPCall (e : Executable) (fn : Label) (s : MachineData) (post : @Post MachineState) : Prop :=
   FnSpec e fn fun entry => WPCallAt e entry s post
 
-/-- Step a single `CodeDirective` of an embedded snippet `layout p` directly inside `Eventually (step1 e)`. -/
+/-- Step a single `Directive` of an embedded snippet `layout p` directly inside `Eventually (step1 e)`. -/
 theorem step_at_sub [layout : Layout] {p : Program} {e : Executable}
     (hfit : layout.totalSize p < 2 ^ 64)
     (hsub : SubStep (step1 (layout p) e.labels) (step1 e))
-    {k : Nat} {cd : CodeDirective}
-    (hcd : p.splitLabels.body[k]? = some cd)
+    {k : Nat} {d : Directive}
+    (hd : p.stripLabels[k]? = some d)
     {post : @Post MachineState} {s : MachineData}
-    (h : (CodeDirective.interp cd s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
+    (h : (d.interp s ⟨layout.addrOf p k, layout.addrOf p (k + 1)⟩
       (fun s' => .done ⟨s', layout.addrOf p (k + 1)⟩)
       (fun a s' => .done ⟨s', a⟩)).All e.labels
         (fun mid => Eventually (step1 e) post mid)) :
     Eventually (step1 e) post ⟨s, layout.addrOf p k⟩ :=
-  Eventually.bind (hsub.eventually (eventually_of_interp hfit hcd h)) fun _ => id
+  Eventually.bind (hsub.eventually (eventually_of_interp hfit hd h)) fun _ => id
 
 /-- Step past an executable `.align log2Align` inside an embedded snippet without case splitting. -/
 theorem step_align_sub [layout : Layout] {p : Program} {e : Executable}
     (hfit : layout.totalSize p < 2 ^ 64)
     (hsub : SubStep (step1 (layout p) e.labels) (step1 e))
     {k log2Align : Nat}
-    (hcd : p.splitLabels.body[k]? = some (.align log2Align true))
+    (hd : p.stripLabels[k]? = some (.align log2Align true))
     {post : @Post MachineState} {s : MachineData}
     (h : Eventually (step1 e) post ⟨s, layout.addrOf p (k + 1)⟩) :
     Eventually (step1 e) post ⟨s, layout.addrOf p k⟩ :=
-  step_at_sub hfit hsub hcd (by simpa [CodeDirective.interp, Effects.All] using h)
+  step_at_sub hfit hsub hd (by simpa [Directive.interp, Effects.All] using h)
 
 /-- `Embedded p e` asserts that snippet `p` is laid out inside ambient executable `e`
 with non-shadowed defined labels and step simulation under any label extension `L`. -/
@@ -305,7 +292,7 @@ theorem Embedded.of_append_left (layout : Layout) (p₁ p₂ : Program)
 /-- Unpack `Embedded p e` to prove `FnSpec e fn contract` where `fn` resolves to body index `k` of `p`. -/
 theorem Embedded.fnSpec_of_label {p : Program} {e : Executable}
     (hemb : Embedded p e) {fn : Label} {k : Nat}
-    (hk : p.splitLabels.labels.lookup fn = some k)
+    (hk : p.extractLabels.lookup fn = some k)
     {contract : Int64 → Prop}
     (h : ∀ [layout : Layout],
       layout.totalSize p < 2 ^ 64 →
@@ -320,7 +307,7 @@ theorem Embedded.fnSpec_of_label {p : Program} {e : Executable}
 
 theorem Embedded.wpCall_of_label {p : Program} {e : Executable}
     (hemb : Embedded p e) {fn : Label} {k : Nat}
-    (hk : p.splitLabels.labels.lookup fn = some k)
+    (hk : p.extractLabels.lookup fn = some k)
     {s : MachineData} {post : @Post MachineState}
     (h : ∀ [layout : Layout],
       layout.totalSize p < 2 ^ 64 →

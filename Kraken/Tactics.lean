@@ -99,9 +99,8 @@ elab_rules : tactic
            obtain $statePat:rcasesPat := $s
            delta $p
            dsimp only [$straightlineStepId:ident, $execStraightlineId:ident]
-           rw [Kraken.Layout.itemsFromStart]
-           dsimp only [Kraken.Program.splitLabels, Kraken.Layout.layoutBody,
-             Kraken.Layout.layoutBodyGo])))
+           rw [Kraken.Layout.directivesFromStart]
+           dsimp only [Kraken.Program.stripLabels, Kraken.Layout.layoutGo])))
 
 --------------------------------------------------------------------------------
 
@@ -159,18 +158,18 @@ def kdeltaBetaOnly (targets: List Name) (maxInstrCount : Option (IO.Ref Nat)) : 
   -- semantics. Concretely: `f (let x = ... in arg)` => `let x = ... in f arg`.
   peelArgsLets args 0 #[] #[] fun (args : Array Expr) (fvars : Array Expr) => do
 
-    if f.isConstOf `Effects.All && args.size == 3 && args[2]!.isApp && args[2]!.getAppFn'.isConstOf `Items.interp then
-      -- We optionally track how many times we've hit Items.interp -- this tracks how
+    if f.isConstOf `Effects.All && args.size == 3 && args[2]!.isApp && args[2]!.getAppFn'.isConstOf `Directives.interp then
+      -- We optionally track how many times we've hit Directives.interp -- this tracks how
       -- many instructions we've stepped through.
       if (← maxInstrCount.mapM (·.get)) = .some 0 then
         return .rfl
       maxInstrCount.forM (fun r => r.modify (· - 1))
 
-      -- Finding a node of the form `Effects.All ... (Items.interp ...)`
+      -- Finding a node of the form `Effects.All ... (Directives.interp ...)`
       -- means that we are ready to step through. We manually force reduction of
-      -- Items.interp (since it is *not* in our list of targets), then let
+      -- Directives.interp (since it is *not* in our list of targets), then let
       -- everything simplify until we're called again.
-      let some arg2 ← Meta.unfoldDefinition? args[2]! true | throwError "can't unfold Items.interp"
+      let some arg2 ← Meta.unfoldDefinition? args[2]! true | throwError "can't unfold Directives.interp"
       let e := mkAppN f (args.set! 2 arg2)
       let e' ← shareCommon e
       let e'' ← mkLetFVars fvars e'
@@ -394,23 +393,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
       let hd ← whnfD hd
       match_expr hd with
       | Kraken.Directive.label _ _ _ => getBodyElem? tl i
-      | Kraken.Directive.instr instrTy constTy ins =>
-        if i == 0 then
-          return some (mkApp3 (mkConst ``Kraken.CodeDirective.instr) instrTy constTy ins)
-        else getBodyElem? tl (i - 1)
-      | Kraken.Directive.byteArray instrTy constTy bs =>
-        if i == 0 then
-          return some (mkApp3 (mkConst ``Kraken.CodeDirective.byteArray) instrTy constTy bs)
-        else getBodyElem? tl (i - 1)
-      | Kraken.Directive.word instrTy constTy n c =>
-        if i == 0 then
-          return some (mkApp4 (mkConst ``Kraken.CodeDirective.word) instrTy constTy n c)
-        else getBodyElem? tl (i - 1)
-      | Kraken.Directive.align instrTy constTy k ex =>
-        if i == 0 then
-          return some (mkApp4 (mkConst ``Kraken.CodeDirective.align) instrTy constTy k ex)
-        else getBodyElem? tl (i - 1)
-      | _ => return none
+      | _ => if i == 0 then return some hd else getBodyElem? tl (i - 1)
     | _ => return none
 
   let matchLayoutApply? (exe : Expr) : MetaM (Option (Expr × Expr × Expr × Expr)) := do
@@ -435,9 +418,8 @@ partial def evalSymKStep : Grind.GrindTactic :=
     let s ← saveState
     try
       let kExpr := ToExpr.toExpr k
-      let sp ← mkAppOptM ``Kraken.Program.splitLabels #[some instrTy, some constTy, some prog]
-      let spLabels ← mkAppM ``Kraken.SplitProgram.labels #[sp]
-      let hkLhs ← mkAppM ``List.lookup #[lblExpr, spLabels]
+      let labelsList ← mkAppOptM ``Kraken.Program.extractLabels #[some instrTy, some constTy, some prog]
+      let hkLhs ← mkAppM ``List.lookup #[lblExpr, labelsList]
       let hkRhs ← mkAppM ``Option.some #[kExpr]
       let hkType ← mkEq hkLhs hkRhs
       let hkProof ← mkEqRefl hkRhs
@@ -545,10 +527,10 @@ partial def evalSymKStep : Grind.GrindTactic :=
     let p := pc.getArg! 3
     let kExpr := pc.getArg! 4
     let some k := kExpr.nat? <|> kExpr.rawNatLit? | return none
-    let some cd ← goal.withContext (getBodyElem? p k) | return none
+    let some d ← goal.withContext (getBodyElem? p k) | return none
     let isInstr ← goal.withContext do
-      let cd' ← whnfD cd
-      return cd'.getAppFn.isConstOf ``Kraken.CodeDirective.instr
+      let d' ← whnfD d
+      return d'.getAppFn.isConstOf ``Kraken.Directive.instr
     if isInstr then
       if (← maxInstrCount.mapM (·.get)) == some 0 then
         return none
@@ -576,7 +558,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             unless ← isDefEq mvars[1]! p do failure
             unless ← isDefEq mvars[3]! labels do failure
             unless ← isDefEq mvars[4]! kNatExpr do failure
-            unless ← isDefEq mvars[5]! cd do failure
+            unless ← isDefEq mvars[5]! d do failure
             unless ← isDefEq mvars[7]! post do failure
             unless ← isDefEq mvars[8]! s do failure
             mvars[6]!.mvarId!.refl
@@ -591,7 +573,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
             unless ← isDefEq mvars[1]! p do failure
             unless ← isDefEq mvars[2]! exe do failure
             unless ← isDefEq mvars[5]! kNatExpr do failure
-            unless ← isDefEq mvars[6]! cd do failure
+            unless ← isDefEq mvars[6]! d do failure
             unless ← isDefEq mvars[8]! post do failure
             unless ← isDefEq mvars[9]! s do failure
             mvars[7]!.mvarId!.refl

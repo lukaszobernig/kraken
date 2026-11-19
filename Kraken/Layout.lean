@@ -5,16 +5,18 @@ public import Lean.ToExpr
 @[expose] public section
 
 /-
-Common Kraken executable layout, label splitting, dynamic alignment, and function-spec primitives.
+Common Kraken executable layout, label extraction, dynamic alignment, and function-spec primitives.
 
 Architecture:
 1. Surface AST: `Program := List (Directive Instr Const)` retains inline `.label` and `.align`.
-2. Pure syntactic preprocessing: `Program.splitLabels` splits a `Program` into
-   - `body : List (CodeDirective Instr Const)` (directives sans `.label`), and
-   - `labels : List (Label × Nat)` (each label mapped to its index `0 ≤ idx ≤ body.length`).
-3. Layout (`Layout.apply`): threads the current address left-to-right over `body`, resolving
+2. Pure syntactic preprocessing:
+   - `Program.stripLabels : Program → Program` removes `.label` directives, and
+   - `Program.extractLabels : Program → List (Label × Nat)` maps each label to its index
+     `0 ≤ idx ≤ p.stripLabels.length`.
+3. Layout (`Layout.apply`): threads `(addr, idx)` left-to-right over `p.stripLabels`, resolving
    dynamic `.align` padding (`alignPad curAddr log2Align`) and emitting only strictly positive-size
-   `SizedItem`s into `Executable.items`, alongside the resolved `Executable.labels : Labels`.
+   `Sized (Directive Instr Const)` entries into `Executable.program`, alongside the resolved
+   `Executable.labels : Labels`.
 -/
 
 namespace Kraken
@@ -96,7 +98,7 @@ theorem alignPad_aligned (addr : Int64) {k : Nat} (hk : k ≤ 64) :
       rw [Nat.mod_eq_of_lt hsub_lt]; omega
     rw [this, Nat.mod_self]
 
-/-! ## Surface AST (`Directive`, `Program`) and Label Splitting (`CodeDirective`, `SplitProgram`) -/
+/-! ## Core Types (`Directive`, `Sized`, `Addressable`, `Program`, `Executable`, `Layout`) -/
 
 inductive Directive (Instr Const : Type) where
   | instr (_ : Instr)
@@ -112,7 +114,7 @@ inductive Directive (Instr Const : Type) where
   | align (log2Align : Nat) (executable : Bool := true)
   deriving DecidableEq, Repr, Hashable, BEq, Lean.ToExpr
 
-structure Sized Directive where
+structure Sized (Directive : Type) where
   directive : Directive
   size : Nat
 
@@ -121,38 +123,11 @@ structure Addressable (Directive : Type) extends Sized Directive where
 
 abbrev Program Instr Const := List (Directive Instr Const)
 
-/-- A directive after stripping `.label` entries out of a `Program`. -/
-inductive CodeDirective (Instr Const : Type) where
-  | instr (_ : Instr)
-  | byteArray (arr : ByteArray)
-  | word (bytes : Nat) (e : Const)
-  | align (log2Align : Nat) (executable : Bool := true)
-  deriving DecidableEq, Repr, Hashable, BEq, Lean.ToExpr
-
-/-- A `Program` preprocessed into label-free `body` and `(label, bodyIdx)` table (`0 ≤ idx ≤ body.length`). -/
-structure SplitProgram (Instr Const : Type) where
-  body : List (CodeDirective Instr Const)
-  labels : List (Label × Nat)
-  deriving DecidableEq, Repr
-
-/-- An emitted machine-level item occupying a strictly positive number of bytes in `Executable`. -/
-inductive Item (Instr Const : Type) where
-  | instr (_ : Instr)
-  | byteArray (arr : ByteArray)
-  | word (bytes : Nat) (e : Const)
-  /-- Non-zero alignment padding emitted by `.align`. -/
-  | alignPad (executable : Bool)
-  deriving DecidableEq, Repr, Hashable, BEq, Lean.ToExpr
-
-structure SizedItem (Instr Const : Type) where
-  item : Item Instr Const
-  size : Nat
-  size_pos : 0 < size
-
 structure Executable (Instr Const : Type) where
   startAddr : Int64
-  items : List (SizedItem Instr Const)
+  program : List (Sized (Directive Instr Const))
   labels : Labels
+  program_pos : ∀ c ∈ program, 0 < c.size
 
 class Layout (Instr Const : Type) where
   start : Int64
@@ -161,15 +136,7 @@ class Layout (Instr Const : Type) where
 
 variable {Instr Const : Type}
 
-def CodeDirective.toItem : CodeDirective Instr Const → Item Instr Const
-  | .instr i => .instr i
-  | .byteArray bs => .byteArray bs
-  | .word n c => .word n c
-  | .align _ ex => .alignPad ex
-
-def Directive.isLabel (lbl : Label) : Directive Instr Const → Bool
-  | .label l => l == lbl
-  | _ => false
+/-! ## Label Extraction on `Program` -/
 
 def Program.definedLabels (p : Program Instr Const) : List Label :=
   p.filterMap fun | .label l => some l | _ => none
@@ -186,89 +153,63 @@ abbrev _root_.List.definedLabels (p : List (Directive Instr Const)) : List Label
     (p ++ q).definedLabels = p.definedLabels ++ q.definedLabels := by
   simp [Program.definedLabels, List.filterMap_append]
 
-/-- Preprocess a `Program` (`List Directive`) into label-free `CodeDirective`s and a `(label, idx)` table. -/
-def Program.splitLabels : Program Instr Const → SplitProgram Instr Const
-  | [] => ⟨[], []⟩
-  | .label l :: rest =>
-    let sp := splitLabels rest
-    ⟨sp.body, (l, 0) :: sp.labels⟩
-  | .instr i :: rest =>
-    let sp := splitLabels rest
-    ⟨.instr i :: sp.body, sp.labels.map fun (l, idx) => (l, idx + 1)⟩
-  | .byteArray bs :: rest =>
-    let sp := splitLabels rest
-    ⟨.byteArray bs :: sp.body, sp.labels.map fun (l, idx) => (l, idx + 1)⟩
-  | .word n c :: rest =>
-    let sp := splitLabels rest
-    ⟨.word n c :: sp.body, sp.labels.map fun (l, idx) => (l, idx + 1)⟩
-  | .align k ex :: rest =>
-    let sp := splitLabels rest
-    ⟨.align k ex :: sp.body, sp.labels.map fun (l, idx) => (l, idx + 1)⟩
+/-- Remove all `.label` directives from a `Program`. -/
+def Program.stripLabels : Program Instr Const → Program Instr Const
+  | [] => []
+  | .label _ :: rest => stripLabels rest
+  | d :: rest => d :: stripLabels rest
 
-abbrev _root_.List.splitLabels (p : List (Directive Instr Const)) : SplitProgram Instr Const :=
-  Program.splitLabels p
+abbrev _root_.List.stripLabels (p : List (Directive Instr Const)) : Program Instr Const :=
+  Program.stripLabels p
 
-@[simp] theorem Program.splitLabels_nil :
-    Program.splitLabels ([] : Program Instr Const) = ⟨[], []⟩ := rfl
+/-- Extract `(label, idx)` pairs where `idx` is the position in `p.stripLabels`
+(`0 ≤ idx ≤ p.stripLabels.length`). -/
+def Program.extractLabels : Program Instr Const → List (Label × Nat)
+  | [] => []
+  | .label l :: rest => (l, 0) :: extractLabels rest
+  | _ :: rest => (extractLabels rest).map fun (l, idx) => (l, idx + 1)
 
-@[simp] theorem Program.splitLabels_cons_label (l : Label) (rest : Program Instr Const) :
-    Program.splitLabels (.label l :: rest) =
-      ⟨(Program.splitLabels rest).body, (l, 0) :: (Program.splitLabels rest).labels⟩ := rfl
+abbrev _root_.List.extractLabels (p : List (Directive Instr Const)) : List (Label × Nat) :=
+  Program.extractLabels p
 
-@[simp] theorem Program.splitLabels_cons_instr (i : Instr) (rest : Program Instr Const) :
-    Program.splitLabels (.instr i :: rest) =
-      ⟨.instr i :: (Program.splitLabels rest).body,
-       (Program.splitLabels rest).labels.map fun (l, idx) => (l, idx + 1)⟩ := rfl
+@[simp] theorem Program.stripLabels_nil :
+    Program.stripLabels ([] : Program Instr Const) = [] := rfl
 
-@[simp] theorem Program.splitLabels_cons_byteArray (bs : ByteArray) (rest : Program Instr Const) :
-    Program.splitLabels (.byteArray bs :: rest) =
-      ⟨.byteArray bs :: (Program.splitLabels rest).body,
-       (Program.splitLabels rest).labels.map fun (l, idx) => (l, idx + 1)⟩ := rfl
-
-@[simp] theorem Program.splitLabels_cons_word (n : Nat) (c : Const) (rest : Program Instr Const) :
-    Program.splitLabels (.word n c :: rest) =
-      ⟨.word n c :: (Program.splitLabels rest).body,
-       (Program.splitLabels rest).labels.map fun (l, idx) => (l, idx + 1)⟩ := rfl
-
-@[simp] theorem Program.splitLabels_cons_align (k : Nat) (ex : Bool) (rest : Program Instr Const) :
-    Program.splitLabels (.align k ex :: rest) =
-      ⟨.align k ex :: (Program.splitLabels rest).body,
-       (Program.splitLabels rest).labels.map fun (l, idx) => (l, idx + 1)⟩ := rfl
-
-@[simp] theorem Program.splitLabels_body_append (p q : Program Instr Const) :
-    (Program.splitLabels (p ++ q)).body =
-      (Program.splitLabels p).body ++ (Program.splitLabels q).body := by
+@[simp] theorem Program.stripLabels_append (p q : Program Instr Const) :
+    (p ++ q).stripLabels = p.stripLabels ++ q.stripLabels := by
   induction p with
   | nil => rfl
   | cons d rest ih =>
-    cases d <;> simp [ih]
+    cases d <;> simp [Program.stripLabels, ih]
 
-@[simp] theorem Program.splitLabels_labels_append (p q : Program Instr Const) :
-    (Program.splitLabels (p ++ q)).labels =
-      (Program.splitLabels p).labels ++
-      (Program.splitLabels q).labels.map fun (l, idx) => (l, (Program.splitLabels p).body.length + idx) := by
+@[simp] theorem Program.extractLabels_nil :
+    Program.extractLabels ([] : Program Instr Const) = [] := rfl
+
+@[simp] theorem Program.extractLabels_append (p q : Program Instr Const) :
+    (p ++ q).extractLabels =
+      p.extractLabels ++ q.extractLabels.map fun (l, idx) => (l, p.stripLabels.length + idx) := by
   induction p with
   | nil => simp
   | cons d rest ih =>
-    cases d <;> simp [ih, List.map_append, List.map_map, Function.comp_def] <;> omega
+    cases d <;> simp [Program.extractLabels, Program.stripLabels, ih,
+      List.map_append, List.map_map, Function.comp_def] <;> omega
 
 theorem Program.definedLabels_eq_map_fst (p : Program Instr Const) :
-    p.definedLabels = (Program.splitLabels p).labels.map Prod.fst := by
+    p.definedLabels = p.extractLabels.map Prod.fst := by
   induction p with
   | nil => rfl
   | cons d rest ih =>
     cases d with
     | label l =>
-      simp only [Program.definedLabels, List.filterMap_cons, splitLabels_cons_label, List.map_cons]
+      simp only [Program.definedLabels, List.filterMap_cons, Program.extractLabels, List.map_cons]
       exact congrArg (l :: ·) ih
     | instr _ | byteArray _ | word _ _ | align _ _ =>
-      simp only [Program.definedLabels, List.filterMap_cons, splitLabels_cons_instr,
-        splitLabels_cons_byteArray, splitLabels_cons_word, splitLabels_cons_align,
+      simp only [Program.definedLabels, List.filterMap_cons, Program.extractLabels,
         List.map_map, Function.comp_def]
       exact ih
 
-theorem Program.splitLabels_labels_le (p : Program Instr Const) :
-    ∀ x ∈ (Program.splitLabels p).labels, x.2 ≤ (Program.splitLabels p).body.length := by
+theorem Program.extractLabels_le (p : Program Instr Const) :
+    ∀ x ∈ p.extractLabels, x.2 ≤ p.stripLabels.length := by
   induction p with
   | nil => simp
   | cons d rest ih =>
@@ -283,93 +224,73 @@ theorem Program.splitLabels_labels_le (p : Program Instr Const) :
       obtain ⟨y, hy, rfl⟩ := List.mem_map.mp hx
       exact Nat.succ_le_succ (ih y hy)
 
-/-! ## `Items` Address Map & Strict Positivity Invariants -/
+/-! ## Sized Directives Address Map & Strict Positivity Invariants -/
 
-abbrev Items.totalSize (xs : List (SizedItem Instr Const)) : Nat :=
-  (xs.map (·.size)).sum
+abbrev Directives.size (ds : List (Sized (Directive Instr Const))) : Nat :=
+  (ds.map (·.size)).sum
 
-@[simp] theorem Items.totalSize_nil : Items.totalSize ([] : List (SizedItem Instr Const)) = 0 := rfl
+@[simp] theorem Directives.size_nil :
+    Directives.size ([] : List (Sized (Directive Instr Const))) = 0 := rfl
 
-@[simp] theorem Items.totalSize_cons (c : SizedItem Instr Const) (cs : List (SizedItem Instr Const)) :
-    Items.totalSize (c :: cs) = c.size + Items.totalSize cs := rfl
+@[simp] theorem Directives.size_cons (c : Sized (Directive Instr Const))
+    (cs : List (Sized (Directive Instr Const))) :
+    Directives.size (c :: cs) = c.size + Directives.size cs := rfl
 
-@[simp] theorem Items.totalSize_append (xs ys : List (SizedItem Instr Const)) :
-    Items.totalSize (xs ++ ys) = Items.totalSize xs + Items.totalSize ys := by
-  simp [Items.totalSize]
+@[simp] theorem Directives.size_append (xs ys : List (Sized (Directive Instr Const))) :
+    Directives.size (xs ++ ys) = Directives.size xs + Directives.size ys := by
+  simp [Directives.size]
 
 @[grind hom] theorem Int64.toBitVec_ofNat_grind (a : Nat) :
     (Int64.ofNat a).toBitVec = OfNat.ofNat a := by
   rw [Int64.toBitVec_ofNat']; rfl
 
-/-- Pair each emitted `SizedItem` with its resolved 64-bit start address. -/
-def Executable.withAddresses (e : Executable Instr Const) : List (SizedItem Instr Const × Int64) :=
-  go e.startAddr e.items
-where
-  go (a : Int64) : List (SizedItem Instr Const) → List (SizedItem Instr Const × Int64)
-    | [] => []
-    | c :: cs => (c, a) :: go (a + .ofNat c.size) cs
+/-- Pair each sized directive with its resolved 64-bit start address. -/
+def Directives.withAddresses (a : Int64) :
+    List (Sized (Directive Instr Const)) → List (Addressable (Directive Instr Const))
+  | [] => []
+  | c :: cs => { c with addr := a } :: withAddresses (a + .ofNat c.size) cs
 
-@[simp] theorem Executable.withAddresses_nil (a : Int64) (L : Labels) :
-    Executable.withAddresses (Instr := Instr) (Const := Const) ⟨a, [], L⟩ = [] := rfl
-
-@[simp] theorem Executable.withAddresses_cons (a : Int64) (c : SizedItem Instr Const)
-    (cs : List (SizedItem Instr Const)) (L : Labels) :
-    Executable.withAddresses ⟨a, c :: cs, L⟩ =
-      (c, a) :: Executable.withAddresses ⟨a + .ofNat c.size, cs, L⟩ := rfl
-
-theorem Executable.withAddresses_labels_irrel (a : Int64) (xs : List (SizedItem Instr Const)) (L₁ L₂ : Labels) :
-    Executable.withAddresses ⟨a, xs, L₁⟩ = Executable.withAddresses ⟨a, xs, L₂⟩ := rfl
-
-theorem Executable.withAddresses_append (a : Int64) (xs ys : List (SizedItem Instr Const)) (L L₁ L₂ : Labels) :
-    Executable.withAddresses ⟨a, xs ++ ys, L⟩ =
-      Executable.withAddresses ⟨a, xs, L₁⟩ ++
-        Executable.withAddresses ⟨a + .ofNat (Items.totalSize xs), ys, L₂⟩ := by
+theorem Directives.withAddresses_append (a : Int64) (xs ys : List (Sized (Directive Instr Const))) :
+    Directives.withAddresses a (xs ++ ys) =
+      Directives.withAddresses a xs ++
+        Directives.withAddresses (a + .ofNat (Directives.size xs)) ys := by
   induction xs generalizing a with
-  | nil =>
-    simp only [List.nil_append, withAddresses_nil, Items.totalSize_nil, Int64.reduceOfNat, Int64.add_zero]
-    rfl
+  | nil => simp [withAddresses]
   | cons c cs ih =>
-    simp only [List.cons_append, withAddresses_cons, Items.totalSize_cons, Int64.ofNat_add]
+    simp only [List.cons_append, withAddresses, size_cons, Int64.ofNat_add]
     rw [← Int64.add_assoc]
     congr 1
     exact ih (a + .ofNat c.size)
 
-/-- Unique item (if any) starting at address `a`. Because every `SizedItem` has `0 < size`,
-at most one item can occupy address `a` whenever `Items.totalSize e.items < 2 ^ 64`. -/
-def Executable.itemAt? (e : Executable Instr Const) (a : Int64) : Option (SizedItem Instr Const) :=
-  e.withAddresses.findSome? fun (c, addr) => if addr == a then some c else none
-
-/-- All emitted items starting from address `a` onward (for straight-line execution). -/
-def Executable.itemsFromAddress (e : Executable Instr Const) (a : Int64) : List (SizedItem Instr Const) :=
-  (e.withAddresses.dropWhile (·.2 ≠ a)).map Prod.fst
-
-theorem Executable.withAddresses_map_fst (a : Int64) (xs : List (SizedItem Instr Const)) (L : Labels) :
-    (Executable.withAddresses ⟨a, xs, L⟩).map Prod.fst = xs := by
+theorem Directives.withAddresses_map_toSized (a : Int64) (xs : List (Sized (Directive Instr Const))) :
+    (Directives.withAddresses a xs).map (·.toSized) = xs := by
   induction xs generalizing a with
   | nil => rfl
-  | cons c cs ih => simp [ih]
+  | cons c cs ih => simp [withAddresses, ih]
 
-theorem Executable.itemsFromStart (e : Executable Instr Const) :
-    e.itemsFromAddress e.startAddr = e.items := by
-  rcases e with ⟨a, xs, L⟩
-  cases xs with
-  | nil => rfl
-  | cons c cs =>
-    simp [itemsFromAddress, withAddresses_map_fst]
-
-/-- Every entry `(c, addr)` in `withAddresses ⟨a, xs, L⟩` sits at `a + off` with `off < Items.totalSize xs`. -/
-theorem Executable.mem_withAddresses_offset {a : Int64} {xs : List (SizedItem Instr Const)} {L : Labels}
-    {x : SizedItem Instr Const × Int64} (hx : x ∈ Executable.withAddresses ⟨a, xs, L⟩) :
-    ∃ off : Nat, off < Items.totalSize xs ∧ x.2 = a + .ofNat off := by
+/-- Every entry in `Directives.withAddresses a xs` (with strictly positive sizes) sits at `a + off`
+with `off < Directives.size xs`. -/
+theorem Directives.mem_withAddresses_offset {a : Int64} {xs : List (Sized (Directive Instr Const))}
+    (hpos : ∀ c ∈ xs, 0 < c.size)
+    {x : Addressable (Directive Instr Const)} (hx : x ∈ Directives.withAddresses a xs) :
+    ∃ off : Nat, off < Directives.size xs ∧ x.addr = a + .ofNat off := by
   induction xs generalizing a with
-  | nil => simp at hx
+  | nil => simp [withAddresses] at hx
   | cons c cs ih =>
-    simp only [withAddresses_cons, List.mem_cons] at hx
+    simp only [withAddresses, List.mem_cons] at hx
+    have hc : 0 < c.size := hpos c List.mem_cons_self
+    have hcs : ∀ c' ∈ cs, 0 < c'.size := fun c' hc' => hpos c' (List.mem_cons_of_mem _ hc')
     rcases hx with rfl | hx'
-    · exact ⟨0, Nat.lt_of_lt_of_le c.size_pos (Nat.le_add_right _ _), by simp⟩
-    · obtain ⟨off, hoff, haddr⟩ := ih hx'
+    · exact ⟨0, Nat.lt_of_lt_of_le hc (Nat.le_add_right _ _), by simp⟩
+    · obtain ⟨off, hoff, haddr⟩ := ih hcs hx'
       refine ⟨c.size + off, by simp; omega, ?_⟩
       rw [haddr, Int64.ofNat_add, Int64.add_assoc]
+
+/-- Unique directive (if any) starting at address `pc`. Because every entry in an `Executable`
+has `0 < size`, at most one directive occupies `pc` whenever `Directives.size ds < 2 ^ 64`. -/
+def Directives.at? (a : Int64) (ds : List (Sized (Directive Instr Const))) (pc : Int64) :
+    Option (Sized (Directive Instr Const)) :=
+  (Directives.withAddresses a ds).findSome? fun d => if d.addr == pc then some d.toSized else none
 
 private theorem findSome?_eq_some_mem {α β : Type} {f : α → Option β} {xs : List α} {b : β}
     (h : xs.findSome? f = some b) : ∃ x ∈ xs, f x = some b := by
@@ -386,439 +307,208 @@ private theorem findSome?_eq_some_mem {α β : Type} {f : α → Option β} {xs 
       obtain ⟨x, hx, hfx⟩ := ih h
       exact ⟨x, List.mem_cons_of_mem _ hx, hfx⟩
 
-/-- Item lookup is preserved under arbitrary prefix/suffix embedding `Q₁ ++ P ++ Q₂`
-whenever the combined executable fits in 64-bit address space (`< 2 ^ 64`). -/
-theorem Executable.itemAt?_infix (a : Int64) (Q₁ P Q₂ : List (SizedItem Instr Const)) (L₁ L₂ : Labels)
-    (hfit : Items.totalSize (Q₁ ++ P ++ Q₂) < 2 ^ 64)
-    {pc : Int64} {c : SizedItem Instr Const}
-    (h : ({ startAddr := a + .ofNat (Items.totalSize Q₁), items := P, labels := L₁ } :
-        Executable Instr Const).itemAt? pc = some c) :
-    ({ startAddr := a, items := Q₁ ++ P ++ Q₂, labels := L₂ } :
-        Executable Instr Const).itemAt? pc = some c := by
-  dsimp only [Executable.itemAt?] at h ⊢
+/-- Directive lookup is preserved under arbitrary prefix/suffix embedding `Q₁ ++ P ++ Q₂`
+whenever all entries have positive size and the combined size fits in 64-bit address space. -/
+theorem Directives.at?_infix (a : Int64) (Q₁ P Q₂ : List (Sized (Directive Instr Const)))
+    (hpos₁ : ∀ c ∈ Q₁, 0 < c.size) (hposP : ∀ c ∈ P, 0 < c.size)
+    (hfit : Directives.size (Q₁ ++ P ++ Q₂) < 2 ^ 64)
+    {pc : Int64} {c : Sized (Directive Instr Const)}
+    (h : Directives.at? (a + .ofNat (Directives.size Q₁)) P pc = some c) :
+    Directives.at? a (Q₁ ++ P ++ Q₂) pc = some c := by
+  dsimp only [Directives.at?] at h ⊢
   obtain ⟨y, hy_mem, hy_some⟩ := findSome?_eq_some_mem h
-  have hpc_eq : y.2 = pc := by
+  have hpc_eq : y.addr = pc := by
     split at hy_some
     · exact eq_of_beq ‹_›
     · simp at hy_some
-  obtain ⟨off₂, hoff₂, hy_addr⟩ := Executable.mem_withAddresses_offset hy_mem
-  have hQ₁_none : (Executable.withAddresses ⟨a, Q₁, L₂⟩).findSome?
-      (fun (x : SizedItem Instr Const × Int64) => if x.2 == pc then some x.1 else none) = none := by
+  obtain ⟨off₂, hoff₂, hy_addr⟩ := Directives.mem_withAddresses_offset hposP hy_mem
+  have hQ₁_none : (Directives.withAddresses a Q₁).findSome?
+      (fun d => if d.addr == pc then some d.toSized else none) = none := by
     rw [List.findSome?_eq_none_iff]
     intro x hx
-    obtain ⟨off₁, hoff₁, hx_addr⟩ := Executable.mem_withAddresses_offset hx
-    have hne : x.2 ≠ pc := by
+    obtain ⟨off₁, hoff₁, hx_addr⟩ := Directives.mem_withAddresses_offset hpos₁ hx
+    have hne : x.addr ≠ pc := by
       intro heq
-      have h1 : a + .ofNat off₁ = a + .ofNat (Items.totalSize Q₁ + off₂) := by
+      have h1 : a + .ofNat off₁ = a + .ofNat (Directives.size Q₁ + off₂) := by
         rw [← hx_addr, heq, ← hpc_eq, hy_addr, Int64.ofNat_add, Int64.add_assoc]
       have h2 := congrArg Int64.toBitVec h1
       simp only [Int64.toBitVec_add, Int64.toBitVec_ofNat_grind] at h2
-      simp only [Items.totalSize_append] at hfit
+      simp only [Directives.size_append] at hfit
       bv_omega
     simp [hne]
   rw [List.append_assoc,
-    Executable.withAddresses_append a Q₁ (P ++ Q₂) L₂ L₂ L₂,
-    Executable.withAddresses_append (a + .ofNat (Items.totalSize Q₁)) P Q₂ L₂ L₁ L₂,
+    Directives.withAddresses_append a Q₁ (P ++ Q₂),
+    Directives.withAddresses_append (a + .ofNat (Directives.size Q₁)) P Q₂,
     List.findSome?_append, List.findSome?_append, hQ₁_none, h]
   rfl
 
-/-! ## Layout of `CodeDirective` & `Program` -/
+def Executable.withAddresses (e : Executable Instr Const) : List (Addressable (Directive Instr Const)) :=
+  Directives.withAddresses e.startAddr e.program
 
-/-- Legacy size helper kept for `⸨dir n | ... ⸩` syntax compatibility. -/
-def Layout.size [l : Layout Instr Const] : Directive Instr Const → Nat → Nat
-  | .instr _, idx => l.instrSize idx
-  | .label _, _ => 0
-  | .byteArray arr, _ => arr.size
-  | .word bytes _, _ => bytes
-  | .align k _, _ => alignPad l.start k
+def Executable.directiveAt? (e : Executable Instr Const) (pc : Int64) :
+    Option (Sized (Directive Instr Const)) :=
+  Directives.at? e.startAddr e.program pc
 
-/-- Size in bytes of a `CodeDirective` placed at `(addr, idx)` under layout `l`. -/
-def Layout.codeDirSize (l : Layout Instr Const) (addr : Int64) (idx : Nat) :
-    CodeDirective Instr Const → Nat
+def Executable.directivesFromAddress (e : Executable Instr Const) (a : Int64) :
+    List (Sized (Directive Instr Const)) :=
+  (e.withAddresses.dropWhile (·.addr ≠ a)).map (·.toSized)
+
+theorem Executable.directivesFromStart (e : Executable Instr Const) :
+    e.directivesFromAddress e.startAddr = e.program := by
+  rcases e with ⟨a, xs, L, hpos⟩
+  cases xs with
+  | nil => rfl
+  | cons c cs =>
+    simp [directivesFromAddress, withAddresses, Directives.withAddresses,
+      Directives.withAddresses_map_toSized]
+
+/-! ## Layout of `Program` -/
+
+/-- Size in bytes of a `Directive` placed at `(addr, idx)` under layout `l`. -/
+def Layout.dirSize (l : Layout Instr Const) (addr : Int64) (idx : Nat) :
+    Directive Instr Const → Nat
   | .instr _ => l.instrSize idx
+  | .label _ => 0
   | .byteArray arr => arr.size
   | .word bytes _ => bytes
   | .align log2Align _ => alignPad addr log2Align
 
-/-- Emit strictly positive-size `SizedItem`s for `body`, threading `(addr, idx)` left-to-right.
-Notice `.instr` emits directly with zero `dite` wrappers, keeping concrete straight-line layout fast. -/
-def Layout.layoutBodyGo (l : Layout Instr Const) (addr : Int64) (idx : Nat) :
-    List (CodeDirective Instr Const) → List (SizedItem Instr Const)
+/-- Legacy size helper kept for `⸨dir n | ... ⸩` syntax compatibility. -/
+abbrev Layout.size [l : Layout Instr Const] (d : Directive Instr Const) (idx : Nat) : Nat :=
+  l.dirSize l.start idx d
+
+/-- Emit strictly positive-size `Sized (Directive Instr Const)` entries, threading `(addr, idx)`
+left-to-right. `.instr` emits directly with zero `ite` wrappers, keeping straight-line layout fast. -/
+def Layout.layoutGo (l : Layout Instr Const) (addr : Int64) (idx : Nat) :
+    Program Instr Const → List (Sized (Directive Instr Const))
   | [] => []
   | .instr i :: rest =>
     let sz := l.instrSize idx
-    ⟨.instr i, sz, l.instrSize_pos idx⟩ :: l.layoutBodyGo (addr + .ofNat sz) (idx + 1) rest
-  | .byteArray bs :: rest =>
-    if h : 0 < bs.size then
-      ⟨.byteArray bs, bs.size, h⟩ :: l.layoutBodyGo (addr + .ofNat bs.size) (idx + 1) rest
+    { directive := .instr i, size := sz } :: l.layoutGo (addr + .ofNat sz) (idx + 1) rest
+  | d :: rest =>
+    let sz := l.dirSize addr idx d
+    if 0 < sz then
+      { directive := d, size := sz } :: l.layoutGo (addr + .ofNat sz) (idx + 1) rest
     else
-      l.layoutBodyGo addr (idx + 1) rest
-  | .word n c :: rest =>
-    if h : 0 < n then
-      ⟨.word n c, n, h⟩ :: l.layoutBodyGo (addr + .ofNat n) (idx + 1) rest
-    else
-      l.layoutBodyGo addr (idx + 1) rest
-  | .align k ex :: rest =>
-    let sz := alignPad addr k
-    if h : 0 < sz then
-      ⟨.alignPad ex, sz, h⟩ :: l.layoutBodyGo (addr + .ofNat sz) (idx + 1) rest
-    else
-      l.layoutBodyGo addr (idx + 1) rest
+      l.layoutGo addr (idx + 1) rest
 
-def Layout.layoutBody (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) :
-    List (SizedItem Instr Const) :=
-  l.layoutBodyGo l.start 0 body
+/-- Total byte size of `p` under layout `l`. -/
+def Layout.totalSize (l : Layout Instr Const) (p : Program Instr Const) : Nat :=
+  Directives.size (l.layoutGo l.start 0 p.stripLabels)
 
-/-- Byte offset of the `k`-th `CodeDirective` relative to `addr` starting at instruction index `idx`. -/
-def Layout.sizeBeforeBodyGo (l : Layout Instr Const) (addr : Int64) (idx : Nat) :
-    List (CodeDirective Instr Const) → Nat → Nat
-  | _, 0 => 0
-  | [], _ + 1 => 0
-  | cd :: rest, k + 1 =>
-    let sz := l.codeDirSize addr idx cd
-    sz + l.sizeBeforeBodyGo (addr + .ofNat sz) (idx + 1) rest k
-
-def Layout.sizeBeforeBody (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) (k : Nat) : Nat :=
-  l.sizeBeforeBodyGo l.start 0 body k
-
-def Layout.totalSizeBody (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) : Nat :=
-  l.sizeBeforeBody body body.length
-
-def Layout.addrOfBody (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) (k : Nat) : Int64 :=
-  l.start + .ofNat (l.sizeBeforeBody body k)
-
-/-- Layout shifted past `body`. -/
-@[instance_reducible]
-def Layout.afterBody (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) : Layout Instr Const where
-  start := l.start + .ofNat (l.totalSizeBody body)
-  instrSize i := l.instrSize (i + body.length)
-  instrSize_pos i := l.instrSize_pos (i + body.length)
-
-@[simp] theorem Layout.start_afterBody (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) :
-    @Layout.start _ _ (l.afterBody body) = l.start + .ofNat (l.totalSizeBody body) := rfl
-
-@[simp] theorem Layout.instrSize_afterBody (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) (i : Nat) :
-    @Layout.instrSize _ _ (l.afterBody body) i = l.instrSize (i + body.length) := rfl
+/-- Resolved 64-bit address of the `k`-th non-label directive (`p.stripLabels[k]?`). -/
+def Layout.addrOf (l : Layout Instr Const) (p : Program Instr Const) (k : Nat) : Int64 :=
+  l.start + .ofNat (Directives.size (l.layoutGo l.start 0 (p.stripLabels.take k)))
 
 /-- Shift layout `l` by an arbitrary `(addr, idx)` offset. -/
 @[instance_reducible]
-private def Layout.shift (l : Layout Instr Const) (addr : Int64) (idx : Nat) : Layout Instr Const where
+def Layout.shift (l : Layout Instr Const) (addr : Int64) (idx : Nat) : Layout Instr Const where
   start := addr
   instrSize i := l.instrSize (i + idx)
   instrSize_pos i := l.instrSize_pos (i + idx)
 
-@[simp] private theorem Layout.instrSize_shift (l : Layout Instr Const) (a : Int64) (idx i : Nat) :
+@[simp] theorem Layout.instrSize_shift (l : Layout Instr Const) (a : Int64) (idx i : Nat) :
     @Layout.instrSize _ _ (l.shift a idx) i = l.instrSize (i + idx) := rfl
-
-private theorem Layout.codeDirSize_shift (l : Layout Instr Const) (a a' : Int64) (idx i : Nat)
-    (cd : CodeDirective Instr Const) :
-    (l.shift a idx).codeDirSize a' i cd = l.codeDirSize a' (i + idx) cd := by
-  cases cd <;> rfl
-
-private theorem Layout.layoutBodyGo_shift (l : Layout Instr Const) (a a' : Int64) (idx i : Nat)
-    (body : List (CodeDirective Instr Const)) :
-    (l.shift a idx).layoutBodyGo a' i body = l.layoutBodyGo a' (i + idx) body := by
-  induction body generalizing a' i with
-  | nil => rfl
-  | cons cd rest ih =>
-    cases cd with
-    | instr ins =>
-      simp only [layoutBodyGo, instrSize_shift]
-      congr 1
-      simpa [Nat.succ_add] using ih (a' + .ofNat (l.instrSize (i + idx))) (i + 1)
-    | byteArray bs =>
-      simp only [layoutBodyGo]
-      split
-      · congr 1; simpa [Nat.succ_add] using ih (a' + .ofNat bs.size) (i + 1)
-      · simpa [Nat.succ_add] using ih a' (i + 1)
-    | word n c =>
-      simp only [layoutBodyGo]
-      split
-      · congr 1; simpa [Nat.succ_add] using ih (a' + .ofNat n) (i + 1)
-      · simpa [Nat.succ_add] using ih a' (i + 1)
-    | align k ex =>
-      simp only [layoutBodyGo]
-      split
-      · congr 1; simpa [Nat.succ_add] using ih (a' + .ofNat (alignPad a' k)) (i + 1)
-      · simpa [Nat.succ_add] using ih a' (i + 1)
-
-private theorem Layout.sizeBeforeBodyGo_shift (l : Layout Instr Const) (a a' : Int64) (idx i : Nat)
-    (body : List (CodeDirective Instr Const)) (k : Nat) :
-    (l.shift a idx).sizeBeforeBodyGo a' i body k = l.sizeBeforeBodyGo a' (i + idx) body k := by
-  induction body generalizing a' i k with
-  | nil => cases k <;> rfl
-  | cons cd rest ih =>
-    cases k with
-    | zero => rfl
-    | succ k =>
-      simp only [sizeBeforeBodyGo, codeDirSize_shift]
-      congr 1
-      simpa [Nat.succ_add] using ih (a' + .ofNat (l.codeDirSize a' (i + idx) cd)) (i + 1) k
-
-theorem Layout.items_totalSize_layoutBodyGo (l : Layout Instr Const) (addr : Int64) (idx : Nat)
-    (body : List (CodeDirective Instr Const)) :
-    Items.totalSize (l.layoutBodyGo addr idx body) = l.sizeBeforeBodyGo addr idx body body.length := by
-  induction body generalizing addr idx with
-  | nil => rfl
-  | cons cd rest ih =>
-    cases cd with
-    | instr i =>
-      simp only [layoutBodyGo, List.length_cons, sizeBeforeBodyGo, codeDirSize, Items.totalSize_cons]
-      rw [ih]
-    | byteArray bs =>
-      simp only [layoutBodyGo, List.length_cons, sizeBeforeBodyGo, codeDirSize]
-      split
-      · simp only [Items.totalSize_cons]; rw [ih]
-      · rename_i h
-        have h0 : bs.size = 0 := by omega
-        simp [h0, ih]
-    | word n c =>
-      simp only [layoutBodyGo, List.length_cons, sizeBeforeBodyGo, codeDirSize]
-      split
-      · simp only [Items.totalSize_cons]; rw [ih]
-      · rename_i h
-        have h0 : n = 0 := by omega
-        simp [h0, ih]
-    | align k ex =>
-      simp only [layoutBodyGo, List.length_cons, sizeBeforeBodyGo, codeDirSize]
-      split
-      · simp only [Items.totalSize_cons]; rw [ih]
-      · rename_i h
-        have h0 : alignPad addr k = 0 := by omega
-        simp [h0, ih]
-
-theorem Layout.items_totalSize_layoutBody (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) :
-    Items.totalSize (l.layoutBody body) = l.totalSizeBody body :=
-  l.items_totalSize_layoutBodyGo l.start 0 body
-
-private theorem Layout.layoutBodyGo_append (l : Layout Instr Const) (addr : Int64) (idx : Nat)
-    (b₁ b₂ : List (CodeDirective Instr Const)) :
-    l.layoutBodyGo addr idx (b₁ ++ b₂) =
-      l.layoutBodyGo addr idx b₁ ++
-        l.layoutBodyGo (addr + .ofNat (l.sizeBeforeBodyGo addr idx b₁ b₁.length)) (idx + b₁.length) b₂ := by
-  induction b₁ generalizing addr idx with
-  | nil => simp [layoutBodyGo, sizeBeforeBodyGo]
-  | cons cd rest ih =>
-    have hstep (sz : Nat) :
-        addr + .ofNat sz + .ofNat (l.sizeBeforeBodyGo (addr + .ofNat sz) (idx + 1) rest rest.length) =
-          addr + .ofNat (sz + l.sizeBeforeBodyGo (addr + .ofNat sz) (idx + 1) rest rest.length) := by
-      rw [Int64.ofNat_add, Int64.add_assoc]
-    have hidx : idx + 1 + rest.length = idx + (rest.length + 1) := by omega
-    cases cd with
-    | instr i =>
-      simp only [List.cons_append, layoutBodyGo, List.length_cons, sizeBeforeBodyGo, codeDirSize]
-      congr 1
-      rw [ih, hstep, hidx]
-    | byteArray bs =>
-      simp only [List.cons_append, layoutBodyGo, List.length_cons, sizeBeforeBodyGo, codeDirSize]
-      split
-      · simp only [List.cons_append]; congr 1; rw [ih, hstep, hidx]
-      · rename_i h
-        have h0 : bs.size = 0 := by omega
-        simp only [h0, Int64.reduceOfNat, Int64.add_zero, Nat.zero_add]
-        rw [ih, hidx]
-    | word n c =>
-      simp only [List.cons_append, layoutBodyGo, List.length_cons, sizeBeforeBodyGo, codeDirSize]
-      split
-      · simp only [List.cons_append]; congr 1; rw [ih, hstep, hidx]
-      · rename_i h
-        have h0 : n = 0 := by omega
-        simp only [h0, Int64.reduceOfNat, Int64.add_zero, Nat.zero_add]
-        rw [ih, hidx]
-    | align k ex =>
-      simp only [List.cons_append, layoutBodyGo, List.length_cons, sizeBeforeBodyGo, codeDirSize]
-      split
-      · simp only [List.cons_append]; congr 1; rw [ih, hstep, hidx]
-      · rename_i h
-        have h0 : alignPad addr k = 0 := by omega
-        simp only [h0, Int64.reduceOfNat, Int64.add_zero, Nat.zero_add]
-        rw [ih, hidx]
-
-theorem Layout.layoutBody_append (l : Layout Instr Const) (b₁ b₂ : List (CodeDirective Instr Const)) :
-    l.layoutBody (b₁ ++ b₂) = l.layoutBody b₁ ++ (l.afterBody b₁).layoutBody b₂ := by
-  dsimp only [layoutBody]
-  rw [layoutBodyGo_append, start_afterBody]
-  congr 1
-  exact (l.layoutBodyGo_shift (l.start + .ofNat (l.totalSizeBody b₁))
-    (l.start + .ofNat (l.totalSizeBody b₁)) b₁.length 0 b₂).symm
-
-private theorem Layout.sizeBeforeBodyGo_append_left (l : Layout Instr Const) (addr : Int64) (idx : Nat)
-    (b₁ b₂ : List (CodeDirective Instr Const)) {k : Nat} (hk : k ≤ b₁.length) :
-    l.sizeBeforeBodyGo addr idx (b₁ ++ b₂) k = l.sizeBeforeBodyGo addr idx b₁ k := by
-  induction b₁ generalizing addr idx k with
-  | nil =>
-    have hk0 : k = 0 := Nat.eq_zero_of_le_zero hk
-    subst hk0; rfl
-  | cons cd rest ih =>
-    cases k with
-    | zero => rfl
-    | succ k =>
-      simp only [List.cons_append, sizeBeforeBodyGo]
-      congr 1
-      exact ih _ (idx + 1) (Nat.le_of_succ_le_succ hk)
-
-private theorem Layout.sizeBeforeBodyGo_append_right (l : Layout Instr Const) (addr : Int64) (idx : Nat)
-    (b₁ b₂ : List (CodeDirective Instr Const)) (k : Nat) :
-    l.sizeBeforeBodyGo addr idx (b₁ ++ b₂) (b₁.length + k) =
-      l.sizeBeforeBodyGo addr idx b₁ b₁.length +
-        l.sizeBeforeBodyGo (addr + .ofNat (l.sizeBeforeBodyGo addr idx b₁ b₁.length)) (idx + b₁.length) b₂ k := by
-  induction b₁ generalizing addr idx with
-  | nil => simp [sizeBeforeBodyGo]
-  | cons cd rest ih =>
-    simp only [List.cons_append, List.length_cons, Nat.succ_add, sizeBeforeBodyGo]
-    rw [ih, Int64.ofNat_add, Int64.add_assoc]
-    have hidx : idx + 1 + rest.length = idx + (rest.length + 1) := by omega
-    rw [hidx, Nat.add_assoc]
-
-theorem Layout.sizeBeforeBody_append_left (l : Layout Instr Const)
-    (b₁ b₂ : List (CodeDirective Instr Const)) {k : Nat} (hk : k ≤ b₁.length) :
-    l.sizeBeforeBody (b₁ ++ b₂) k = l.sizeBeforeBody b₁ k :=
-  l.sizeBeforeBodyGo_append_left l.start 0 b₁ b₂ hk
-
-theorem Layout.sizeBeforeBody_append_right (l : Layout Instr Const)
-    (b₁ b₂ : List (CodeDirective Instr Const)) (k : Nat) :
-    l.sizeBeforeBody (b₁ ++ b₂) (b₁.length + k) =
-      l.totalSizeBody b₁ + (l.afterBody b₁).sizeBeforeBody b₂ k := by
-  dsimp only [sizeBeforeBody]
-  rw [sizeBeforeBodyGo_append_right, start_afterBody]
-  congr 1
-  exact (l.sizeBeforeBodyGo_shift (l.start + .ofNat (l.totalSizeBody b₁))
-    (l.start + .ofNat (l.totalSizeBody b₁)) b₁.length 0 b₂ k).symm
-
-theorem Layout.totalSizeBody_append (l : Layout Instr Const) (b₁ b₂ : List (CodeDirective Instr Const)) :
-    l.totalSizeBody (b₁ ++ b₂) = l.totalSizeBody b₁ + (l.afterBody b₁).totalSizeBody b₂ := by
-  simpa only [totalSizeBody, List.length_append] using l.sizeBeforeBody_append_right b₁ b₂ b₂.length
-
-@[simp] theorem Layout.addrOfBody_zero (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) :
-    l.addrOfBody body 0 = l.start := by
-  simp [addrOfBody, sizeBeforeBody, sizeBeforeBodyGo]
-
-@[simp] theorem Layout.addrOfBody_length (l : Layout Instr Const) (body : List (CodeDirective Instr Const)) :
-    l.addrOfBody body body.length = @Layout.start _ _ (l.afterBody body) := rfl
-
-theorem Layout.addrOfBody_infix (l : Layout Instr Const)
-    (b₁ b b₂ : List (CodeDirective Instr Const)) {k : Nat} (hk : k ≤ b.length) :
-    l.addrOfBody (b₁ ++ b ++ b₂) (b₁.length + k) = (l.afterBody b₁).addrOfBody b k := by
-  rw [List.append_assoc]
-  unfold addrOfBody
-  rw [l.sizeBeforeBody_append_right b₁ (b ++ b₂) k,
-    (l.afterBody b₁).sizeBeforeBody_append_left b b₂ hk,
-    Int64.ofNat_add, ← Int64.add_assoc]
-  rfl
-
-theorem Layout.addrOfBody_succ (l : Layout Instr Const) (body : List (CodeDirective Instr Const))
-    {k : Nat} {cd : CodeDirective Instr Const} (hcd : body[k]? = some cd) :
-    l.addrOfBody body (k + 1) =
-      l.addrOfBody body k + .ofNat (l.codeDirSize (l.addrOfBody body k) k cd) := by
-  have hlt : k < body.length := (List.getElem?_eq_some_iff.mp hcd).1
-  have hsplit : body = body.take k ++ [cd] ++ body.drop (k + 1) := by
-    rw [List.append_assoc, List.singleton_append]
-    have hdrop : body.drop k = cd :: body.drop (k + 1) := by
-      rw [List.drop_eq_getElem_cons hlt]
-      simp [(List.getElem?_eq_some_iff.mp hcd).2]
-    rw [← hdrop, List.take_append_drop]
-  have hlen : (body.take k).length = k := List.length_take_of_le (Nat.le_of_lt hlt)
-  have ha_k : l.addrOfBody body k = @Layout.start _ _ (l.afterBody (body.take k)) := by
-    conv => lhs; rw [hsplit]
-    have h0 := l.addrOfBody_infix (body.take k) [cd] (body.drop (k + 1)) (k := 0) (Nat.zero_le _)
-    simpa [hlen] using h0
-  have ha_k1 : l.addrOfBody body (k + 1) = (l.afterBody (body.take k)).addrOfBody [cd] 1 := by
-    conv => lhs; rw [hsplit]
-    have h1 := l.addrOfBody_infix (body.take k) [cd] (body.drop (k + 1)) (k := 1) (Nat.le_refl 1)
-    simpa [hlen] using h1
-  rw [ha_k1, ha_k]
-  simp only [addrOfBody, sizeBeforeBody, sizeBeforeBodyGo, Nat.add_zero, start_afterBody]
-  congr 2
-  cases cd <;> simp [codeDirSize, instrSize_afterBody, hlen]
-
-/-- After stepping past `.align log2Align`, the resulting address is aligned to `2 ^ log2Align` bytes. -/
-theorem Layout.addrOfBody_align (l : Layout Instr Const) (body : List (CodeDirective Instr Const))
-    {k log2Align : Nat} {ex : Bool} (hcd : body[k]? = some (.align log2Align ex))
-    (hle : log2Align ≤ 64) :
-    (l.addrOfBody body (k + 1)).toUInt64.toNat % 2 ^ log2Align = 0 := by
-  rw [l.addrOfBody_succ body hcd]
-  exact alignPad_aligned (l.addrOfBody body k) hle
-
-/-- Single-item lookup in a laid-out body whenever the `k`-th `CodeDirective` has positive size. -/
-theorem Layout.itemAt?_addrOfBody (l : Layout Instr Const) (body : List (CodeDirective Instr Const))
-    (L : Labels) (hfit : l.totalSizeBody body < 2 ^ 64)
-    {k : Nat} {cd : CodeDirective Instr Const} (hcd : body[k]? = some cd)
-    (hpos : 0 < l.codeDirSize (l.addrOfBody body k) k cd) :
-    ({ startAddr := l.start, items := l.layoutBody body, labels := L } :
-        Executable Instr Const).itemAt? (l.addrOfBody body k) =
-      some ⟨cd.toItem, l.codeDirSize (l.addrOfBody body k) k cd, hpos⟩ := by
-  have hlt : k < body.length := (List.getElem?_eq_some_iff.mp hcd).1
-  have hsplit : body = body.take k ++ [cd] ++ body.drop (k + 1) := by
-    rw [List.append_assoc, List.singleton_append]
-    have hdrop : body.drop k = cd :: body.drop (k + 1) := by
-      rw [List.drop_eq_getElem_cons hlt]
-      simp [(List.getElem?_eq_some_iff.mp hcd).2]
-    rw [← hdrop, List.take_append_drop]
-  have hlen : (body.take k).length = k := List.length_take_of_le (Nat.le_of_lt hlt)
-  have ha_k : l.addrOfBody body k = l.start + .ofNat (Items.totalSize (l.layoutBody (body.take k))) := by
-    rw [l.items_totalSize_layoutBody]
-    conv => lhs; rw [hsplit]
-    have h0 := l.addrOfBody_infix (body.take k) [cd] (body.drop (k + 1)) (k := 0) (Nat.zero_le _)
-    simpa [hlen, afterBody] using h0
-  have hlayout_split : l.layoutBody body =
-      l.layoutBody (body.take k) ++
-        (l.afterBody (body.take k)).layoutBody [cd] ++
-        (l.afterBody (body.take k ++ [cd])).layoutBody (body.drop (k + 1)) := by
-    conv => lhs; rw [hsplit]
-    rw [l.layoutBody_append, l.layoutBody_append]
-  have hfit_items : Items.totalSize
-      (l.layoutBody (body.take k) ++
-        (l.afterBody (body.take k)).layoutBody [cd] ++
-        (l.afterBody (body.take k ++ [cd])).layoutBody (body.drop (k + 1))) < 2 ^ 64 := by
-    rw [← hlayout_split, l.items_totalSize_layoutBody]
-    exact hfit
-  have hcd_eq : (l.afterBody (body.take k)).layoutBody [cd] =
-      [⟨cd.toItem, l.codeDirSize (l.addrOfBody body k) k cd, hpos⟩] := by
-    have hstart : @Layout.start _ _ (l.afterBody (body.take k)) = l.addrOfBody body k := by
-      rw [ha_k, l.items_totalSize_layoutBody]; rfl
-    cases cd with
-    | instr i =>
-      simp only [layoutBody, layoutBodyGo, codeDirSize, CodeDirective.toItem, instrSize_afterBody,
-        hlen, Nat.zero_add]
-    | byteArray bs =>
-      simp only [layoutBody, layoutBodyGo, codeDirSize, CodeDirective.toItem] at hpos ⊢
-      simp [hpos]
-    | word n c =>
-      simp only [layoutBody, layoutBodyGo, codeDirSize, CodeDirective.toItem] at hpos ⊢
-      simp [hpos]
-    | align m ex =>
-      simp only [layoutBody, layoutBodyGo, codeDirSize, CodeDirective.toItem, hstart] at hpos ⊢
-      simp [hpos]
-  rw [hlayout_split]
-  refine Executable.itemAt?_infix l.start
-    (l.layoutBody (body.take k))
-    ((l.afterBody (body.take k)).layoutBody [cd])
-    ((l.afterBody (body.take k ++ [cd])).layoutBody (body.drop (k + 1)))
-    L L hfit_items ?_
-  rw [← ha_k, hcd_eq]
-  simp [Executable.itemAt?]
-
-/-! ## Program-Level Layout API (`Layout.apply`, `Layout.addrOf`, `Layout.after`, `Layout.labelsOf`) -/
-
-def Layout.totalSize (l : Layout Instr Const) (p : Program Instr Const) : Nat :=
-  l.totalSizeBody p.splitLabels.body
-
-def Layout.addrOf (l : Layout Instr Const) (p : Program Instr Const) (k : Nat) : Int64 :=
-  l.addrOfBody p.splitLabels.body k
 
 /-- Layout shifted past program `p`. -/
 @[instance_reducible]
 def Layout.after (l : Layout Instr Const) (p : Program Instr Const) : Layout Instr Const :=
-  l.afterBody p.splitLabels.body
+  l.shift (l.start + .ofNat (l.totalSize p)) p.stripLabels.length
 
-/-- Label map of a `SplitProgram` resolved directly via `List.lookup` + `addrOfBody`. -/
-def Layout.labelsOf (l : Layout Instr Const) (sp : SplitProgram Instr Const) : Labels :=
-  { label? lbl := (sp.labels.lookup lbl).map (l.addrOfBody sp.body) }
+@[simp] theorem Layout.start_after (l : Layout Instr Const) (p : Program Instr Const) :
+    @Layout.start _ _ (l.after p) = l.start + .ofNat (l.totalSize p) := rfl
 
-/-- Lay out a `Program` into an `Executable` (stripping `.label` and zero-size items). -/
+@[simp] theorem Layout.instrSize_after (l : Layout Instr Const) (p : Program Instr Const) (i : Nat) :
+    @Layout.instrSize _ _ (l.after p) i = l.instrSize (i + p.stripLabels.length) := rfl
+
+private theorem Layout.dirSize_shift (l : Layout Instr Const) (a a' : Int64) (idx i : Nat)
+    (d : Directive Instr Const) :
+    (l.shift a idx).dirSize a' i d = l.dirSize a' (i + idx) d := by
+  cases d <;> rfl
+
+theorem Layout.layoutGo_pos (l : Layout Instr Const) (addr : Int64) (idx : Nat)
+    (p : Program Instr Const) :
+    ∀ c ∈ l.layoutGo addr idx p, 0 < c.size := by
+  induction p generalizing addr idx with
+  | nil => simp [layoutGo]
+  | cons d rest ih =>
+    cases d with
+    | instr i =>
+      intro c hc
+      simp only [layoutGo, List.mem_cons] at hc
+      rcases hc with rfl | hc'
+      · exact l.instrSize_pos idx
+      · exact ih _ _ c hc'
+    | label _ | byteArray _ | word _ _ | align _ _ =>
+      intro c hc
+      simp only [layoutGo] at hc
+      split at hc
+      · rcases List.mem_cons.mp hc with rfl | hc'
+        · assumption
+        · exact ih _ _ c hc'
+      · exact ih _ _ c hc
+
+private theorem Layout.layoutGo_shift (l : Layout Instr Const) (a a' : Int64) (idx i : Nat)
+    (p : Program Instr Const) :
+    (l.shift a idx).layoutGo a' i p = l.layoutGo a' (i + idx) p := by
+  induction p generalizing a' i with
+  | nil => rfl
+  | cons d rest ih =>
+    cases d with
+    | instr ins =>
+      simp only [layoutGo, instrSize_shift]
+      congr 1
+      simpa [Nat.succ_add] using ih (a' + .ofNat (l.instrSize (i + idx))) (i + 1)
+    | label _ | byteArray _ | word _ _ | align _ _ =>
+      simp only [layoutGo, dirSize_shift]
+      split
+      · congr 1
+        simpa [Nat.succ_add] using ih _ (i + 1)
+      · simpa [Nat.succ_add] using ih a' (i + 1)
+
+private theorem Layout.layoutGo_singleton_size (l : Layout Instr Const) (addr : Int64) (idx : Nat)
+    (d : Directive Instr Const) :
+    Directives.size (l.layoutGo addr idx [d]) = l.dirSize addr idx d := by
+  cases d with
+  | instr i => simp [layoutGo, dirSize]
+  | label _ | byteArray _ | word _ _ | align _ _ =>
+    simp only [layoutGo]
+    split
+    · simp
+    · simp only [Directives.size, List.map_nil, List.sum_nil]; omega
+
+private theorem Layout.layoutGo_append (l : Layout Instr Const) (addr : Int64) (idx : Nat)
+    (p q : Program Instr Const) :
+    l.layoutGo addr idx (p ++ q) =
+      l.layoutGo addr idx p ++
+        l.layoutGo (addr + .ofNat (Directives.size (l.layoutGo addr idx p))) (idx + p.length) q := by
+  induction p generalizing addr idx with
+  | nil => simp [layoutGo]
+  | cons d rest ih =>
+    have hidx : idx + 1 + rest.length = idx + (rest.length + 1) := by omega
+    have hstep (sz : Nat) (xs : List (Sized (Directive Instr Const))) :
+        addr + .ofNat sz + .ofNat (Directives.size xs) =
+          addr + .ofNat (sz + Directives.size xs) := by
+      rw [Int64.ofNat_add, Int64.add_assoc]
+    cases d with
+    | instr i =>
+      simp only [List.cons_append, layoutGo, List.length_cons, Directives.size_cons]
+      congr 1
+      rw [ih, hstep, hidx]
+    | label _ | byteArray _ | word _ _ | align _ _ =>
+      simp only [List.cons_append, layoutGo, List.length_cons]
+      split
+      · simp only [List.cons_append, Directives.size_cons]
+        congr 1
+        rw [ih, hstep, hidx]
+      · rw [ih, hidx]
+
+/-- Lay out a `Program` into an `Executable` (stripping `.label` and zero-size directives). -/
 def Layout.apply (l : Layout Instr Const) (p : Program Instr Const) : Executable Instr Const :=
-  let sp := p.splitLabels
-  { startAddr := l.start, items := l.layoutBody sp.body, labels := l.labelsOf sp }
+  { startAddr := l.start
+    program := l.layoutGo l.start 0 p.stripLabels
+    labels := { label? lbl := (p.extractLabels.lookup lbl).map (l.addrOf p) }
+    program_pos := l.layoutGo_pos l.start 0 p.stripLabels }
 
 -- NOTE: We write `List (Kraken.Directive Instr Const)` here, and not `Kraken.Program Instr Const`,
 -- so Lean's typeclass synthesis matches architecture-specific `Program := List Directive`.
@@ -828,33 +518,35 @@ instance : CoeFun (Layout Instr Const) (fun _ => List (Directive Instr Const) �
 @[simp] theorem Layout.apply_startAddr (l : Layout Instr Const) (p : Program Instr Const) :
     (l p).startAddr = l.start := rfl
 
-theorem Layout.itemsFromStart [l : Layout Instr Const] (p : Program Instr Const) :
-    (l p).itemsFromAddress l.start = l.layoutBody p.splitLabels.body :=
-  Executable.itemsFromStart (l p)
+@[simp] theorem Layout.directives_size_apply (l : Layout Instr Const) (p : Program Instr Const) :
+    Directives.size (l p).program = l.totalSize p := rfl
 
-@[simp] theorem Layout.items_totalSize_apply (l : Layout Instr Const) (p : Program Instr Const) :
-    Items.totalSize (l p).items = l.totalSize p :=
-  l.items_totalSize_layoutBody p.splitLabels.body
+theorem Layout.directivesFromStart [l : Layout Instr Const] (p : Program Instr Const) :
+    (l p).directivesFromAddress l.start = l.layoutGo l.start 0 p.stripLabels :=
+  Executable.directivesFromStart (l p)
 
-theorem Layout.apply_items_append (l : Layout Instr Const) (p q : Program Instr Const) :
-    (l (p ++ q)).items = (l p).items ++ ((l.after p) q).items := by
-  simp only [Layout.apply, Program.splitLabels_body_append, Layout.after]
-  exact l.layoutBody_append p.splitLabels.body q.splitLabels.body
+theorem Layout.apply_program_append (l : Layout Instr Const) (p q : Program Instr Const) :
+    (l (p ++ q)).program = (l p).program ++ ((l.after p) q).program := by
+  dsimp only [Layout.apply]
+  rw [Program.stripLabels_append, l.layoutGo_append, start_after]
+  congr 1
+  exact (l.layoutGo_shift (l.start + .ofNat (l.totalSize p))
+    (l.start + .ofNat (l.totalSize p)) p.stripLabels.length 0 q.stripLabels).symm
 
 theorem Layout.totalSize_append (l : Layout Instr Const) (p q : Program Instr Const) :
     l.totalSize (p ++ q) = l.totalSize p + (l.after p).totalSize q := by
-  simp only [Layout.totalSize, Program.splitLabels_body_append, Layout.after]
-  exact l.totalSizeBody_append p.splitLabels.body q.splitLabels.body
+  simpa only [directives_size_apply, Directives.size_append] using
+    congrArg Directives.size (l.apply_program_append p q)
 
 @[simp] theorem Layout.after_nil (l : Layout Instr Const) : l.after [] = l := by
   rcases l with ⟨s, sz, hpos⟩
-  simp [Layout.after, Layout.afterBody, Layout.totalSizeBody, Layout.sizeBeforeBody, Layout.sizeBeforeBodyGo]
+  simp [Layout.after, Layout.shift, Layout.totalSize, Layout.layoutGo]
 
 theorem Layout.after_append (l : Layout Instr Const) (p q : Program Instr Const) :
     l.after (p ++ q) = (l.after p).after q := by
   rcases l with ⟨s, sz, hpos⟩
-  simp only [Layout.after, Layout.afterBody, Program.splitLabels_body_append,
-    Layout.totalSizeBody_append, List.length_append, start_afterBody]
+  simp only [Layout.after, Layout.shift, Program.stripLabels_append, Layout.totalSize_append,
+    List.length_append, start_after]
   congr 1
   · rw [Int64.ofNat_add, ← Int64.add_assoc]
   · funext i; congr 1; omega
@@ -870,58 +562,113 @@ theorem Layout.size_after_lt (l : Layout Instr Const) {p q : Program Instr Const
   rw [l.totalSize_append] at h; omega
 
 @[simp] theorem Layout.addrOf_zero (l : Layout Instr Const) (p : Program Instr Const) :
-    l.addrOf p 0 = l.start :=
-  l.addrOfBody_zero p.splitLabels.body
+    l.addrOf p 0 = l.start := by
+  simp [addrOf, layoutGo]
 
 @[simp] theorem Layout.addrOf_length (l : Layout Instr Const) (p : Program Instr Const) :
-    l.addrOf p p.splitLabels.body.length = @Layout.start _ _ (l.after p) := rfl
-
-theorem Layout.addrOf_succ (l : Layout Instr Const) (p : Program Instr Const)
-    {k : Nat} {cd : CodeDirective Instr Const} (hcd : p.splitLabels.body[k]? = some cd) :
-    l.addrOf p (k + 1) =
-      l.addrOf p k + .ofNat (l.codeDirSize (l.addrOf p k) k cd) :=
-  l.addrOfBody_succ p.splitLabels.body hcd
-
-theorem Layout.addrOf_align (l : Layout Instr Const) (p : Program Instr Const)
-    {k log2Align : Nat} {ex : Bool} (hcd : p.splitLabels.body[k]? = some (.align log2Align ex))
-    (hle : log2Align ≤ 64) :
-    (l.addrOf p (k + 1)).toUInt64.toNat % 2 ^ log2Align = 0 :=
-  l.addrOfBody_align p.splitLabels.body hcd hle
+    l.addrOf p p.stripLabels.length = @Layout.start _ _ (l.after p) := by
+  simp [addrOf, totalSize]
 
 theorem Layout.addrOf_infix (l : Layout Instr Const) (q₁ p q₂ : Program Instr Const)
-    {k : Nat} (hk : k ≤ p.splitLabels.body.length) :
-    l.addrOf (q₁ ++ p ++ q₂) (q₁.splitLabels.body.length + k) = (l.after q₁).addrOf p k := by
-  simp only [Layout.addrOf, Program.splitLabels_body_append, Layout.after]
-  exact l.addrOfBody_infix q₁.splitLabels.body p.splitLabels.body q₂.splitLabels.body hk
+    {k : Nat} (hk : k ≤ p.stripLabels.length) :
+    l.addrOf (q₁ ++ p ++ q₂) (q₁.stripLabels.length + k) = (l.after q₁).addrOf p k := by
+  have htake : (q₁ ++ p ++ q₂).stripLabels.take (q₁.stripLabels.length + k) =
+      q₁.stripLabels ++ p.stripLabels.take k := by
+    rw [Program.stripLabels_append, Program.stripLabels_append, List.append_assoc,
+      List.take_append, List.take_of_length_le (Nat.le_add_right _ _),
+      Nat.add_sub_cancel_left, List.take_append_of_le_length hk]
+  dsimp only [addrOf]
+  rw [htake, l.layoutGo_append, Directives.size_append, Int64.ofNat_add, ← Int64.add_assoc,
+    start_after]
+  congr 2
+  exact congrArg Directives.size
+    (l.layoutGo_shift (l.start + .ofNat (l.totalSize q₁))
+      (l.start + .ofNat (l.totalSize q₁)) q₁.stripLabels.length 0 (p.stripLabels.take k)).symm
 
-theorem Layout.itemAt?_addrOf (l : Layout Instr Const) (p : Program Instr Const)
+theorem Layout.addrOf_succ (l : Layout Instr Const) (p : Program Instr Const)
+    {k : Nat} {d : Directive Instr Const} (hd : p.stripLabels[k]? = some d) :
+    l.addrOf p (k + 1) =
+      l.addrOf p k + .ofNat (l.dirSize (l.addrOf p k) k d) := by
+  have hlt : k < p.stripLabels.length := (List.getElem?_eq_some_iff.mp hd).1
+  have hlen : (p.stripLabels.take k).length = k := List.length_take_of_le (Nat.le_of_lt hlt)
+  have htake : p.stripLabels.take (k + 1) = p.stripLabels.take k ++ [d] := by
+    rw [List.take_add_one, hd, Option.toList_some]
+  dsimp only [addrOf]
+  rw [htake, l.layoutGo_append, Directives.size_append, Int64.ofNat_add, ← Int64.add_assoc,
+    Nat.zero_add, hlen, l.layoutGo_singleton_size]
+
+/-- After stepping past `.align log2Align`, the resulting address is aligned to `2 ^ log2Align` bytes. -/
+theorem Layout.addrOf_align (l : Layout Instr Const) (p : Program Instr Const)
+    {k log2Align : Nat} {ex : Bool} (hd : p.stripLabels[k]? = some (.align log2Align ex))
+    (hle : log2Align ≤ 64) :
+    (l.addrOf p (k + 1)).toUInt64.toNat % 2 ^ log2Align = 0 := by
+  rw [l.addrOf_succ p hd]
+  exact alignPad_aligned (l.addrOf p k) hle
+
+/-- Single-directive lookup in a laid-out program whenever the `k`-th non-label directive
+has positive size. -/
+theorem Layout.directiveAt?_addrOf (l : Layout Instr Const) (p : Program Instr Const)
     (hfit : l.totalSize p < 2 ^ 64)
-    {k : Nat} {cd : CodeDirective Instr Const} (hcd : p.splitLabels.body[k]? = some cd)
-    (hpos : 0 < l.codeDirSize (l.addrOf p k) k cd) :
-    (l p).itemAt? (l.addrOf p k) =
-      some ⟨cd.toItem, l.codeDirSize (l.addrOf p k) k cd, hpos⟩ :=
-  l.itemAt?_addrOfBody p.splitLabels.body (l.labelsOf p.splitLabels) hfit hcd hpos
-
-theorem Layout.itemAt?_infix (l : Layout Instr Const) (q₁ p q₂ : Program Instr Const)
-    (hfit : l.totalSize (q₁ ++ p ++ q₂) < 2 ^ 64)
-    {pc : Int64} {c : SizedItem Instr Const}
-    (h : ((l.after q₁) p).itemAt? pc = some c) :
-    (l (q₁ ++ p ++ q₂)).itemAt? pc = some c := by
-  have hitems : (l (q₁ ++ p ++ q₂)).items =
-      (l q₁).items ++ ((l.after q₁) p).items ++ ((l.after (q₁ ++ p)) q₂).items := by
-    rw [l.apply_items_append, l.apply_items_append]
-  have hfit' : Items.totalSize ((l q₁).items ++ ((l.after q₁) p).items ++ ((l.after (q₁ ++ p)) q₂).items) < 2 ^ 64 := by
-    rw [← hitems, l.items_totalSize_apply]
+    {k : Nat} {d : Directive Instr Const} (hd : p.stripLabels[k]? = some d)
+    (hpos : 0 < l.dirSize (l.addrOf p k) k d) :
+    (l p).directiveAt? (l.addrOf p k) =
+      some { directive := d, size := l.dirSize (l.addrOf p k) k d } := by
+  have hlt : k < p.stripLabels.length := (List.getElem?_eq_some_iff.mp hd).1
+  have hlen : (p.stripLabels.take k).length = k := List.length_take_of_le (Nat.le_of_lt hlt)
+  have hsplit : p.stripLabels = p.stripLabels.take k ++ [d] ++ p.stripLabels.drop (k + 1) := by
+    rw [List.append_assoc, List.singleton_append]
+    have hdrop : p.stripLabels.drop k = d :: p.stripLabels.drop (k + 1) := by
+      rw [List.drop_eq_getElem_cons hlt]
+      simp [(List.getElem?_eq_some_iff.mp hd).2]
+    rw [← hdrop, List.take_append_drop]
+  have hprog : (l p).program =
+      l.layoutGo l.start 0 (p.stripLabels.take k) ++
+        l.layoutGo (l.addrOf p k) k [d] ++
+        l.layoutGo (l.addrOf p k + .ofNat (Directives.size (l.layoutGo (l.addrOf p k) k [d])))
+          (k + 1) (p.stripLabels.drop (k + 1)) := by
+    change l.layoutGo l.start 0 p.stripLabels = _
+    conv => lhs; rw [hsplit]
+    rw [l.layoutGo_append, l.layoutGo_append]
+    simp only [addrOf, List.length_append, List.length_singleton, Nat.zero_add, hlen,
+      Directives.size_append, Int64.ofNat_add, Int64.add_assoc]
+  have hsingle : l.layoutGo (l.addrOf p k) k [d] =
+      [{ directive := d, size := l.dirSize (l.addrOf p k) k d }] := by
+    cases d with
+    | instr i => rfl
+    | label _ | byteArray _ | word _ _ | align _ _ =>
+      simp only [layoutGo, hpos, ↓reduceIte]
+  have hfit' : Directives.size
+      (l.layoutGo l.start 0 (p.stripLabels.take k) ++
+        l.layoutGo (l.addrOf p k) k [d] ++
+        l.layoutGo (l.addrOf p k + .ofNat (Directives.size (l.layoutGo (l.addrOf p k) k [d])))
+          (k + 1) (p.stripLabels.drop (k + 1))) < 2 ^ 64 := by
+    rw [← hprog]
     exact hfit
-  have hstart : ((l.after q₁) p).startAddr = l.start + .ofNat (Items.totalSize (l q₁).items) := by
-    rw [l.items_totalSize_apply]; rfl
-  change ({ startAddr := l.start, items := (l (q₁ ++ p ++ q₂)).items, labels := (l (q₁ ++ p ++ q₂)).labels } :
-      Executable Instr Const).itemAt? pc = some c
-  rw [hitems]
-  refine Executable.itemAt?_infix l.start (l q₁).items ((l.after q₁) p).items ((l.after (q₁ ++ p)) q₂).items
-    ((l.after q₁) p).labels (l (q₁ ++ p ++ q₂)).labels hfit' ?_
-  rw [← hstart]
-  exact h
+  dsimp only [Executable.directiveAt?, Layout.apply]
+  change Directives.at? l.start (l p).program (l.addrOf p k) = _
+  rw [hprog]
+  refine Directives.at?_infix l.start _ _ _
+    (l.layoutGo_pos _ _ _) (l.layoutGo_pos _ _ _) hfit' ?_
+  change Directives.at? (l.addrOf p k) (l.layoutGo (l.addrOf p k) k [d]) (l.addrOf p k) = _
+  rw [hsingle]
+  simp [Directives.at?, Directives.withAddresses]
+
+theorem Layout.directiveAt?_infix (l : Layout Instr Const) (q₁ p q₂ : Program Instr Const)
+    (hfit : l.totalSize (q₁ ++ p ++ q₂) < 2 ^ 64)
+    {pc : Int64} {c : Sized (Directive Instr Const)}
+    (h : ((l.after q₁) p).directiveAt? pc = some c) :
+    (l (q₁ ++ p ++ q₂)).directiveAt? pc = some c := by
+  have hprog : (l (q₁ ++ p ++ q₂)).program =
+      (l q₁).program ++ ((l.after q₁) p).program ++ ((l.after (q₁ ++ p)) q₂).program := by
+    rw [l.apply_program_append, l.apply_program_append]
+  have hfit' : Directives.size
+      ((l q₁).program ++ ((l.after q₁) p).program ++ ((l.after (q₁ ++ p)) q₂).program) < 2 ^ 64 := by
+    rw [← hprog]
+    exact hfit
+  dsimp only [Executable.directiveAt?] at h ⊢
+  rw [apply_startAddr, hprog]
+  exact Directives.at?_infix l.start (l q₁).program ((l.after q₁) p).program
+    ((l.after (q₁ ++ p)) q₂).program (l q₁).program_pos ((l.after q₁) p).program_pos hfit' h
 
 /-! ## Label Resolution & Concatenation Monotonicity -/
 
@@ -966,12 +713,12 @@ private theorem mem_of_lookup_eq_some {α : Type} {xs : List (Label × α)} {lbl
       exact List.mem_cons_self
 
 theorem Layout.label?_eq_some_addrOf [l : Layout Instr Const] (p : Program Instr Const)
-    (lbl : Label) {k : Nat} (hk : p.splitLabels.labels.lookup lbl = some k) :
+    (lbl : Label) {k : Nat} (hk : p.extractLabels.lookup lbl = some k) :
     (l p).labels.label? lbl = some (l.addrOf p k) := by
-  simp [Layout.apply, Layout.labelsOf, Layout.addrOf, hk]
+  simp [Layout.apply, hk]
 
 theorem Layout.label!_eq_addrOf [l : Layout Instr Const] (p : Program Instr Const)
-    (lbl : Label) {k : Nat} (hk : p.splitLabels.labels.lookup lbl = some k) :
+    (lbl : Label) {k : Nat} (hk : p.extractLabels.lookup lbl = some k) :
     (l p).labels.label! lbl = l.addrOf p k := by
   simp [Labels.label!, Layout.label?_eq_some_addrOf p lbl hk]
 
@@ -979,19 +726,19 @@ theorem Layout.labels_sub_infix (l : Layout Instr Const) (q₁ p q₂ : Program 
     (hdisj : ∀ lbl ∈ q₁.definedLabels, lbl ∉ p.definedLabels) :
     ((l.after q₁) p).labels ⊆ (l (q₁ ++ p ++ q₂)).labels := by
   intro lbl a h
-  simp only [Layout.apply, Layout.labelsOf] at h ⊢
+  simp only [Layout.apply] at h ⊢
   obtain ⟨k, hk, rfl⟩ := Option.map_eq_some_iff.mp h
-  have hk_mem : (lbl, k) ∈ p.splitLabels.labels := mem_of_lookup_eq_some hk
-  have hk_le : k ≤ p.splitLabels.body.length := p.splitLabels_labels_le _ hk_mem
-  have hnot_q₁ : lbl ∉ q₁.splitLabels.labels.map Prod.fst := by
+  have hk_mem : (lbl, k) ∈ p.extractLabels := mem_of_lookup_eq_some hk
+  have hk_le : k ≤ p.stripLabels.length := p.extractLabels_le _ hk_mem
+  have hnot_q₁ : lbl ∉ q₁.extractLabels.map Prod.fst := by
     rw [← q₁.definedLabels_eq_map_fst]
     intro hmem
     exact hdisj lbl hmem (by
       rw [p.definedLabels_eq_map_fst]
       exact List.mem_map.mpr ⟨(lbl, k), hk_mem, rfl⟩)
-  have hq₁_none : q₁.splitLabels.labels.lookup lbl = none :=
+  have hq₁_none : q₁.extractLabels.lookup lbl = none :=
     lookup_eq_none_of_not_mem_map_fst hnot_q₁
-  rw [Program.splitLabels_labels_append, Program.splitLabels_labels_append,
+  rw [Program.extractLabels_append, Program.extractLabels_append,
     lookup_append_eq_or, lookup_append_eq_or, hq₁_none, Option.none_or,
     lookup_map_snd, hk]
   simp only [Option.map_some, Option.some_or]
@@ -1041,7 +788,7 @@ theorem FnSpec.forall_nat {e : Executable Instr Const} {fn : Label} {P : Nat →
 /-- Instantiate a `FnSpec` on a concrete program `l p` at the known label index `k` of `fn`. -/
 theorem FnSpec.at_label [l : Layout Instr Const]
     {p : Program Instr Const} {fn : Label} {k : Nat}
-    (hk : p.splitLabels.labels.lookup fn = some k)
+    (hk : p.extractLabels.lookup fn = some k)
     {contract : Int64 → Prop}
     (h : FnSpec (l p) fn contract) :
     contract (l.addrOf p k) := by

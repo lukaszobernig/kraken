@@ -481,12 +481,6 @@ structure Instr where
 
 abbrev Directive := Kraken.Directive Instr ConstExpr
 
-abbrev CodeDirective := Kraken.CodeDirective Instr ConstExpr
-
-abbrev Item := Kraken.Item Instr ConstExpr
-
-abbrev SizedItem := Kraken.SizedItem Instr ConstExpr
-
 abbrev Program := List Directive
 
 abbrev Executable := Kraken.Executable Instr ConstExpr

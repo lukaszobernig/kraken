@@ -10,7 +10,7 @@ Demonstrates:
    `SpecOf "odd"`, `SpecOf "main"`), written over `e : Executable` **before** any
    implementation snippet is defined.
 3. In-place modular verification (`Embedded`, `step_at_sub`) directly in `Eventually (step1 e)`
-   with label-free body indexing (`Program.splitLabels`) and positive-size `Executable.items`.
+   with label-free body indexing (`Program.stripLabels` / `Program.extractLabels`) and positive-size `Executable.program`.
 4. 3-way linking (`whole_prog := caller_prog ++ even_prog ++ odd_prog`) via `Embedded.of_infix`
    and `FnSpec.forall_nat` with zero instruction re-stepping.
 5. Dynamic `.p2align 4` fall-through stepping with zero user-visible `0` vs `> 0` case splitting,

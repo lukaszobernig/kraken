@@ -13,9 +13,9 @@ program.
 /-- Weakest precondition of a `Program` fragment embedded in a host program. -/
 @[expose] public def Program.wp [Host] (p : Program) (Q : MachineData → Prop)
     (E : Int64 → MachineData → Prop) (s : MachineData) : Prop :=
-  ∀ k, p.splitLabels.body.IsInfixAt Host.body k →
+  ∀ k, p.stripLabels.IsInfixAt Host.body k →
     Eventually (step1 Host.exe)
-      (fun st => (st.pc = Host.addrOf (k + p.splitLabels.body.length) ∧ Q st.data) ∨ E st.pc st.data)
+      (fun st => (st.pc = Host.addrOf (k + p.stripLabels.length) ∧ Q st.data) ∨ E st.pc st.data)
       ⟨s, Host.addrOf k⟩
 
 public theorem Program.wp_mono [Host] {p : Program} {Q₁ Q₂ : MachineData → Prop}
@@ -28,13 +28,13 @@ public theorem Program.wp_append [Host] {p₁ p₂ : Program} {Q : MachineData �
     {E : Int64 → MachineData → Prop} {s : MachineData}
     (h : Program.wp p₁ (fun s' => Program.wp p₂ Q E s') E s) : Program.wp (p₁ ++ p₂) Q E s := by
   intro k hk
-  rw [Kraken.Program.splitLabels_body_append] at hk ⊢
+  simp only [List.stripLabels, Kraken.Program.stripLabels_append] at hk ⊢
   obtain ⟨h₁, h₂⟩ := List.IsInfixAt.append hk
   refine eventually_trans _ _ _ _ (h k h₁) ?_
   rintro ⟨s', a⟩ (⟨ha, hrun⟩ | hE)
   · dsimp only at ha hrun
     subst ha
-    refine eventually_trans _ _ _ _ (hrun (k + p₁.splitLabels.body.length) h₂) fun _ hb => Eventually.done _ ?_
+    refine eventually_trans _ _ _ _ (hrun (k + p₁.stripLabels.length) h₂) fun _ hb => Eventually.done _ ?_
     rcases hb with ⟨hend, hq⟩ | hE
     · exact Or.inl ⟨by rw [hend, List.length_append, Nat.add_assoc], hq⟩
     · exact Or.inr hE
@@ -48,9 +48,9 @@ public theorem Program.wp_cons [Host] {d : Directive} {p : Program} {Q : Machine
 section
 variable [Host]
 
-public theorem Host.eventually_of_interp {k : Nat} {cd : CodeDirective} {rest : List CodeDirective}
-    (hdp : (cd :: rest).IsInfixAt Host.body k) {post : @Post MachineState} {s : MachineData}
-    (h : (CodeDirective.interp cd s ⟨Host.addrOf k, Host.addrOf (k + 1)⟩
+public theorem Host.eventually_of_interp {k : Nat} {d : Directive} {rest : Program}
+    (hdp : (d :: rest).IsInfixAt Host.body k) {post : @Post MachineState} {s : MachineData}
+    (h : (d.interp s ⟨Host.addrOf k, Host.addrOf (k + 1)⟩
       (fun s' => .done ⟨s', Host.addrOf (k + 1)⟩) (fun a s' => .done ⟨s', a⟩)).All Host.exe.labels post) :
     Eventually (step1 Host.exe) post ⟨s, Host.addrOf k⟩ :=
   _root_.eventually_of_interp Host.fits hdp.cons.1 h
@@ -63,8 +63,8 @@ Soundness of `Program.wp`: if `p` is a fragment of a `Host` program at body inde
 -/
 public theorem Program.step1_of_wp_at [Host] {p : Program}
     {Q : MachineData → Prop} {E : Int64 → MachineData → Prop} {s : MachineData}
-    {post : @Post MachineState} {k : Nat} (hk : p.splitLabels.body.IsInfixAt Host.body k) (hwp : p.wp Q E s)
-    (hQ : ∀ s', Q s' → post ⟨s', Host.addrOf (k + p.splitLabels.body.length)⟩) (hE : ∀ a s', E a s' → post ⟨s', a⟩) :
+    {post : @Post MachineState} {k : Nat} (hk : p.stripLabels.IsInfixAt Host.body k) (hwp : p.wp Q E s)
+    (hQ : ∀ s', Q s' → post ⟨s', Host.addrOf (k + p.stripLabels.length)⟩) (hE : ∀ a s', E a s' → post ⟨s', a⟩) :
     Eventually (step1 Host.exe) post ⟨s, Host.addrOf k⟩ := by
   refine eventually_weaken _ _ _ _ ?_ (hwp k hk)
   rintro ⟨s', a⟩ (⟨ha, hq⟩ | he)
@@ -75,7 +75,7 @@ public theorem Program.step1_of_wp_at [Host] {p : Program}
 
 public theorem Program.step1_of_wp [Host] {p : Program}
     {Q : MachineData → Prop} {E : Int64 → MachineData → Prop} {s : MachineData}
-    {post : @Post MachineState} (h : p.splitLabels.body.IsInfix Host.body) (hwp : p.wp Q E s)
+    {post : @Post MachineState} (h : p.stripLabels.IsInfix Host.body) (hwp : p.wp Q E s)
     (hQ : ∀ s', Q s' → post ⟨s', endAddr h⟩) (hE : ∀ a s', E a s' → post ⟨s', a⟩) :
     Eventually (step1 Host.exe) post ⟨s, startAddr h⟩ :=
   Program.step1_of_wp_at (List.isInfixAt_infixIdx h) hwp hQ hE

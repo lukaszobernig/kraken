@@ -11,7 +11,7 @@ Demonstrates:
    `SpecOf "odd"`, `SpecOf "main"`) built on `CallX64At` / `RetSlot` / `StackBelow`,
    written purely over `e : Executable` **before** any implementation snippet is defined.
 3. In-place modular verification (`Embedded`, `step_at_sub`) directly inside `Eventually (step1 e)`
-   with label-free body indexing (`Program.splitLabels`) and positive-size `Executable.items`.
+   with label-free body indexing (`Program.stripLabels` / `Program.extractLabels`) and positive-size `Executable.program`.
 4. Linking (`even_odd_ok`, `whole_prog_ok`, `whole_prog_correct`) with zero instruction re-stepping.
 5. Dynamic `.p2align 4` fall-through stepping with zero user-visible `0` vs `> 0` case splitting,
    plus an unconditional 16-byte alignment guarantee for the target label even after concatenation.
